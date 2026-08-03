@@ -1,7 +1,7 @@
 import type { AppConfig } from "../../../types.js";
-import type { PiteasQuoteData, PiteasRateLimitReservation } from "../../../data/index.js";
+import type { PiteasQuoteData, PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import type { buildPhiatDashboard } from "../phiatDashboard.js";
-import type { getPiteasQuote, preparePiteasSwap, ethCall, estimateGas, getFeeData, reservePiteasRateLimitSlots } from "../../../data/index.js";
+import type { getPiteasQuote, preparePiteasSwap, ethCall, estimateGas, getFeeData, reservePiteasRateLimitSlots, markPiteasRateLimitSlotAttempted, markPiteasRateLimitSlotCompleted, releaseUnusedPiteasRateLimitSlots } from "../../../data/index.js";
 
 export interface PhiatShadowBuyInput {
   walletAddress: string;
@@ -20,6 +20,18 @@ export interface PhiatShadowBuyInput {
 }
 
 export type Decision = "WOULD_BUY" | "NEEDS_APPROVAL" | "REJECT";
+export type DecisionClass =
+  | "WOULD_BUY"
+  | "NEEDS_APPROVAL"
+  | "MARKET_POLICY_REJECT"
+  | "TRANSACTION_INTEGRITY_REJECT"
+  | "INSUFFICIENT_FUNDS"
+  | "INFRASTRUCTURE_REQUOTE_REQUIRED";
+export type RetryDisposition =
+  | "NONE"
+  | "NEW_BATCH_AFTER_RATE_LIMIT_RESET"
+  | "NEW_BATCH_WHEN_UPSTREAM_RECOVERS"
+  | "NEW_BATCH_AFTER_APPROVAL_CONFIRMATION";
 export type PolicyStatus = "pass" | "fail" | "not_run" | "warning";
 export type QuoteBatchStatus =
   | "COMPLETE"
@@ -57,6 +69,26 @@ export interface ShadowBuyReason {
   evidence: Record<string, unknown> | null;
 }
 
+export type PiteasUpstreamErrorCode =
+  | "PITEAS_TIMEOUT"
+  | "PITEAS_HTTP_500"
+  | "PITEAS_HTTP_429"
+  | "PITEAS_HTTP_403"
+  | "PITEAS_INVALID_JSON"
+  | "PITEAS_ROUTE_UNAVAILABLE"
+  | "PITEAS_NETWORK_ERROR"
+  | "PITEAS_UNKNOWN_ERROR";
+
+export interface PiteasUpstreamError {
+  code: PiteasUpstreamErrorCode;
+  message: string;
+  httpStatus: number | null;
+  retryable: boolean;
+  likelyTemporaryBlock: boolean;
+  operatorInvestigationRequired: boolean;
+  conservativeRetryAfterMs: number | null;
+}
+
 export interface PolicyCheck {
   status: PolicyStatus;
   code?: string;
@@ -90,6 +122,7 @@ export interface ShadowQuoteSummary {
   routeSignature: string | null;
   responseFingerprint: string | null;
   methodParametersFingerprint: string | null;
+  upstreamError: PiteasUpstreamError | null;
   data?: PiteasQuoteData;
 }
 
@@ -233,8 +266,8 @@ export interface ExecutionTargetsReport {
   executionTargetConfidence: "high" | "medium" | "low";
 }
 
-export type ReferenceValidityStatus = "VALID" | "INVALID" | "UNAVAILABLE";
-export type CandidateFreshnessStatus = "FRESH" | "STALE" | "EXPIRED" | "UNAVAILABLE";
+export type ReferenceValidityStatus = "VALID" | "INVALID" | "UNAVAILABLE" | "NOT_EVALUATED";
+export type CandidateFreshnessStatus = "FRESH" | "STALE" | "EXPIRED" | "UNAVAILABLE" | "NOT_EVALUATED";
 export type SandwichTemporalStatus = "COHERENT" | "TOO_SLOW" | "INCOMPLETE";
 
 export interface ReferenceFreshness {
@@ -308,6 +341,10 @@ export interface GasPolicy {
 
 export interface PhiatShadowBuyCertificate {
   decision: Decision;
+  decisionClass: DecisionClass;
+  economicDecisionReached: boolean;
+  retryable: boolean;
+  retryDisposition: RetryDisposition;
   reasons: ShadowBuyReason[];
   reasonSummaries: string[];
   quoteBatchStatus: QuoteBatchStatus;
@@ -322,8 +359,11 @@ export interface PhiatShadowBuyCertificate {
   referenceAfter: Record<string, unknown> | null;
   referenceDriftPercent: number | null;
   candidateDeteriorationPercent: number | null;
+  actualQuoteCallCount: number;
+  rateLimitLease: PiteasRateLimitLeaseStatus | null;
   referenceBeforeValidityStatus: ReferenceValidityStatus;
   referenceAfterValidityStatus: ReferenceValidityStatus;
+  candidateFreshnessStatus: CandidateFreshnessStatus;
   sandwichTemporalStatus: SandwichTemporalStatus;
   referenceFreshness: ReferenceFreshness | null;
   candidateFreshness: CandidateFreshness | null;
@@ -357,6 +397,9 @@ export interface PhiatShadowBuyDeps {
   estimateGas: typeof estimateGas;
   getFeeData: typeof getFeeData;
   reservePiteasRateLimitSlots: typeof reservePiteasRateLimitSlots;
+  markPiteasRateLimitSlotAttempted: typeof markPiteasRateLimitSlotAttempted;
+  markPiteasRateLimitSlotCompleted: typeof markPiteasRateLimitSlotCompleted;
+  releaseUnusedPiteasRateLimitSlots: typeof releaseUnusedPiteasRateLimitSlots;
   getAllowance: (
     config: AppConfig,
     owner: string,

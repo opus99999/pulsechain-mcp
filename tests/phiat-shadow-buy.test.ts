@@ -6,7 +6,10 @@ import type { AppConfig } from "../src/types.js";
 import {
   PITEAS_ROUTER,
   getPiteasRateLimitBudget,
+  markPiteasRateLimitSlotAttempted,
+  markPiteasRateLimitSlotCompleted,
   preparePiteasSwap,
+  releaseUnusedPiteasRateLimitSlots,
   reservePiteasRateLimitSlots,
   resetPiteasRateLimitForTests,
   type PiteasPrepareResult,
@@ -220,6 +223,14 @@ function defaultQuoteMock(overrides: {
   }) as never;
 }
 
+function piteasFailure(reason: string, status?: number) {
+  return {
+    ok: false,
+    reason,
+    ...(status === undefined ? {} : { status }),
+  };
+}
+
 function routerIntegrity(overrides: Partial<ReturnType<typeof baseRouterIntegrity>> = {}) {
   return vi.fn(async () => ({ ...baseRouterIntegrity(), ...overrides })) as never;
 }
@@ -252,7 +263,9 @@ function deps(overrides: Partial<PhiatShadowBuyDeps> = {}): PhiatShadowBuyDeps {
       dataQuality: { partialFailures: [] },
     })) as never,
     getPiteasQuote: defaultQuoteMock(),
-    preparePiteasSwap,
+    preparePiteasSwap: vi.fn((quote: PiteasQuoteData, options?: { account?: string }) =>
+      preparePiteasSwap(quote, options),
+    ) as never,
     ethCall: vi.fn(async () => ({ data: "0x" })) as never,
     estimateGas: vi.fn(async () => ({ gasEstimate: "250000" })) as never,
     getFeeData: vi.fn(async () => ({
@@ -270,6 +283,9 @@ function deps(overrides: Partial<PhiatShadowBuyDeps> = {}): PhiatShadowBuyDeps {
       resetAt: new Date(NOW + 60_000).toISOString(),
       resetInMs: 60_000,
     })) as never,
+    markPiteasRateLimitSlotAttempted,
+    markPiteasRateLimitSlotCompleted,
+    releaseUnusedPiteasRateLimitSlots,
     getAllowance: vi.fn(async () => AMOUNT_50_RAW),
     getInputBalance: vi.fn(async () => AMOUNT_50_RAW),
     getNativeBalanceWei: vi.fn(async () => "1000000000000000000"),
@@ -318,6 +334,8 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     expect(result.decision).toBe("WOULD_BUY");
     expect(d.getPiteasQuote).toHaveBeenCalledTimes(3);
+    expect(result.actualQuoteCallCount).toBe(3);
+    expect(result.exactAmountEvidence.piteasRequestCountAttempted).toBe(3);
     const calls = vi.mocked(d.getPiteasQuote).mock.calls;
     expect(calls[0]![1]).toMatchObject({ amount: REF_RAW });
     expect(calls[0]![1]).not.toHaveProperty("account");
@@ -402,7 +420,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       new Date(NOW + 15_000).toISOString(),
     );
     expect(reserve).toHaveBeenCalledWith(3, NOW + 15_000);
-    expect(quoteCalls[0]![2]).toMatchObject({ timeoutMs: 20_000 });
+    expect(quoteCalls[0]![2]).toMatchObject({ timeoutMs: 30_000 });
     expect(result.quoteFreshness?.candidateAgeBeforePreparationMs).toBe(0);
   });
 
@@ -472,7 +490,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     const result = await buildPhiatShadowBuy(
       baseConfig,
-      baseInput({ maximumQuoteAgeMs: 30_000, maximumBatchDurationMs: 75_000 }),
+      baseInput({ maximumQuoteAgeMs: 30_000, maximumBatchDurationMs: 90_000 }),
       d,
     );
     const referenceBeforeAgeAtCompletion =
@@ -524,13 +542,13 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
   it("rejects a reference quote whose explicit timestamp was already stale when received", async () => {
     const d = deps({
       getPiteasQuote: defaultQuoteMock({
-        referenceBefore: { quoteTimestamp: new Date(NOW - 76_000).toISOString() },
+        referenceBefore: { quoteTimestamp: new Date(NOW - 91_000).toISOString() },
       }),
     });
 
     const result = await buildPhiatShadowBuy(
       baseConfig,
-      baseInput({ maximumBatchDurationMs: 75_000 }),
+      baseInput({ maximumBatchDurationMs: 90_000 }),
       d,
     );
 
@@ -580,7 +598,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
   it("rejects a slow but complete sandwich with SANDWICH_TOO_SLOW", async () => {
     let currentMs = NOW;
-    const latencies = [20_000, 20_000, 36_000];
+    const latencies = [30_000, 20_000, 41_000];
     const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
       const call = quote.mock.calls.length - 1;
       currentMs += latencies[call] ?? 0;
@@ -606,14 +624,14 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     const result = await buildPhiatShadowBuy(
       baseConfig,
-      baseInput({ maximumBatchDurationMs: 75_000, maximumQuoteAgeMs: 600_000 }),
+      baseInput({ maximumBatchDurationMs: 90_000, maximumQuoteAgeMs: 600_000 }),
       d,
     );
 
     expect(result.decision).toBe("REJECT");
     expect(result.quoteBatchStatus).toBe("COMPLETE");
     expect(result.sandwichTemporalStatus).toBe("TOO_SLOW");
-    expect(result.sandwichTemporalCoherence?.quoteBatchDurationMs).toBe(76_000);
+    expect(result.sandwichTemporalCoherence?.quoteBatchDurationMs).toBe(91_000);
     expect(reasonCodes(result)).toContain("SANDWICH_TOO_SLOW");
   });
 
@@ -779,6 +797,53 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(getPiteasRateLimitBudget(NOW).remaining).toBe(2);
   });
 
+  it("releases unused lease slots without allowing the rolling limit to be exceeded", async () => {
+    const earlyFailureQuote = vi.fn(async () => piteasFailure("Piteas HTTP 500", 500)) as never;
+    const earlyFailureDeps = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: earlyFailureQuote,
+    });
+    const failed = await buildPhiatShadowBuy(baseConfig, baseInput(), earlyFailureDeps);
+
+    expect(failed.actualQuoteCallCount).toBe(1);
+    expect(failed.exactAmountEvidence.releasedUnusedSlots).toBe(2);
+    expect(getPiteasRateLimitBudget(NOW).used).toBe(1);
+
+    const successQuote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = successQuote.mock.calls.length - 1;
+      return {
+        ok: true,
+        source: "piteas",
+        advisory: true,
+        data: quoteData({
+          label: req.account ? "candidate" : call % 3 === 0 ? "reference_before" : "reference_after",
+          amountInRaw: req.amount,
+          outputRaw: req.account ? CANDIDATE_OUTPUT_RAW : REF_OUTPUT_RAW,
+          minRaw: req.account ? CANDIDATE_MIN_RAW : "99000000000000000000",
+          quoteIdentifier: `quote-${call}`,
+          responseFingerprint: `fingerprint-${call}`,
+          blockNumber: String(500 + call),
+        }),
+      };
+    }) as never;
+    const successDeps = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: successQuote,
+    });
+
+    const firstSuccess = await buildPhiatShadowBuy(baseConfig, baseInput(), successDeps);
+    const secondSuccess = await buildPhiatShadowBuy(baseConfig, baseInput(), successDeps);
+    const thirdSuccessAttempt = await buildPhiatShadowBuy(baseConfig, baseInput(), successDeps);
+
+    expect(firstSuccess.decision).toBe("WOULD_BUY");
+    expect(secondSuccess.decision).toBe("WOULD_BUY");
+    expect(thirdSuccessAttempt.decision).toBe("REJECT");
+    expect(reasonCodes(thirdSuccessAttempt)).toContain("RATE_LIMIT_REQUOTE_REQUIRED");
+    expect(successQuote).toHaveBeenCalledTimes(6);
+    expect(getPiteasRateLimitBudget(NOW).used).toBe(7);
+    expect(getPiteasRateLimitBudget(NOW).remaining).toBe(1);
+  });
+
   it("counts failed outbound quote attempts and restores capacity after the rolling window", async () => {
     const d = deps({
       reservePiteasRateLimitSlots,
@@ -787,8 +852,14 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     const failed = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
     expect(failed.decision).toBe("REJECT");
-    expect(d.getPiteasQuote).toHaveBeenCalledTimes(3);
-    expect(getPiteasRateLimitBudget(NOW).remaining).toBe(5);
+    expect(failed.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(failed.actualQuoteCallCount).toBe(1);
+    expect(failed.exactAmountEvidence.reservedSlots).toBe(3);
+    expect(failed.exactAmountEvidence.attemptedSlots).toBe(1);
+    expect(failed.exactAmountEvidence.releasedUnusedSlots).toBe(2);
+    expect(failed.exactAmountEvidence.consumedSlots).toBe(1);
+    expect(d.getPiteasQuote).toHaveBeenCalledTimes(1);
+    expect(getPiteasRateLimitBudget(NOW).remaining).toBe(7);
     expect(getPiteasRateLimitBudget(NOW + 60_001).remaining).toBe(8);
   });
 
@@ -808,7 +879,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
           }),
         };
       }
-      return { ok: false, reason: call === 1 ? "candidate timeout" : "reference-after timeout" };
+      return { ok: false, reason: "candidate timeout" };
     }) as never;
     const d = deps({ getPiteasQuote: quote });
 
@@ -816,13 +887,25 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     const codes = reasonCodes(result);
 
     expect(result.decision).toBe("REJECT");
+    expect(result.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(result.economicDecisionReached).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.retryDisposition).toBe("NEW_BATCH_WHEN_UPSTREAM_RECOVERS");
     expect(result.quoteBatchStatus).toBe("CANDIDATE_FAILED");
-    expect(codes).toContain("CANDIDATE_QUOTE_FAILED");
-    expect(codes).toContain("REFERENCE_AFTER_FAILED");
-    expect(codes).toContain("REFERENCE_DRIFT_UNAVAILABLE");
-    expect(codes).toContain("CANDIDATE_DETERIORATION_UNAVAILABLE");
+    expect(codes).toContain("PITEAS_TIMEOUT");
+    expect(codes).not.toContain("REFERENCE_AFTER_FAILED");
+    expect(codes).not.toContain("REFERENCE_DRIFT_UNAVAILABLE");
+    expect(codes).not.toContain("CANDIDATE_DETERIORATION_UNAVAILABLE");
     expect(codes).not.toContain("REFERENCE_DRIFT_EXCEEDED");
     expect(codes).not.toContain("CANDIDATE_DETERIORATION_EXCEEDED");
+    expect(result.actualQuoteCallCount).toBe(2);
+    expect(quote).toHaveBeenCalledTimes(2);
+    expect(result.referenceBeforeValidityStatus).toBe("VALID");
+    expect(result.referenceAfterValidityStatus).toBe("NOT_EVALUATED");
+    expect(result.candidateFreshnessStatus).toBe("UNAVAILABLE");
+    expect(result.policyChecks.reference_after_quote?.status).toBe("not_run");
+    expect(result.policyChecks.reference_drift?.status).toBe("not_run");
+    expect(result.policyChecks.candidate_deterioration?.status).toBe("not_run");
     expect(result.allowanceStatus).toBe("NOT_EVALUATED");
     expect(result.approvalStatus).toBe("NOT_EVALUATED");
     expect(result.approvalIntent.status).toBe("NOT_EVALUATED");
@@ -831,6 +914,168 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.quoteFreshness?.freshnessAcceptable).toBe(false);
     expect(result.quoteFreshness?.freshnessConfidence).toBe("unavailable");
     expect(result.transactionPrepared).toBe(false);
+  });
+
+  it("short-circuits reference-before timeout after exactly one Piteas call", async () => {
+    const quote = vi.fn(async () => piteasFailure("Piteas request timed out after 30000ms")) as never;
+    const d = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(result.economicDecisionReached).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.retryDisposition).toBe("NEW_BATCH_WHEN_UPSTREAM_RECOVERS");
+    expect(result.quoteBatchStatus).toBe("REFERENCE_BEFORE_FAILED");
+    expect(result.actualQuoteCallCount).toBe(1);
+    expect(quote).toHaveBeenCalledTimes(1);
+    expect(result.referenceBefore?.upstreamError?.code).toBe("PITEAS_TIMEOUT");
+    expect(result.referenceBeforeValidityStatus).toBe("UNAVAILABLE");
+    expect(result.referenceAfterValidityStatus).toBe("NOT_EVALUATED");
+    expect(result.candidateFreshnessStatus).toBe("NOT_EVALUATED");
+    expect(result.exactAmountEvidence.releasedUnusedSlots).toBe(2);
+    expect(result.exactAmountEvidence.consumedSlots).toBe(1);
+    expect(getPiteasRateLimitBudget(NOW).remaining).toBe(7);
+    expect(result.preparedIntent).toBeNull();
+    expect(d.preparePiteasSwap).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits reference-before HTTP 500 after exactly one Piteas call", async () => {
+    const quote = vi.fn(async () => piteasFailure("Piteas HTTP 500", 500)) as never;
+    const d = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.quoteBatchStatus).toBe("REFERENCE_BEFORE_FAILED");
+    expect(result.actualQuoteCallCount).toBe(1);
+    expect(result.referenceBefore?.upstreamError).toMatchObject({
+      code: "PITEAS_HTTP_500",
+      httpStatus: 500,
+      retryable: true,
+    });
+    expect(reasonCodes(result)).toContain("PITEAS_HTTP_500");
+    expect(quote).toHaveBeenCalledTimes(1);
+  });
+
+  it("short-circuits candidate failure after exactly two Piteas calls", async () => {
+    const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = quote.mock.calls.length - 1;
+      if (call === 0) {
+        return {
+          ok: true,
+          source: "piteas",
+          advisory: true,
+          data: quoteData({
+            label: "reference_before",
+            amountInRaw: req.amount,
+            outputRaw: REF_OUTPUT_RAW,
+            minRaw: "99000000000000000000",
+          }),
+        };
+      }
+      return piteasFailure("Piteas HTTP 500", 500);
+    }) as never;
+    const d = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.quoteBatchStatus).toBe("CANDIDATE_FAILED");
+    expect(result.actualQuoteCallCount).toBe(2);
+    expect(result.candidateQuote?.upstreamError?.code).toBe("PITEAS_HTTP_500");
+    expect(result.referenceAfter?.attempted).toBe(false);
+    expect(result.exactAmountEvidence.releasedUnusedSlots).toBe(1);
+    expect(result.exactAmountEvidence.consumedSlots).toBe(2);
+    expect(quote).toHaveBeenCalledTimes(2);
+    expect(d.preparePiteasSwap).not.toHaveBeenCalled();
+  });
+
+  it("classifies reference-after failure after exactly three Piteas calls", async () => {
+    const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = quote.mock.calls.length - 1;
+      if (call === 2) return piteasFailure("Piteas request timed out after 20000ms");
+      return {
+        ok: true,
+        source: "piteas",
+        advisory: true,
+        data: quoteData({
+          label: call === 0 ? "reference_before" : "candidate",
+          amountInRaw: req.amount,
+          outputRaw: req.account ? CANDIDATE_OUTPUT_RAW : REF_OUTPUT_RAW,
+          minRaw: req.account ? CANDIDATE_MIN_RAW : "99000000000000000000",
+        }),
+      };
+    }) as never;
+    const d = deps({
+      reservePiteasRateLimitSlots,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.quoteBatchStatus).toBe("REFERENCE_AFTER_FAILED");
+    expect(result.actualQuoteCallCount).toBe(3);
+    expect(result.referenceAfter?.upstreamError?.code).toBe("PITEAS_TIMEOUT");
+    expect(result.exactAmountEvidence.releasedUnusedSlots).toBe(0);
+    expect(result.exactAmountEvidence.consumedSlots).toBe(3);
+    expect(quote).toHaveBeenCalledTimes(3);
+    expect(d.preparePiteasSwap).not.toHaveBeenCalled();
+  });
+
+  it("normalizes HTTP 429 and HTTP 403 Piteas failures without automatic retries", async () => {
+    const rateLimited = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({ getPiteasQuote: vi.fn(async () => piteasFailure("Piteas HTTP 429", 429)) as never }),
+    );
+    expect(rateLimited.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(rateLimited.retryable).toBe(true);
+    expect(rateLimited.retryDisposition).toBe("NEW_BATCH_AFTER_RATE_LIMIT_RESET");
+    expect(rateLimited.referenceBefore?.upstreamError).toMatchObject({
+      code: "PITEAS_HTTP_429",
+      httpStatus: 429,
+      likelyTemporaryBlock: true,
+      conservativeRetryAfterMs: 3_600_000,
+    });
+    expect(rateLimited.actualQuoteCallCount).toBe(1);
+
+    const forbidden = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({ getPiteasQuote: vi.fn(async () => piteasFailure("Piteas HTTP 403", 403)) as never }),
+    );
+    expect(forbidden.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(forbidden.retryable).toBe(false);
+    expect(forbidden.retryDisposition).toBe("NONE");
+    expect(forbidden.referenceBefore?.upstreamError).toMatchObject({
+      code: "PITEAS_HTTP_403",
+      httpStatus: 403,
+      operatorInvestigationRequired: true,
+    });
+    expect(forbidden.actualQuoteCallCount).toBe(1);
+  });
+
+  it("normalizes invalid JSON Piteas failures as retryable infrastructure failures", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({ getPiteasQuote: vi.fn(async () => piteasFailure("Piteas invalid JSON response")) as never }),
+    );
+
+    expect(result.decisionClass).toBe("INFRASTRUCTURE_REQUOTE_REQUIRED");
+    expect(result.economicDecisionReached).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.referenceBefore?.upstreamError?.code).toBe("PITEAS_INVALID_JSON");
+    expect(result.actualQuoteCallCount).toBe(1);
   });
 
   it("calculates exact-amount deterioration and rejects excessive reference drift", async () => {

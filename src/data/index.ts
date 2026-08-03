@@ -234,10 +234,15 @@ export {
 
 export {
   reservePiteasRateLimitSlots,
+  markPiteasRateLimitSlotAttempted,
+  markPiteasRateLimitSlotCompleted,
+  releaseUnusedPiteasRateLimitSlots,
+  getPiteasRateLimitLeaseStatus,
   getPiteasRateLimitBudget,
   resetPiteasRateLimitForTests,
   type PiteasRateLimitBudget,
   type PiteasRateLimitReservation,
+  type PiteasRateLimitLeaseStatus,
 } from "./piteasRateLimit.js";
 
 export {

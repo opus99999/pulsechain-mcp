@@ -3,11 +3,11 @@ import { formatUnits } from "viem";
 import { isAddress, assertAddress } from "../../../utils/safety.js";
 import { ok } from "../../../utils/result.js";
 import type { AppConfig } from "../../../types.js";
-import { estimateGas, ethCall, getFeeData, getPiteasQuote, preparePiteasSwap, reservePiteasRateLimitSlots } from "../../../data/index.js";
+import { estimateGas, ethCall, getFeeData, getPiteasQuote, markPiteasRateLimitSlotAttempted, markPiteasRateLimitSlotCompleted, preparePiteasSwap, releaseUnusedPiteasRateLimitSlots, reservePiteasRateLimitSlots } from "../../../data/index.js";
 import { registerTool } from "../../define.js";
 import { buildPhiatDashboard } from "../phiatDashboard.js";
 import { phiatShadowBuyInputSchema } from "./schema.js";
-import { DEFAULT_ANALYTICAL_THRESHOLD_PERCENT, DEFAULT_GAS_SAFETY_FACTOR, DEFAULT_MAX_BATCH_DURATION_MS, DEFAULT_MAX_QUOTE_AGE_MS, DEFAULT_OPERATIONAL_THRESHOLD_PERCENT, DEFAULT_REFERENCE_AMOUNT_HUMAN, DEFAULT_REFERENCE_DRIFT_PERCENT, DEFAULT_SLIPPAGE_PERCENT, EUSDC_DECIMALS, MARKET_CONTEXT_TIMEOUT_MS, MAX_BATCH_DURATION_MS, MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS, PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_PER_REQUEST_TIMEOUT_MS, POST_CANDIDATE_VALIDATION_RESERVE_MS, REFERENCE_AFTER_RESERVE_MS, SHADOW_PITEAS_REQUEST_COUNT } from "./constants.js";
+import { CANDIDATE_TIMEOUT_MS, DEFAULT_ANALYTICAL_THRESHOLD_PERCENT, DEFAULT_GAS_SAFETY_FACTOR, DEFAULT_MAX_BATCH_DURATION_MS, DEFAULT_MAX_QUOTE_AGE_MS, DEFAULT_OPERATIONAL_THRESHOLD_PERCENT, DEFAULT_REFERENCE_AMOUNT_HUMAN, DEFAULT_REFERENCE_DRIFT_PERCENT, DEFAULT_SLIPPAGE_PERCENT, EUSDC_DECIMALS, MARKET_CONTEXT_TIMEOUT_MS, MAX_BATCH_DURATION_MS, MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS, PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_PER_REQUEST_TIMEOUT_MS, POST_CANDIDATE_VALIDATION_RESERVE_MS, REFERENCE_AFTER_RESERVE_MS, REFERENCE_AFTER_TIMEOUT_MS, REFERENCE_BEFORE_TIMEOUT_MS, SHADOW_PITEAS_REQUEST_COUNT } from "./constants.js";
 import type { PhiatShadowBuyCertificate, PhiatShadowBuyDeps, PhiatShadowBuyInput, Decision, PolicyCheck, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ShadowQuoteSummary, QuoteFreshness, CandidateFreshness } from "./types.js";
 import { readEusdcAllowance, readAllowance } from "./allowance.js";
 import { readEusdcBalance, readNativeBalance, readBalances } from "./balances.js";
@@ -24,6 +24,7 @@ import { buildExecutionTargets, validateExecutionTargets } from "./executionTarg
 import { buildApprovalIntent } from "./approvalIntent.js";
 import { simulateTransaction } from "./simulation.js";
 import { buildGasPolicy } from "./gasPolicy.js";
+import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 
 const defaultDeps: PhiatShadowBuyDeps = {
   buildPhiatDashboard,
@@ -33,6 +34,9 @@ const defaultDeps: PhiatShadowBuyDeps = {
   estimateGas,
   getFeeData,
   reservePiteasRateLimitSlots,
+  markPiteasRateLimitSlotAttempted,
+  markPiteasRateLimitSlotCompleted,
+  releaseUnusedPiteasRateLimitSlots,
   getAllowance: readEusdcAllowance,
   getInputBalance: readEusdcBalance,
   getNativeBalanceWei: readNativeBalance,
@@ -189,6 +193,9 @@ export async function buildPhiatShadowBuy(
     maximumBatchDurationMs,
     marketContextTimeoutMs: MARKET_CONTEXT_TIMEOUT_MS,
     piteasPerRequestTimeoutMs: PITEAS_PER_REQUEST_TIMEOUT_MS,
+    referenceBeforeTimeoutMs: REFERENCE_BEFORE_TIMEOUT_MS,
+    candidateTimeoutMs: CANDIDATE_TIMEOUT_MS,
+    referenceAfterTimeoutMs: REFERENCE_AFTER_TIMEOUT_MS,
     referenceAfterReserveMs: REFERENCE_AFTER_RESERVE_MS,
     postCandidateValidationReserveMs: POST_CANDIDATE_VALIDATION_RESERVE_MS,
     minimumViablePiteasRequestTimeoutMs: MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS,
@@ -226,6 +233,10 @@ export async function buildPhiatShadowBuy(
     );
     return buildCertificate({
       decision: "REJECT",
+      decisionClass: "INFRASTRUCTURE_REQUOTE_REQUIRED",
+      economicDecisionReached: false,
+      retryable: false,
+      retryDisposition: "NONE",
       reasons,
       quoteBatchStatus,
       allowanceStatus,
@@ -234,6 +245,7 @@ export async function buildPhiatShadowBuy(
       simulationStatus,
       marketContext,
       exactAmountEvidence,
+      actualQuoteCallCount: 0,
       rateLimitBudget: null,
       balances,
       allowance: { ...allowance, requiredAmountRaw: amountInRaw },
@@ -267,6 +279,10 @@ export async function buildPhiatShadowBuy(
     );
     return buildCertificate({
       decision: "REJECT",
+      decisionClass: "INFRASTRUCTURE_REQUOTE_REQUIRED",
+      economicDecisionReached: false,
+      retryable: true,
+      retryDisposition: "NEW_BATCH_AFTER_RATE_LIMIT_RESET",
       reasons,
       quoteBatchStatus,
       allowanceStatus,
@@ -275,6 +291,7 @@ export async function buildPhiatShadowBuy(
       simulationStatus,
       marketContext,
       exactAmountEvidence,
+      actualQuoteCallCount: 0,
       rateLimitBudget,
       balances,
       allowance: { ...allowance, requiredAmountRaw: amountInRaw },
@@ -296,14 +313,16 @@ export async function buildPhiatShadowBuy(
   let candidateQuote: ShadowQuoteSummary;
   let referenceAfter: ShadowQuoteSummary;
   let deadlineInsufficient = false;
+  let rateLimitLease = leaseStatusFromReservation(rateLimitBudget);
 
   const referenceBeforeTimeoutMs = quoteRequestTimeout({
     nowMs: now(),
     batchDeadlineMs: quoteBatchDeadlineMs,
     reservesMs:
-      MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS +
-      REFERENCE_AFTER_RESERVE_MS +
+      CANDIDATE_TIMEOUT_MS +
+      REFERENCE_AFTER_TIMEOUT_MS +
       POST_CANDIDATE_VALIDATION_RESERVE_MS,
+    maxRequestTimeoutMs: REFERENCE_BEFORE_TIMEOUT_MS,
   });
   if (referenceBeforeTimeoutMs === null) {
     deadlineInsufficient = true;
@@ -316,6 +335,7 @@ export async function buildPhiatShadowBuy(
       reason: "INSUFFICIENT_BATCH_DEADLINE",
     });
   } else {
+    rateLimitLease = markLeaseAttempted(deps, rateLimitBudget, rateLimitLease, now());
     referenceBefore = await requestShadowQuote({
       config,
       deps,
@@ -326,16 +346,27 @@ export async function buildPhiatShadowBuy(
       maximumSlippagePercent,
       timeoutMs: referenceBeforeTimeoutMs,
     });
+    rateLimitLease = markLeaseCompleted(deps, rateLimitBudget, rateLimitLease, now());
   }
 
-  const candidateTimeoutMs = deadlineInsufficient
+  const candidateTimeoutMs = deadlineInsufficient || !referenceBefore.ok
     ? null
     : quoteRequestTimeout({
         nowMs: now(),
         batchDeadlineMs: quoteBatchDeadlineMs,
-        reservesMs: REFERENCE_AFTER_RESERVE_MS + POST_CANDIDATE_VALIDATION_RESERVE_MS,
+        reservesMs: REFERENCE_AFTER_TIMEOUT_MS + POST_CANDIDATE_VALIDATION_RESERVE_MS,
+        maxRequestTimeoutMs: CANDIDATE_TIMEOUT_MS,
       });
-  if (candidateTimeoutMs === null) {
+  if (!referenceBefore.ok) {
+    candidateQuote = skippedQuoteSummary({
+      label: "candidate",
+      inputRaw: amountInRaw,
+      inputHuman: amountInHuman,
+      account: walletAddress,
+      atMs: now(),
+      reason: "REFERENCE_BEFORE_FAILED",
+    });
+  } else if (candidateTimeoutMs === null) {
     deadlineInsufficient = true;
     candidateQuote = skippedQuoteSummary({
       label: "candidate",
@@ -346,6 +377,7 @@ export async function buildPhiatShadowBuy(
       reason: "INSUFFICIENT_BATCH_DEADLINE",
     });
   } else {
+    rateLimitLease = markLeaseAttempted(deps, rateLimitBudget, rateLimitLease, now());
     candidateQuote = await requestShadowQuote({
       config,
       deps,
@@ -356,18 +388,38 @@ export async function buildPhiatShadowBuy(
       maximumSlippagePercent,
       timeoutMs: candidateTimeoutMs,
     });
+    rateLimitLease = markLeaseCompleted(deps, rateLimitBudget, rateLimitLease, now());
   }
 
-  const referenceAfterTimeoutMs = deadlineInsufficient
+  const referenceAfterTimeoutMs = deadlineInsufficient || !referenceBefore.ok || !candidateQuote.ok
     ? null
     : quoteRequestTimeout({
         nowMs: now(),
         batchDeadlineMs: quoteBatchDeadlineMs,
         reservesMs: POST_CANDIDATE_VALIDATION_RESERVE_MS,
+        maxRequestTimeoutMs: REFERENCE_AFTER_TIMEOUT_MS,
         candidateQuote,
         maximumQuoteAgeMs,
       });
-  if (referenceAfterTimeoutMs === null) {
+  if (!referenceBefore.ok) {
+    referenceAfter = skippedQuoteSummary({
+      label: "reference_after",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      atMs: now(),
+      reason: "REFERENCE_BEFORE_FAILED",
+    });
+  } else if (!candidateQuote.ok) {
+    referenceAfter = skippedQuoteSummary({
+      label: "reference_after",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      atMs: now(),
+      reason: "CANDIDATE_FAILED",
+    });
+  } else if (referenceAfterTimeoutMs === null) {
     deadlineInsufficient = true;
     referenceAfter = skippedQuoteSummary({
       label: "reference_after",
@@ -378,6 +430,7 @@ export async function buildPhiatShadowBuy(
       reason: "INSUFFICIENT_BATCH_DEADLINE",
     });
   } else {
+    rateLimitLease = markLeaseAttempted(deps, rateLimitBudget, rateLimitLease, now());
     referenceAfter = await requestShadowQuote({
       config,
       deps,
@@ -388,7 +441,9 @@ export async function buildPhiatShadowBuy(
       maximumSlippagePercent,
       timeoutMs: referenceAfterTimeoutMs,
     });
+    rateLimitLease = markLeaseCompleted(deps, rateLimitBudget, rateLimitLease, now());
   }
+  rateLimitLease = releaseUnusedLeaseSlots(deps, rateLimitBudget, rateLimitLease, now());
 
   const batchCompletedMs = now();
   const batchDurationMs = batchCompletedMs - quoteBatchStartedMs;
@@ -402,6 +457,12 @@ export async function buildPhiatShadowBuy(
     candidateQuote,
     referenceAfter,
   ].filter((quote) => quote.attempted).length;
+  exactAmountEvidence.actualQuoteCallCount = exactAmountEvidence.piteasRequestCountAttempted;
+  exactAmountEvidence.reservedSlots = rateLimitLease.reservedSlots + rateLimitLease.releasedUnusedSlots;
+  exactAmountEvidence.attemptedSlots = rateLimitLease.attemptedSlots;
+  exactAmountEvidence.releasedUnusedSlots = rateLimitLease.releasedUnusedSlots;
+  exactAmountEvidence.consumedSlots = rateLimitLease.consumedSlots;
+  exactAmountEvidence.remainingBudget = rateLimitLease.remainingBudget;
 
   quoteBatchStatus = deadlineInsufficient
     ? "DEADLINE_INSUFFICIENT"
@@ -444,32 +505,29 @@ export async function buildPhiatShadowBuy(
   const candidateFreshness = quoteFreshness.candidateFreshness;
   const sandwichTemporalCoherence = quoteFreshness.sandwichTemporalCoherence;
 
-  requireCheck(
+  recordQuotePolicyCheck(
     policyChecks,
     reasons,
     "reference_before_quote",
-    referenceBefore.ok,
+    referenceBefore,
     "Reference-before Piteas quote failed",
-    sanitizeQuote(referenceBefore) ?? undefined,
-    { code: "REFERENCE_BEFORE_FAILED", stage: "quote_batch" },
+    "REFERENCE_BEFORE_FAILED",
   );
-  requireCheck(
+  recordQuotePolicyCheck(
     policyChecks,
     reasons,
     "candidate_quote",
-    candidateQuote.ok,
+    candidateQuote,
     "Exact requested-amount Piteas quote failed",
-    sanitizeQuote(candidateQuote) ?? undefined,
-    { code: "CANDIDATE_QUOTE_FAILED", stage: "quote_batch" },
+    "CANDIDATE_QUOTE_FAILED",
   );
-  requireCheck(
+  recordQuotePolicyCheck(
     policyChecks,
     reasons,
     "reference_after_quote",
-    referenceAfter.ok,
+    referenceAfter,
     "Reference-after Piteas quote failed",
-    sanitizeQuote(referenceAfter) ?? undefined,
-    { code: "REFERENCE_AFTER_FAILED", stage: "quote_batch" },
+    "REFERENCE_AFTER_FAILED",
   );
   if (deadlineInsufficient) {
     failCheck(
@@ -580,6 +638,50 @@ export async function buildPhiatShadowBuy(
     );
   }
 
+  if (quoteBatchStatus !== "COMPLETE") {
+    markQuoteDerivedChecksNotRun(policyChecks, {
+      referenceDriftPercent,
+      candidateDeteriorationPercent,
+      operationalThresholdPercent,
+      maximumReferenceDriftPercent,
+    });
+    return buildCertificate({
+      decision: "REJECT",
+      decisionClass: "INFRASTRUCTURE_REQUOTE_REQUIRED",
+      economicDecisionReached: false,
+      retryable: retryableIncompleteQuoteBatch(referenceBefore, candidateQuote, referenceAfter),
+      retryDisposition: retryDispositionForIncompleteQuoteBatch(referenceBefore, candidateQuote, referenceAfter),
+      reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
+      marketContext,
+      exactAmountEvidence,
+      referenceBefore,
+      candidateQuote,
+      referenceAfter,
+      referenceDriftPercent,
+      candidateDeteriorationPercent,
+      actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+      rateLimitLease,
+      referenceFreshness,
+      candidateFreshness,
+      sandwichTemporalCoherence,
+      quoteFreshness,
+      rateLimitBudget,
+      balances,
+      allowance: { ...allowance, requiredAmountRaw: amountInRaw },
+      approvalIntent,
+      routerIntegrity,
+      executionTargets,
+      simulation,
+      gasPolicy,
+      policyChecks,
+    });
+  }
+
   if (referenceDriftPercent === null) {
     failCheck(
       policyChecks,
@@ -658,6 +760,8 @@ export async function buildPhiatShadowBuy(
       referenceAfter,
       referenceDriftPercent,
       candidateDeteriorationPercent,
+      actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+      rateLimitLease,
       referenceFreshness,
       candidateFreshness,
       sandwichTemporalCoherence,
@@ -711,6 +815,8 @@ export async function buildPhiatShadowBuy(
       referenceAfter,
       referenceDriftPercent,
       candidateDeteriorationPercent,
+      actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+      rateLimitLease,
       referenceFreshness,
       candidateFreshness,
       sandwichTemporalCoherence,
@@ -756,6 +862,8 @@ export async function buildPhiatShadowBuy(
       referenceAfter,
       referenceDriftPercent,
       candidateDeteriorationPercent,
+      actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+      rateLimitLease,
       referenceFreshness,
       candidateFreshness,
       sandwichTemporalCoherence,
@@ -797,6 +905,8 @@ export async function buildPhiatShadowBuy(
       referenceAfter,
       referenceDriftPercent,
       candidateDeteriorationPercent,
+      actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+      rateLimitLease,
       referenceFreshness,
       candidateFreshness,
       sandwichTemporalCoherence,
@@ -1258,6 +1368,8 @@ export async function buildPhiatShadowBuy(
     referenceAfter,
     referenceDriftPercent,
     candidateDeteriorationPercent,
+    actualQuoteCallCount: Number(exactAmountEvidence.actualQuoteCallCount ?? 0),
+    rateLimitLease,
     referenceFreshness,
     candidateFreshness,
     sandwichTemporalCoherence,
@@ -1281,8 +1393,9 @@ export async function buildPhiatShadowBuy(
 
 function requiredInitialBatchBudgetMs(): number {
   return (
-    PITEAS_PER_REQUEST_TIMEOUT_MS * 2 +
-    REFERENCE_AFTER_RESERVE_MS +
+    REFERENCE_BEFORE_TIMEOUT_MS +
+    CANDIDATE_TIMEOUT_MS +
+    REFERENCE_AFTER_TIMEOUT_MS +
     POST_CANDIDATE_VALIDATION_RESERVE_MS
   );
 }
@@ -1295,6 +1408,7 @@ function quoteRequestTimeout(args: {
   nowMs: number;
   batchDeadlineMs: number;
   reservesMs: number;
+  maxRequestTimeoutMs: number;
   candidateQuote?: ShadowQuoteSummary;
   maximumQuoteAgeMs?: number;
 }): number | null {
@@ -1305,7 +1419,7 @@ function quoteRequestTimeout(args: {
       : Number.POSITIVE_INFINITY;
   const availableMs = Math.min(batchRemainingMs, candidateRemainingMs) - args.reservesMs;
   if (availableMs < MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS) return null;
-  return Math.min(PITEAS_PER_REQUEST_TIMEOUT_MS, availableMs);
+  return Math.min(args.maxRequestTimeoutMs, availableMs);
 }
 
 function candidateAgeMs(candidateQuote: ShadowQuoteSummary, nowMs: number): number | null {
@@ -1332,6 +1446,166 @@ function markCandidateFreshnessFailure(
   quoteFreshness.candidateAcceptable = false;
   quoteFreshness.freshnessAcceptable = false;
   quoteFreshness.reason = message;
+}
+
+function recordQuotePolicyCheck(
+  policyChecks: Record<string, PolicyCheck>,
+  reasons: ShadowBuyReason[],
+  name: string,
+  quote: ShadowQuoteSummary,
+  message: string,
+  fallbackCode: string,
+): void {
+  const details = sanitizeQuote(quote) ?? undefined;
+  if (quote.ok) {
+    passCheck(policyChecks, name, details);
+    return;
+  }
+  if (!quote.attempted) {
+    policyChecks[name] = {
+      status: "not_run",
+      code: fallbackCode,
+      stage: "quote_batch",
+      reason: quote.error ?? "Quote was not evaluated because an earlier required quote failed.",
+      ...(details ? { details } : {}),
+    };
+    return;
+  }
+  const upstream = quote.upstreamError;
+  const reason = upstream
+    ? `${message}: ${upstream.message}`
+    : message;
+  failCheck(policyChecks, reasons, name, reason, details, {
+    code: upstream?.code ?? fallbackCode,
+    stage: "quote_batch",
+  });
+}
+
+function markQuoteDerivedChecksNotRun(
+  policyChecks: Record<string, PolicyCheck>,
+  details: {
+    referenceDriftPercent: number | null;
+    candidateDeteriorationPercent: number | null;
+    operationalThresholdPercent: number;
+    maximumReferenceDriftPercent: number;
+  },
+): void {
+  policyChecks.reference_drift = {
+    status: "not_run",
+    code: "REFERENCE_DRIFT_NOT_EVALUATED",
+    stage: "quote_batch",
+    reason: "Reference drift was not evaluated because the required quote sandwich did not complete.",
+    details,
+  };
+  policyChecks.candidate_deterioration = {
+    status: "not_run",
+    code: "CANDIDATE_DETERIORATION_NOT_EVALUATED",
+    stage: "quote_batch",
+    reason: "Candidate deterioration was not evaluated because the required quote sandwich did not complete.",
+    details,
+  };
+  policyChecks.candidate_positive_output = {
+    status: "not_run",
+    code: "CANDIDATE_OUTPUT_NOT_EVALUATED",
+    stage: "quote_batch",
+    reason: "Candidate output was not evaluated because the exact candidate quote was unavailable.",
+    details,
+  };
+}
+
+function retryableIncompleteQuoteBatch(...quotes: ShadowQuoteSummary[]): boolean {
+  const attemptedFailures = quotes.filter((quote) => quote.attempted && !quote.ok);
+  if (attemptedFailures.length === 0) return false;
+  return attemptedFailures.some((quote) => quote.upstreamError?.retryable !== false);
+}
+
+function retryDispositionForIncompleteQuoteBatch(
+  ...quotes: ShadowQuoteSummary[]
+): PhiatShadowBuyCertificate["retryDisposition"] {
+  const upstreamErrors = quotes
+    .map((quote) => quote.upstreamError)
+    .filter((error): error is NonNullable<typeof error> => Boolean(error));
+  const upstreamCodes = upstreamErrors.map((error) => error.code);
+  if (upstreamCodes.includes("PITEAS_HTTP_429")) return "NEW_BATCH_AFTER_RATE_LIMIT_RESET";
+  if (upstreamErrors.some((error) => error.operatorInvestigationRequired)) return "NONE";
+  if (upstreamCodes.length > 0) return "NEW_BATCH_WHEN_UPSTREAM_RECOVERS";
+  return "NONE";
+}
+
+function leaseStatusFromReservation(
+  reservation: Extract<PiteasRateLimitReservation, { ok: true }>,
+): PiteasRateLimitLeaseStatus {
+  return {
+    limit: reservation.limit,
+    windowMs: reservation.windowMs,
+    used: reservation.used,
+    remaining: reservation.remaining,
+    resetAt: reservation.resetAt,
+    resetInMs: reservation.resetInMs,
+    leaseId: reservation.leaseId ?? "untracked_test_lease",
+    reservedSlots: reservation.reservedSlots ?? reservation.reserved,
+    attemptedSlots: reservation.attemptedSlots ?? 0,
+    completedSlots: reservation.completedSlots ?? 0,
+    releasedUnusedSlots: reservation.releasedUnusedSlots ?? 0,
+    consumedSlots: reservation.consumedSlots ?? 0,
+    remainingBudget: reservation.remaining,
+  };
+}
+
+function markLeaseAttempted(
+  deps: PhiatShadowBuyDeps,
+  reservation: Extract<PiteasRateLimitReservation, { ok: true }>,
+  current: PiteasRateLimitLeaseStatus,
+  nowMs: number,
+): PiteasRateLimitLeaseStatus {
+  if (reservation.leaseId && reservation.leaseId !== "untracked_test_lease") {
+    return deps.markPiteasRateLimitSlotAttempted(reservation.leaseId, nowMs);
+  }
+  const attemptedSlots = current.attemptedSlots + 1;
+  return {
+    ...current,
+    attemptedSlots,
+    consumedSlots: attemptedSlots,
+    remainingBudget: Math.max(0, current.limit - attemptedSlots),
+  };
+}
+
+function markLeaseCompleted(
+  deps: PhiatShadowBuyDeps,
+  reservation: Extract<PiteasRateLimitReservation, { ok: true }>,
+  current: PiteasRateLimitLeaseStatus,
+  nowMs: number,
+): PiteasRateLimitLeaseStatus {
+  if (reservation.leaseId && reservation.leaseId !== "untracked_test_lease") {
+    return deps.markPiteasRateLimitSlotCompleted(reservation.leaseId, nowMs);
+  }
+  return {
+    ...current,
+    completedSlots: Math.min(current.attemptedSlots, current.completedSlots + 1),
+  };
+}
+
+function releaseUnusedLeaseSlots(
+  deps: PhiatShadowBuyDeps,
+  reservation: Extract<PiteasRateLimitReservation, { ok: true }>,
+  current: PiteasRateLimitLeaseStatus,
+  nowMs: number,
+): PiteasRateLimitLeaseStatus {
+  if (reservation.leaseId && reservation.leaseId !== "untracked_test_lease") {
+    const released = deps.releaseUnusedPiteasRateLimitSlots(reservation.leaseId, nowMs);
+    return {
+      ...released,
+      remainingBudget: released.remaining,
+    };
+  }
+  const releasedUnusedSlots = Math.max(0, current.reservedSlots - current.attemptedSlots);
+  return {
+    ...current,
+    reservedSlots: current.attemptedSlots,
+    releasedUnusedSlots,
+    consumedSlots: current.attemptedSlots,
+    remainingBudget: Math.min(current.limit, current.remainingBudget + releasedUnusedSlots),
+  };
 }
 
 function routerStatusFromChecks(

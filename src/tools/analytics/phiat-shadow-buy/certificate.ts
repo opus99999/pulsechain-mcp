@@ -1,10 +1,14 @@
 import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence } from "./types.js";
-import type { PiteasRateLimitReservation } from "../../../data/index.js";
+import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
 
 export function buildCertificate(args: {
   decision: Decision;
+  decisionClass?: PhiatShadowBuyCertificate["decisionClass"];
+  economicDecisionReached?: boolean;
+  retryable?: boolean;
+  retryDisposition?: PhiatShadowBuyCertificate["retryDisposition"];
   reasons: ShadowBuyReason[];
   quoteBatchStatus?: QuoteBatchStatus;
   allowanceStatus?: AllowanceStatus;
@@ -18,6 +22,8 @@ export function buildCertificate(args: {
   referenceAfter?: ShadowQuoteSummary | null;
   referenceDriftPercent?: number | null;
   candidateDeteriorationPercent?: number | null;
+  actualQuoteCallCount?: number;
+  rateLimitLease?: PiteasRateLimitLeaseStatus | null;
   referenceFreshness?: ReferenceFreshness | null;
   candidateFreshness?: CandidateFreshness | null;
   sandwichTemporalCoherence?: SandwichTemporalCoherence | null;
@@ -39,6 +45,11 @@ export function buildCertificate(args: {
 }): PhiatShadowBuyCertificate {
   return {
     decision: args.decision,
+    decisionClass: args.decisionClass ?? classifyDecision(args.decision, args.reasons),
+    economicDecisionReached:
+      args.economicDecisionReached ?? defaultEconomicDecisionReached(args.decision, args.reasons),
+    retryable: args.retryable ?? defaultRetryable(args.reasons),
+    retryDisposition: args.retryDisposition ?? defaultRetryDisposition(args.decision, args.reasons),
     reasons: args.reasons,
     reasonSummaries: args.reasons.map((reason) => reason.message),
     quoteBatchStatus: args.quoteBatchStatus ?? "DEADLINE_INSUFFICIENT",
@@ -53,8 +64,15 @@ export function buildCertificate(args: {
     referenceAfter: sanitizeQuote(args.referenceAfter ?? null),
     referenceDriftPercent: args.referenceDriftPercent ?? null,
     candidateDeteriorationPercent: args.candidateDeteriorationPercent ?? null,
+    actualQuoteCallCount: args.actualQuoteCallCount ?? countAttemptedQuotes([
+      args.referenceBefore ?? null,
+      args.candidateQuote ?? null,
+      args.referenceAfter ?? null,
+    ]),
+    rateLimitLease: args.rateLimitLease ?? null,
     referenceBeforeValidityStatus: args.referenceFreshness?.beforeStatus ?? "UNAVAILABLE",
     referenceAfterValidityStatus: args.referenceFreshness?.afterStatus ?? "UNAVAILABLE",
+    candidateFreshnessStatus: args.candidateFreshness?.status ?? "UNAVAILABLE",
     sandwichTemporalStatus: args.sandwichTemporalCoherence?.status ?? "INCOMPLETE",
     referenceFreshness: args.referenceFreshness ?? null,
     candidateFreshness: args.candidateFreshness ?? null,
@@ -85,6 +103,57 @@ export function sanitizeQuote(quote: ShadowQuoteSummary | null): Record<string, 
   if (!quote) return null;
   const { data: _data, ...safe } = quote;
   return safe;
+}
+
+function countAttemptedQuotes(quotes: Array<ShadowQuoteSummary | null>): number {
+  return quotes.filter((quote) => quote?.attempted === true).length;
+}
+
+function classifyDecision(
+  decision: Decision,
+  reasons: ShadowBuyReason[],
+): PhiatShadowBuyCertificate["decisionClass"] {
+  if (decision === "WOULD_BUY") return "WOULD_BUY";
+  if (decision === "NEEDS_APPROVAL") return "NEEDS_APPROVAL";
+  const codes = new Set(reasons.map((reason) => reason.code));
+  if (
+    [...codes].some((code) => code.startsWith("PITEAS_")) ||
+    codes.has("RATE_LIMIT_REQUOTE_REQUIRED") ||
+    codes.has("QUOTE_BATCH_INCOMPLETE")
+  ) {
+    return "INFRASTRUCTURE_REQUOTE_REQUIRED";
+  }
+  if (codes.has("INSUFFICIENT_INPUT_BALANCE") || codes.has("INSUFFICIENT_GAS_BALANCE")) {
+    return "INSUFFICIENT_FUNDS";
+  }
+  if (codes.has("REFERENCE_DRIFT_EXCEEDED") || codes.has("CANDIDATE_DETERIORATION_EXCEEDED")) {
+    return "MARKET_POLICY_REJECT";
+  }
+  return "TRANSACTION_INTEGRITY_REJECT";
+}
+
+function defaultEconomicDecisionReached(decision: Decision, reasons: ShadowBuyReason[]): boolean {
+  if (decision === "WOULD_BUY" || decision === "NEEDS_APPROVAL") return true;
+  return classifyDecision(decision, reasons) !== "INFRASTRUCTURE_REQUOTE_REQUIRED";
+}
+
+function defaultRetryable(reasons: ShadowBuyReason[]): boolean {
+  return classifyDecision("REJECT", reasons) === "INFRASTRUCTURE_REQUOTE_REQUIRED";
+}
+
+function defaultRetryDisposition(
+  decision: Decision,
+  reasons: ShadowBuyReason[],
+): PhiatShadowBuyCertificate["retryDisposition"] {
+  if (decision === "NEEDS_APPROVAL") return "NEW_BATCH_AFTER_APPROVAL_CONFIRMATION";
+  const codes = new Set(reasons.map((reason) => reason.code));
+  if (codes.has("RATE_LIMIT_REQUOTE_REQUIRED") || codes.has("PITEAS_HTTP_429")) {
+    return "NEW_BATCH_AFTER_RATE_LIMIT_RESET";
+  }
+  if ([...codes].some((code) => code.startsWith("PITEAS_")) || codes.has("QUOTE_BATCH_INCOMPLETE")) {
+    return "NEW_BATCH_WHEN_UPSTREAM_RECOVERS";
+  }
+  return "NONE";
 }
 
 export function emptySimulation(): SimulationResult {

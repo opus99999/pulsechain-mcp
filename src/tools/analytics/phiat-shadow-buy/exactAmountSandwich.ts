@@ -1,7 +1,7 @@
 import type { AppConfig } from "../../../types.js";
 import type { PiteasQuoteData, PiteasQuoteResult } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PHIAT_DECIMALS } from "./constants.js";
-import type { PhiatShadowBuyDeps, ShadowQuoteSummary, QuoteFreshness, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence } from "./types.js";
+import type { PhiatShadowBuyDeps, ShadowQuoteSummary, QuoteFreshness, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, PiteasUpstreamError } from "./types.js";
 import { averagePriceDecimal } from "./deterioration.js";
 import { fingerprint, formatRawToken, isPositiveIntegerString, nonEmptyDifferent, parseTimestampMs, quoteFingerprint } from "./inputNormalization.js";
 
@@ -75,7 +75,7 @@ export async function requestShadowQuote(args: {
     return failedQuoteSummary(args, requestStartedMs, receivedMs, err);
   }
   const responseReceivedMs = args.deps.nowMs?.() ?? Date.now();
-  if (!result.ok) return failedQuoteSummary(args, requestStartedMs, responseReceivedMs, result.reason);
+  if (!result.ok) return failedQuoteSummary(args, requestStartedMs, responseReceivedMs, result);
   return quoteSummary(args, requestStartedMs, responseReceivedMs, result.data);
 }
 
@@ -116,6 +116,7 @@ function quoteSummary(
     routeSignature: data.route?.signature ?? null,
     responseFingerprint: quoteFingerprint(data),
     methodParametersFingerprint: fingerprint(data.methodParameters),
+    upstreamError: null,
     data,
   };
 }
@@ -143,7 +144,7 @@ function failedQuoteSummary(
     responseReceivedAt: new Date(responseReceivedMs).toISOString(),
     latencyMs: responseReceivedMs - requestStartedMs,
     ok: false,
-    error: err instanceof Error ? err.message : String(err),
+    error: safeErrorMessage(err),
     outputRaw: null,
     outputHuman: null,
     minimumOutputRaw: null,
@@ -157,6 +158,7 @@ function failedQuoteSummary(
     routeSignature: null,
     responseFingerprint: null,
     methodParametersFingerprint: null,
+    upstreamError: normalizePiteasUpstreamError(err),
   };
 }
 
@@ -193,6 +195,7 @@ export function skippedQuoteSummary(args: {
     routeSignature: null,
     responseFingerprint: null,
     methodParametersFingerprint: null,
+    upstreamError: null,
   };
 }
 
@@ -339,6 +342,7 @@ function referenceValidity(
   expectedInputRaw: string,
   maximumTimestampAgeAtReceiptMs: number,
 ): { status: ReferenceFreshness["beforeStatus"]; reason: string | null; warnings: string[] } {
+  if (!quote.attempted) return { status: "NOT_EVALUATED", reason: `${quote.label} not evaluated`, warnings: [] };
   if (!quote.ok) return { status: "UNAVAILABLE", reason: `${quote.label} failed`, warnings: [] };
   const warnings: string[] = [];
   if (quote.inputRaw !== expectedInputRaw) {
@@ -375,6 +379,7 @@ function candidateFreshnessOk(
   nowMs: number,
   maximumQuoteAgeMs: number,
 ): { status: CandidateFreshness["status"]; ageMs: number | null; reason: string | null } {
+  if (!quote.attempted) return { status: "NOT_EVALUATED", ageMs: null, reason: `${quote.label} not evaluated` };
   if (!quote.ok) return { status: "UNAVAILABLE", ageMs: null, reason: `${quote.label} failed` };
   const expiresAtMs = parseTimestampMs(quote.expiresAt);
   const responseMs = Date.parse(quote.responseReceivedAt);
@@ -386,6 +391,61 @@ function candidateFreshnessOk(
     return { status: "STALE", ageMs, reason: `${quote.label} quote is stale` };
   }
   return { status: "FRESH", ageMs, reason: null };
+}
+
+export function normalizePiteasUpstreamError(err: unknown): PiteasUpstreamError {
+  const message = safeErrorMessage(err);
+  const httpStatus = typeof err === "object" && err !== null && "status" in err
+    ? numberOrNull((err as { status?: unknown }).status)
+    : extractHttpStatus(message);
+  const lower = message.toLowerCase();
+  const code: PiteasUpstreamError["code"] =
+    lower.includes("timed out") || lower.includes("timeout")
+      ? "PITEAS_TIMEOUT"
+      : httpStatus === 429
+        ? "PITEAS_HTTP_429"
+        : httpStatus === 403
+          ? "PITEAS_HTTP_403"
+          : httpStatus !== null && httpStatus >= 500
+            ? "PITEAS_HTTP_500"
+            : lower.includes("invalid json")
+              ? "PITEAS_INVALID_JSON"
+              : lower.includes("route") &&
+                  (lower.includes("unavailable") || lower.includes("not found") || lower.includes("no route"))
+                ? "PITEAS_ROUTE_UNAVAILABLE"
+                : lower.includes("network") ||
+                    lower.includes("fetch failed") ||
+                    lower.includes("econn") ||
+                    lower.includes("enotfound")
+                  ? "PITEAS_NETWORK_ERROR"
+                  : "PITEAS_UNKNOWN_ERROR";
+  return {
+    code,
+    message,
+    httpStatus,
+    retryable: code !== "PITEAS_ROUTE_UNAVAILABLE" && code !== "PITEAS_HTTP_403",
+    likelyTemporaryBlock: code === "PITEAS_HTTP_429",
+    operatorInvestigationRequired: code === "PITEAS_HTTP_403",
+    conservativeRetryAfterMs: code === "PITEAS_HTTP_429" ? 60 * 60 * 1000 : null,
+  };
+}
+
+function safeErrorMessage(err: unknown): string {
+  if (typeof err === "object" && err !== null && "reason" in err) {
+    const reason = (err as { reason?: unknown }).reason;
+    if (typeof reason === "string" && reason.length > 0) return reason;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function extractHttpStatus(message: string): number | null {
+  const match = /\bHTTP\s+(\d{3})\b/i.exec(message);
+  return match ? numberOrNull(match[1]) : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function withRealTimeout<T>(
