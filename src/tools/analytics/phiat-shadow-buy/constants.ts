@@ -3,6 +3,9 @@ import { PITEAS_ROUTER as PITEAS_ROUTER_ADDRESS } from "../../../data/index.js";
 
 export { erc20ApproveAbi } from "../../chain/abis.js";
 export const PITEAS_ROUTER = PITEAS_ROUTER_ADDRESS;
+export const PITEAS_SWAP_CANONICAL_SIGNATURE =
+  "swap((address,address,address,uint256,uint256),bytes)" as const;
+export const PITEAS_SWAP_SELECTOR = "0x8218b58f" as const;
 
 export const PHIAT_SHADOW_BUY_TOKEN_OUT =
   "0x96e035ae0905efac8f733f133462f971cfa45db1" as const;
@@ -84,5 +87,28 @@ export const erc20AllowanceAbi = [
       { name: "spender", type: "address" },
     ],
     outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+export const piteasRouterSwapAbi = [
+  {
+    type: "function",
+    name: "swap",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "detail",
+        type: "tuple",
+        components: [
+          { name: "srcToken", type: "address" },
+          { name: "destToken", type: "address" },
+          { name: "destAccount", type: "address" },
+          { name: "srcAmount", type: "uint256" },
+          { name: "destMinAmount", type: "uint256" },
+        ],
+      },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [{ name: "returnAmount", type: "uint256" }],
   },
 ] as const;

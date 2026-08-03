@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { encodeFunctionData } from "viem";
+import { encodeFunctionData, keccak256, toFunctionSelector } from "viem";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AppConfig } from "../src/types.js";
 import {
@@ -20,9 +20,13 @@ import {
   decodeShadowBuyCalldata,
   PHIAT_SHADOW_BUY_TOKEN_IN,
   PHIAT_SHADOW_BUY_TOKEN_OUT,
+  PITEAS_SWAP_CANONICAL_SIGNATURE,
+  PITEAS_SWAP_SELECTOR,
   registerPhiatShadowBuyTool,
+  piteasRouterSwapAbi,
   type PhiatShadowBuyDeps,
 } from "../src/tools/analytics/phiatShadowBuy.js";
+import { readRouterIntegrity } from "../src/tools/analytics/phiat-shadow-buy/routerIntegrity.js";
 
 const WALLET = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
@@ -34,27 +38,11 @@ const AMOUNT_50_RAW = "50000000";
 const REF_OUTPUT_RAW = "100000000000000000000";
 const CANDIDATE_OUTPUT_RAW = "980000000000000000000";
 const CANDIDATE_MIN_RAW = "970000000000000000000";
+const TEST_DEADLINE_SECONDS = BigInt(Math.floor((NOW + 60_000) / 1000));
 const APPROVED_HASH =
   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const UNAPPROVED_HASH =
   "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-const shadowSwapAbi = [
-  {
-    type: "function",
-    name: "swap",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "tokenIn", type: "address" },
-      { name: "tokenOut", type: "address" },
-      { name: "amountIn", type: "uint256" },
-      { name: "amountOutMin", type: "uint256" },
-      { name: "recipient", type: "address" },
-      { name: "deadline", type: "uint256" },
-    ],
-    outputs: [],
-  },
-] as const;
 
 const erc20ApproveAbi = [
   {
@@ -98,21 +86,69 @@ function swapCalldata(overrides: {
   tokenOut?: string;
   amountInRaw?: string;
   minOutputRaw?: string;
+  outputRaw?: string;
   recipient?: string;
   deadline?: bigint;
+  routePayloads?: `0x${string}`[];
+  routeDestinationToken?: string;
 } = {}): `0x${string}` {
+  const tokenOut = overrides.tokenOut ?? PHIAT_SHADOW_BUY_TOKEN_OUT;
   return encodeFunctionData({
-    abi: shadowSwapAbi,
+    abi: piteasRouterSwapAbi,
     functionName: "swap",
     args: [
-      (overrides.tokenIn ?? PHIAT_SHADOW_BUY_TOKEN_IN) as `0x${string}`,
-      (overrides.tokenOut ?? PHIAT_SHADOW_BUY_TOKEN_OUT) as `0x${string}`,
-      BigInt(overrides.amountInRaw ?? AMOUNT_50_RAW),
-      BigInt(overrides.minOutputRaw ?? CANDIDATE_MIN_RAW),
-      (overrides.recipient ?? WALLET) as `0x${string}`,
-      overrides.deadline ?? 1_808_000_000n,
+      {
+        srcToken: (overrides.tokenIn ?? PHIAT_SHADOW_BUY_TOKEN_IN) as `0x${string}`,
+        destToken: tokenOut as `0x${string}`,
+        destAccount: (overrides.recipient ?? WALLET) as `0x${string}`,
+        srcAmount: BigInt(overrides.amountInRaw ?? AMOUNT_50_RAW),
+        destMinAmount: BigInt(overrides.minOutputRaw ?? CANDIDATE_MIN_RAW),
+      },
+      piteasRouteData({
+        destinationToken: overrides.routeDestinationToken ?? tokenOut,
+        expectedOutputRaw: overrides.outputRaw ?? CANDIDATE_OUTPUT_RAW,
+        deadline: overrides.deadline ?? TEST_DEADLINE_SECONDS,
+        payloads: overrides.routePayloads ?? [],
+      }),
     ],
   });
+}
+
+function piteasRouteData(args: {
+  destinationToken?: string;
+  expectedOutputRaw?: string;
+  deadline?: bigint;
+  payloads?: `0x${string}`[];
+} = {}): `0x${string}` {
+  const payloads = args.payloads ?? [];
+  const cumulativeEnds: bigint[] = [];
+  let runningBytes = 0n;
+  for (const payload of payloads) {
+    const bytes = BigInt((payload.length - 2) / 2);
+    runningBytes += bytes;
+    cumulativeEnds.push(runningBytes);
+  }
+  const words = [
+    addressWord(args.destinationToken ?? PHIAT_SHADOW_BUY_TOKEN_OUT),
+    uintWord(BigInt(args.expectedOutputRaw ?? CANDIDATE_OUTPUT_RAW)),
+    uintWord(args.deadline ?? TEST_DEADLINE_SECONDS),
+    uintWord(128n),
+    uintWord(BigInt(payloads.length)),
+    ...cumulativeEnds.map(uintWord),
+  ];
+  return `0x${words.join("")}${payloads.map((payload) => payload.slice(2)).join("")}` as `0x${string}`;
+}
+
+function routePayloadWithAddresses(...addresses: string[]): `0x${string}` {
+  return `0x${addresses.map(addressWord).join("")}` as `0x${string}`;
+}
+
+function uintWord(value: bigint): string {
+  return value.toString(16).padStart(64, "0");
+}
+
+function addressWord(address: string): string {
+  return `${"0".repeat(24)}${address.slice(2).toLowerCase()}`;
 }
 
 function quoteData(overrides: Partial<PiteasQuoteData> & {
@@ -149,6 +185,7 @@ function quoteData(overrides: Partial<PiteasQuoteData> & {
       calldata: swapCalldata({
         amountInRaw: amountIn,
         minOutputRaw: min,
+        outputRaw: output,
         recipient: overrides.recipient ?? WALLET,
         tokenOut: overrides.destToken?.address,
       }),
@@ -243,12 +280,51 @@ function baseRouterIntegrity() {
     bytecodePresent: true,
     routerBytecodeHash: APPROVED_HASH,
     approvedRouterCodeHashes: [APPROVED_HASH],
+    approvedRouterTrustRecords: [],
     routerCodeHashApproved: true,
+    operatorApprovalRequired: false,
+    trustRecordFingerprint: "0xrouter-trust",
     rpcCodeHashes: [
-      { rpcUrl: "https://rpc-a.example", ok: true, codeHash: APPROVED_HASH, bytecodeLength: 100, error: null },
-      { rpcUrl: "https://rpc-b.example", ok: true, codeHash: APPROVED_HASH, bytecodeLength: 100, error: null },
+      {
+        rpcUrl: "https://rpc-a.example",
+        ok: true,
+        codeHash: APPROVED_HASH,
+        bytecode: "0x1234",
+        bytecodeLength: 100,
+        blockNumber: "123",
+        proxyDetected: false,
+        implementationAddress: null,
+        implementationCodeHash: null,
+        implementationBytecode: null,
+        implementationBytecodeLength: null,
+        error: null,
+      },
+      {
+        rpcUrl: "https://rpc-b.example",
+        ok: true,
+        codeHash: APPROVED_HASH,
+        bytecode: "0x1234",
+        bytecodeLength: 100,
+        blockNumber: "123",
+        proxyDetected: false,
+        implementationAddress: null,
+        implementationCodeHash: null,
+        implementationBytecode: null,
+        implementationBytecodeLength: null,
+        error: null,
+      },
     ],
     codeHashAgreement: "agrees" as const,
+    proxyDetection: {
+      proxyDetected: false,
+      proxyType: "none" as const,
+      implementationAddress: null,
+      implementationCodeHash: null,
+      implementationBytecode: null,
+      implementationBytecodeLength: null,
+      rpcAgreement: "unavailable" as const,
+      blockNumbers: ["123", "123"],
+    },
     warnings: [],
   };
 }
@@ -1131,6 +1207,8 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     expect(result.decision).toBe("REJECT");
     expect(result.policyChecks.candidate_quote_binding?.status).toBe("fail");
+    expect(result.policyChecks.calldata_fingerprint_binding?.status).toBe("fail");
+    expect(result.policyChecks.method_parameter_fingerprint_binding?.status).toBe("fail");
   });
 
   it("rejects insufficient eUSDC input balance", async () => {
@@ -1354,6 +1432,27 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.automaticExecutionEligible).toBe(false);
   });
 
+  it("keeps automatic execution disabled when the router trust record is not approved", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ approvedRouterCodeHashes: [], approvedRouterTrustRecords: [] }),
+      deps({
+        getRouterIntegrity: routerIntegrity({
+          routerBytecodeHash: UNAPPROVED_HASH,
+          approvedRouterCodeHashes: [],
+          approvedRouterTrustRecords: [],
+          routerCodeHashApproved: false,
+          operatorApprovalRequired: true,
+          trustRecordFingerprint: "0xunapproved-router-trust",
+        }),
+      }),
+    );
+
+    expect(result.routerIntegrity.operatorApprovalRequired).toBe(true);
+    expect(result.automaticExecutionEligible).toBe(false);
+    expect(result.policyChecks.router_code_hash_approved?.status).toBe("warning");
+  });
+
   it("rejects two-RPC router code-hash disagreement", async () => {
     const result = await buildPhiatShadowBuy(
       baseConfig,
@@ -1373,7 +1472,106 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.policyChecks.router_code_hash_agreement?.status).toBe("fail");
   });
 
+  it("rejects proxy implementation disagreement across RPCs", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getRouterIntegrity: routerIntegrity({
+          proxyDetection: {
+            ...baseRouterIntegrity().proxyDetection,
+            proxyDetected: true,
+            proxyType: "eip1967",
+            implementationAddress: "0x5555555555555555555555555555555555555555",
+            implementationCodeHash: APPROVED_HASH,
+            rpcAgreement: "disagrees",
+          },
+        }),
+      }),
+    );
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.policyChecks.router_code_hash_agreement?.status).toBe("fail");
+  });
+
+  it("resolves EIP-1967 proxy implementation trust records", async () => {
+    const implementation = "0x5555555555555555555555555555555555555555";
+    const routerCode = "0x60016000" as const;
+    const implementationCode = "0x60026000" as const;
+    const routerHash = keccak256(routerCode);
+    const implementationHash = keccak256(implementationCode);
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        method: string;
+        params?: string[];
+        id?: number;
+      };
+      let result: string;
+      if (body.method === "eth_blockNumber") result = "0x7b";
+      else if (body.method === "eth_getCode" && body.params?.[0]?.toLowerCase() === PITEAS_ROUTER.toLowerCase()) {
+        result = routerCode;
+      } else if (body.method === "eth_getCode" && body.params?.[0]?.toLowerCase() === implementation.toLowerCase()) {
+        result = implementationCode;
+      } else if (body.method === "eth_getStorageAt") {
+        result = `0x${"0".repeat(24)}${implementation.slice(2)}`;
+      } else {
+        throw new Error(`Unexpected RPC method ${body.method}`);
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, result }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const integrity = await readRouterIntegrity(
+      { ...baseConfig, rpcUrls: ["https://rpc-a.example"] },
+      PITEAS_ROUTER,
+      [],
+      [
+        {
+          router: PITEAS_ROUTER,
+          codeHash: routerHash,
+          chainId: 369,
+          implementationAddress: implementation,
+          implementationCodeHash: implementationHash,
+          label: "test proxy",
+        },
+      ],
+    );
+
+    expect(integrity.routerBytecodeHash).toBe(routerHash);
+    expect(integrity.proxyDetection.proxyDetected).toBe(true);
+    expect(integrity.proxyDetection.implementationAddress?.toLowerCase()).toBe(implementation.toLowerCase());
+    expect(integrity.proxyDetection.implementationCodeHash).toBe(implementationHash);
+    expect(integrity.routerCodeHashApproved).toBe(true);
+    expect(integrity.operatorApprovalRequired).toBe(false);
+    expect(integrity.rpcCodeHashes[0]?.bytecode).toBe(routerCode);
+    expect(integrity.rpcCodeHashes[0]?.implementationBytecode).toBe(implementationCode);
+    expect(integrity.rpcCodeHashes[0]?.blockNumber).toBe("123");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("rejects decoded recipient, token, input amount, native value, and min-output mismatches", async () => {
+    const wrongTokenIn = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: {
+            srcToken: { address: OTHER, symbol: "OTHER", decimals: 6, chainId: 369 },
+            tokenInParam: OTHER,
+            methodParameters: {
+              calldata: swapCalldata({ tokenIn: OTHER }),
+              value: "0",
+            },
+          },
+        }),
+      }),
+    );
+    expect(wrongTokenIn.policyChecks.prepared_token_in?.status).toBe("fail");
+    expect(wrongTokenIn.policyChecks.decoded_token_in?.status).toBe("fail");
+
     const wrongRecipient = await buildPhiatShadowBuy(
       baseConfig,
       baseInput(),
@@ -1421,7 +1619,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       baseInput(),
       deps({
         getPiteasQuote: defaultQuoteMock({
-          candidate: { valueWei: "1", methodParameters: { calldata: swapCalldata(), value: "0x1" } },
+          candidate: { methodParameters: { calldata: swapCalldata(), value: "0x1" } },
         }),
       }),
     );
@@ -1445,7 +1643,34 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(wrongMin.policyChecks.decoded_minimum_output?.status).toBe("fail");
   });
 
-  it("rejects unknown selectors and unresolved execution targets", async () => {
+  it("decodes the verified Piteas swap selector, tuple, and route envelope", () => {
+    const payload = routePayloadWithAddresses(POOL);
+    const calldata = swapCalldata({ routePayloads: [payload] });
+    const decoded = decodeShadowBuyCalldata(calldata);
+
+    expect(toFunctionSelector(PITEAS_SWAP_CANONICAL_SIGNATURE)).toBe(PITEAS_SWAP_SELECTOR);
+    expect(calldata.slice(0, 10)).toBe(PITEAS_SWAP_SELECTOR);
+    expect(decoded.decodable).toBe(true);
+    expect(decoded.canonicalFunction).toBe(PITEAS_SWAP_CANONICAL_SIGNATURE);
+    expect(decoded.selector).toBe("0x8218b58f");
+    expect(decoded.tokenIn?.toLowerCase()).toBe(PHIAT_SHADOW_BUY_TOKEN_IN.toLowerCase());
+    expect(decoded.tokenOut?.toLowerCase()).toBe(PHIAT_SHADOW_BUY_TOKEN_OUT.toLowerCase());
+    expect(decoded.amountInRaw).toBe(AMOUNT_50_RAW);
+    expect(decoded.minimumOutputRaw).toBe(CANDIDATE_MIN_RAW);
+    expect(decoded.recipient?.toLowerCase()).toBe(WALLET.toLowerCase());
+    expect(decoded.deadline).toBe(TEST_DEADLINE_SECONDS.toString());
+    expect(decoded.nativeValueWei).toBe("0");
+    expect(decoded.permitDataPresent).toBe(false);
+    expect(decoded.routeData?.decodable).toBe(true);
+    expect(decoded.routeData?.destinationToken?.toLowerCase()).toBe(PHIAT_SHADOW_BUY_TOKEN_OUT.toLowerCase());
+    expect(decoded.routeExpectedOutputRaw).toBe(CANDIDATE_OUTPUT_RAW);
+    expect(decoded.routeDataFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(decoded.calldataFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(decoded.executionTargets.map((target) => target.address.toLowerCase())).toContain(POOL.toLowerCase());
+    expect(decoded.unresolvedExecutionTargets).toContain("piteas_route_payload_targets_unclassified");
+  });
+
+  it("rejects unknown selectors, malformed calldata, and unresolved execution targets", async () => {
     const result = await buildPhiatShadowBuy(
       baseConfig,
       baseInput(),
@@ -1460,6 +1685,101 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.policyChecks.calldata_decodable?.status).toBe("fail");
     expect(result.policyChecks.execution_targets_resolved?.status).toBe("fail");
     expect(result.executionTargets.unresolvedExecutionTargets.length).toBeGreaterThan(0);
+
+    const malformed = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: { methodParameters: { calldata: "0x8218b58f1234", value: "0" } },
+        }),
+      }),
+    );
+    expect(malformed.decision).toBe("REJECT");
+    expect(malformed.policyChecks.calldata_decodable?.status).toBe("fail");
+    expect(reasonCodes(malformed)).toContain("CALLDATA_NOT_DECODABLE");
+
+    const unresolved = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: {
+            methodParameters: {
+              calldata: swapCalldata({ routePayloads: [routePayloadWithAddresses(POOL)] }),
+              value: "0",
+            },
+          },
+        }),
+      }),
+    );
+    expect(unresolved.decision).toBe("REJECT");
+    expect(unresolved.primaryDecisionClass).toBe("TRANSACTION_INTEGRITY_REJECT");
+    expect(unresolved.policyChecks.execution_targets_resolved?.status).toBe("fail");
+    expect(reasonCodes(unresolved)).toContain("EXECUTION_TARGETS_UNRESOLVED");
+    expect(unresolved.automaticExecutionEligible).toBe(false);
+  });
+
+  it("does not place the same certificate check in passed and failed checks", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: { methodParameters: { calldata: "0x12345678", value: "0" } },
+        }),
+      }),
+    );
+    const failedCodes = new Set(result.failedChecks.map((check) => check.code));
+
+    expect(result.passedChecks.some((code) => failedCodes.has(code))).toBe(false);
+    expect(result.passedChecks).not.toContain("CALLDATA_NOT_DECODABLE");
+    expect(result.passedChecks).not.toContain("CALLDATA_SELECTOR_NOT_ALLOWLISTED");
+    expect(result.failedChecks.map((check) => check.code)).toContain("CALLDATA_NOT_DECODABLE");
+  });
+
+  it("keeps transaction-integrity rejection primary over insufficient funds", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getInputBalance: vi.fn(async () => "0"),
+        getNativeBalanceWei: vi.fn(async () => "1"),
+        getPiteasQuote: defaultQuoteMock({
+          candidate: { methodParameters: { calldata: "0x12345678", value: "0" } },
+        }),
+      }),
+    );
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.primaryDecisionClass).toBe("TRANSACTION_INTEGRITY_REJECT");
+    expect(result.decisionClass).toBe("TRANSACTION_INTEGRITY_REJECT");
+    expect(result.secondaryDecisionClasses).toContain("INSUFFICIENT_FUNDS");
+    expect(result.transactionIntegrityDecisionReached).toBe(true);
+    expect(reasonCodes(result)).toContain("INSUFFICIENT_INPUT_BALANCE");
+    expect(result.automaticExecutionEligible).toBe(false);
+  });
+
+  it("reports gas economics without rejecting when USD gas value is unavailable", async () => {
+    const noUsd = await buildPhiatShadowBuy(baseConfig, baseInput(), deps());
+    expect(noUsd.decision).toBe("WOULD_BUY");
+    expect(noUsd.gasPolicy.estimatedGasCostPls).toBe("0.00025");
+    expect(noUsd.gasPolicy.safetyAdjustedGasCostPls).toBe("0.0003125");
+    expect(noUsd.gasPolicy.estimatedGasCostUsd).toBeNull();
+    expect(noUsd.gasPolicy.gasCostAsPercentOfInputValue).toBeNull();
+
+    const withUsd = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: { gasUseEstimateUSD: 0.25 },
+        }),
+      }),
+    );
+    expect(withUsd.decision).toBe("WOULD_BUY");
+    expect(withUsd.gasPolicy.estimatedGasCostUsd).toBe("0.25");
+    expect(withUsd.gasPolicy.gasCostAsPercentOfInputValue).toBe(0.5);
   });
 
   it("rejects excessive slippage", async () => {

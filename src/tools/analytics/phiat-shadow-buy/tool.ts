@@ -70,6 +70,7 @@ export async function buildPhiatShadowBuy(
   const approvedRouterCodeHashes = (input.approvedRouterCodeHashes ?? []).map((h) =>
     h.toLowerCase(),
   );
+  const approvedRouterTrustRecords = input.approvedRouterTrustRecords ?? [];
 
   const simulation = emptySimulation();
   const balances = emptyBalances(input.walletAddress);
@@ -944,7 +945,9 @@ export async function buildPhiatShadowBuy(
     },
   );
 
-  const decodedIntent = decodeShadowBuyCalldata(prepared.intent.data);
+  const decodedIntent = decodeShadowBuyCalldata(prepared.intent.data, {
+    nativeValueWei: prepared.intent.valueWei,
+  });
   validatePreparedAndDecodedIntent({
     policyChecks,
     reasons,
@@ -960,6 +963,7 @@ export async function buildPhiatShadowBuy(
     config,
     prepared.intent.to,
     approvedRouterCodeHashes,
+    approvedRouterTrustRecords,
   );
   validateRouterIntegrity(policyChecks, reasons, routerReport);
   routerIntegrityStatus = routerStatusFromChecks(policyChecks, routerReport.bytecodePresent);
@@ -1033,6 +1037,8 @@ export async function buildPhiatShadowBuy(
       nativeBalanceWei: balances.nativeBalanceWei,
       maximumGasPls: input.maximumGasPls,
       gasSafetyFactor,
+      estimatedGasCostUsd: retainedCandidateQuote.gasUseEstimateUSD ?? null,
+      inputValueUsd: amountInHuman,
     });
     Object.assign(gasPolicy, gasReport);
     balances.gasBalanceSufficient = gasPolicy.nativeBalanceCoversSafetyAdjustedGas;
@@ -1262,6 +1268,8 @@ export async function buildPhiatShadowBuy(
       nativeBalanceWei: balances.nativeBalanceWei,
       maximumGasPls: input.maximumGasPls,
       gasSafetyFactor,
+      estimatedGasCostUsd: retainedCandidateQuote.gasUseEstimateUSD ?? null,
+      inputValueUsd: amountInHuman,
     });
     Object.assign(gasPolicy, gasReport);
     balances.gasBalanceSufficient = gasPolicy.nativeBalanceCoversSafetyAdjustedGas;

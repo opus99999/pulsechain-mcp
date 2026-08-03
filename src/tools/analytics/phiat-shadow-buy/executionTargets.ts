@@ -6,27 +6,29 @@ export function buildExecutionTargets(
   router: RouterIntegrity,
   decoded: DecodedIntent,
 ): ExecutionTargetsReport {
-  const unresolved = [...decoded.unresolvedTargets];
+  const unresolved = [
+    ...new Set([
+      ...decoded.unresolvedTargets,
+      ...decoded.unresolvedExecutionTargets,
+    ]),
+  ];
   if (!decoded.decodable) unresolved.push("calldata_selector");
   const targets = [
     {
       address: router.router ?? PITEAS_ROUTER,
       role: "router" as const,
+      selector: decoded.selector,
+      codeHash: router.routerBytecodeHash,
       source: "transaction.to",
       approved: router.routerCodeHashApproved,
     },
-    ...decoded.nestedTargets.map((address) => ({
-      address,
-      role: "nested_call_target" as const,
-      source: "decoded_calldata",
-      approved: null,
-    })),
+    ...decoded.executionTargets,
   ];
   return {
     executionTargets: targets,
-    unresolvedExecutionTargets: unresolved,
+    unresolvedExecutionTargets: [...new Set(unresolved)],
     executionTargetConfidence:
-      unresolved.length > 0 ? "low" : decoded.nestedTargets.length > 0 ? "medium" : "high",
+      unresolved.length > 0 ? "low" : decoded.executionTargets.length > 0 ? "medium" : "high",
   };
 }
 
@@ -42,5 +44,6 @@ export function validateExecutionTargets(
     targets.unresolvedExecutionTargets.length === 0,
     "Unresolved nested execution targets fail closed",
     targets as unknown as Record<string, unknown>,
+    { code: "EXECUTION_TARGETS_UNRESOLVED", stage: "policy" },
   );
 }

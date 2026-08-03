@@ -1,9 +1,9 @@
 import { PULSECHAIN_CHAIN_ID } from "../../../constants.js";
 import { type PiteasPrepareResult, type PiteasQuoteData } from "../../../data/index.js";
-import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PITEAS_ROUTER } from "./constants.js";
+import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PITEAS_ROUTER, PITEAS_SWAP_CANONICAL_SIGNATURE } from "./constants.js";
 import type { DecodedIntent, PolicyCheck, ShadowBuyReason } from "./types.js";
 import { passCheck, requireCheck } from "./policyEvaluation.js";
-import { isPositiveIntegerString, safeWei, sameAddress, stringToBigInt } from "./inputNormalization.js";
+import { fingerprint, isPositiveIntegerString, parseTimestampMs, safeWei, sameAddress, stringToBigInt } from "./inputNormalization.js";
 
 export function validatePreparedAndDecodedIntent(args: {
   policyChecks: Record<string, PolicyCheck>;
@@ -23,6 +23,7 @@ export function validatePreparedAndDecodedIntent(args: {
     quote.chainId === PULSECHAIN_CHAIN_ID,
     "Prepared Piteas intent is not for PulseChain chain ID 369",
     { chainId: quote.chainId },
+    { code: "CHAIN_ID_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -31,6 +32,7 @@ export function validatePreparedAndDecodedIntent(args: {
     sameAddress(prepared.intent.to, PITEAS_ROUTER),
     "Prepared transaction target is not the official Piteas router",
     { to: prepared.intent.to, officialRouter: PITEAS_ROUTER },
+    { code: "ROUTER_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -39,6 +41,7 @@ export function validatePreparedAndDecodedIntent(args: {
     sameAddress(prepared.review.tokenIn, PHIAT_SHADOW_BUY_TOKEN_IN),
     "Prepared tokenIn is not verified eUSDC",
     { tokenIn: prepared.review.tokenIn },
+    { code: "PREPARED_TOKEN_IN_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -47,6 +50,7 @@ export function validatePreparedAndDecodedIntent(args: {
     sameAddress(prepared.review.tokenOut, PHIAT_SHADOW_BUY_TOKEN_OUT),
     "Prepared tokenOut is not PHIAT",
     { tokenOut: prepared.review.tokenOut },
+    { code: "PREPARED_TOKEN_OUT_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -55,6 +59,7 @@ export function validatePreparedAndDecodedIntent(args: {
     sameAddress(prepared.review.recipient, args.walletAddress),
     "Prepared recipient does not match walletAddress",
     { recipient: prepared.review.recipient, walletAddress: args.walletAddress },
+    { code: "PREPARED_RECIPIENT_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -63,15 +68,24 @@ export function validatePreparedAndDecodedIntent(args: {
     prepared.review.amountIn === args.amountInRaw,
     "Prepared amountIn does not match requested amount",
     { preparedAmountIn: prepared.review.amountIn, requestedAmountRaw: args.amountInRaw },
+    { code: "PREPARED_AMOUNT_IN_MISMATCH", stage: "policy" },
   );
   const methodValueWei = safeWei(prepared.methodParameters.value);
   requireCheck(
     policyChecks,
     reasons,
     "native_value",
-    prepared.intent.valueWei === "0" && quote.valueWei === "0" && methodValueWei === "0",
-    "Prepared transaction includes unexpected native value for eUSDC input",
-    { intentValueWei: prepared.intent.valueWei, quoteValueWei: quote.valueWei, methodValueWei },
+    prepared.intent.valueWei === quote.valueWei &&
+      prepared.intent.valueWei === (decodedIntent.nativeValueWei ?? "0") &&
+      methodValueWei === quote.valueWei,
+    "Prepared native value does not match retained quote and decoded calldata",
+    {
+      intentValueWei: prepared.intent.valueWei,
+      quoteValueWei: quote.valueWei,
+      decodedNativeValueWei: decodedIntent.nativeValueWei,
+      methodValueWei,
+    },
+    { code: "NATIVE_VALUE_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -80,6 +94,7 @@ export function validatePreparedAndDecodedIntent(args: {
     isPositiveIntegerString(prepared.review.amountOutMin),
     "Prepared quote does not contain a positive minimum output",
     { minimumOutputRaw: prepared.review.amountOutMin ?? null },
+    { code: "MINIMUM_OUTPUT_MISSING", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -88,6 +103,7 @@ export function validatePreparedAndDecodedIntent(args: {
     quote.allowedSlippage <= args.maximumSlippagePercent,
     "Prepared quote slippage exceeds policy",
     { quoteSlippagePercent: quote.allowedSlippage, maximumSlippagePercent: args.maximumSlippagePercent },
+    { code: "SLIPPAGE_POLICY_EXCEEDED", stage: "quote_batch" },
   );
   requireCheck(
     policyChecks,
@@ -96,14 +112,21 @@ export function validatePreparedAndDecodedIntent(args: {
     decodedIntent.decodable,
     decodedIntent.errors[0] ?? "Calldata is not decodable",
     { selector: decodedIntent.selector, errors: decodedIntent.errors },
+    { code: "CALLDATA_NOT_DECODABLE", stage: "policy" },
   );
   requireCheck(
     policyChecks,
     reasons,
     "calldata_selector_allowlisted",
-    decodedIntent.decodable && decodedIntent.method !== "approve",
+    decodedIntent.decodable &&
+      decodedIntent.canonicalFunction === PITEAS_SWAP_CANONICAL_SIGNATURE,
     "Calldata selector is not explicitly allowlisted for PHIAT shadow buying",
-    { selector: decodedIntent.selector, method: decodedIntent.method },
+    {
+      selector: decodedIntent.selector,
+      method: decodedIntent.method,
+      canonicalFunction: decodedIntent.canonicalFunction,
+    },
+    { code: "CALLDATA_SELECTOR_NOT_ALLOWLISTED", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -112,22 +135,39 @@ export function validatePreparedAndDecodedIntent(args: {
     decodedIntent.method !== "approve" && decodedIntent.unlimitedApproval !== true,
     "Prepared swap calldata decodes as token approval or unlimited approval",
     { method: decodedIntent.method, unlimitedApproval: decodedIntent.unlimitedApproval ?? null },
+    { code: "HIDDEN_APPROVAL_DETECTED", stage: "policy" },
+  );
+  requireCheck(
+    policyChecks,
+    reasons,
+    "route_data_decodable",
+    decodedIntent.routeData?.decodable === true,
+    "Piteas route data envelope is not decodable",
+    {
+      routeDataFingerprint: decodedIntent.routeDataFingerprint,
+      validationErrors: decodedIntent.routeData?.validationErrors ?? decodedIntent.validationErrors,
+    },
+    { code: "ROUTE_DATA_NOT_DECODABLE", stage: "policy" },
   );
   requireCheck(
     policyChecks,
     reasons,
     "decoded_token_in",
-    sameAddress(decodedIntent.tokenIn, PHIAT_SHADOW_BUY_TOKEN_IN),
-    "Decoded tokenIn is not verified eUSDC",
-    { decodedTokenIn: decodedIntent.tokenIn },
+    sameAddress(decodedIntent.tokenIn, PHIAT_SHADOW_BUY_TOKEN_IN) &&
+      sameAddress(decodedIntent.tokenIn, quote.srcToken.address),
+    "Decoded tokenIn does not match verified eUSDC and retained quote",
+    { decodedTokenIn: decodedIntent.tokenIn, quoteTokenIn: quote.srcToken.address },
+    { code: "DECODED_TOKEN_IN_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
     reasons,
     "decoded_token_out",
-    sameAddress(decodedIntent.tokenOut, PHIAT_SHADOW_BUY_TOKEN_OUT),
-    "Decoded tokenOut is not PHIAT",
-    { decodedTokenOut: decodedIntent.tokenOut },
+    sameAddress(decodedIntent.tokenOut, PHIAT_SHADOW_BUY_TOKEN_OUT) &&
+      sameAddress(decodedIntent.tokenOut, quote.destToken.address),
+    "Decoded tokenOut does not match PHIAT and retained quote",
+    { decodedTokenOut: decodedIntent.tokenOut, quoteTokenOut: quote.destToken.address },
+    { code: "DECODED_TOKEN_OUT_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -136,24 +176,100 @@ export function validatePreparedAndDecodedIntent(args: {
     sameAddress(decodedIntent.recipient, args.walletAddress),
     "Decoded recipient does not match walletAddress",
     { decodedRecipient: decodedIntent.recipient, walletAddress: args.walletAddress },
+    { code: "DECODED_RECIPIENT_MISMATCH", stage: "policy" },
   );
   requireCheck(
     policyChecks,
     reasons,
     "decoded_amount_in",
-    decodedIntent.amountInRaw === args.amountInRaw,
-    "Decoded amountIn does not match requested amount",
-    { decodedAmountInRaw: decodedIntent.amountInRaw, requestedAmountRaw: args.amountInRaw },
+    decodedIntent.amountInRaw === args.amountInRaw && decodedIntent.amountInRaw === quote.amountIn,
+    "Decoded amountIn does not match requested amount and retained quote",
+    {
+      decodedAmountInRaw: decodedIntent.amountInRaw,
+      requestedAmountRaw: args.amountInRaw,
+      quoteAmountInRaw: quote.amountIn,
+    },
+    { code: "DECODED_AMOUNT_IN_MISMATCH", stage: "policy" },
   );
-  const decodedMin = stringToBigInt(decodedIntent.minimumAmountOutRaw);
+  const decodedMin = stringToBigInt(decodedIntent.minimumOutputRaw ?? decodedIntent.minimumAmountOutRaw);
   const quoteMin = stringToBigInt(quote.amountOutMin);
   requireCheck(
     policyChecks,
     reasons,
     "decoded_minimum_output",
-    decodedMin !== null && quoteMin !== null && decodedMin >= quoteMin,
-    "Decoded minimum output is below retained candidate quote minimum",
-    { decodedMinimumOutputRaw: decodedIntent.minimumAmountOutRaw, candidateQuoteMinimumOutputRaw: quote.amountOutMin ?? null },
+    decodedMin !== null && quoteMin !== null && decodedMin === quoteMin,
+    "Decoded minimum output does not exactly match retained candidate quote minimum",
+    {
+      decodedMinimumOutputRaw: decodedIntent.minimumOutputRaw ?? decodedIntent.minimumAmountOutRaw,
+      candidateQuoteMinimumOutputRaw: quote.amountOutMin ?? null,
+    },
+    { code: "DECODED_MINIMUM_OUTPUT_MISMATCH", stage: "policy" },
+  );
+  const expectedOut = stringToBigInt(decodedIntent.routeExpectedOutputRaw);
+  const quoteOut = stringToBigInt(quote.amountOut);
+  requireCheck(
+    policyChecks,
+    reasons,
+    "route_expected_output",
+    expectedOut !== null && quoteOut !== null && expectedOut === quoteOut,
+    "Route expected output does not exactly match retained candidate quote",
+    {
+      routeExpectedOutputRaw: decodedIntent.routeExpectedOutputRaw,
+      candidateQuoteExpectedOutputRaw: quote.amountOut,
+    },
+    { code: "ROUTE_EXPECTED_OUTPUT_MISMATCH", stage: "policy" },
+  );
+  requireCheck(
+    policyChecks,
+    reasons,
+    "route_destination_token",
+    sameAddress(decodedIntent.routeData?.destinationToken, decodedIntent.tokenOut),
+    "Route destination token does not match decoded output token",
+    {
+      routeDestinationToken: decodedIntent.routeData?.destinationToken ?? null,
+      decodedTokenOut: decodedIntent.tokenOut,
+    },
+    { code: "ROUTE_DESTINATION_TOKEN_MISMATCH", stage: "policy" },
+  );
+  requireCheck(
+    policyChecks,
+    reasons,
+    "calldata_fingerprint_binding",
+    decodedIntent.calldataFingerprint === fingerprint(prepared.intent.data) &&
+      prepared.intent.data === quote.methodParameters.calldata,
+    "Prepared calldata does not match retained candidate quote calldata",
+    {
+      decodedCalldataFingerprint: decodedIntent.calldataFingerprint,
+      preparedCalldataFingerprint: fingerprint(prepared.intent.data),
+      quoteCalldataFingerprint: fingerprint(quote.methodParameters.calldata),
+    },
+    { code: "CALLDATA_FINGERPRINT_MISMATCH", stage: "policy" },
+  );
+  requireCheck(
+    policyChecks,
+    reasons,
+    "method_parameter_fingerprint_binding",
+    fingerprint(prepared.methodParameters) === fingerprint(quote.methodParameters),
+    "Prepared method parameters do not match retained candidate quote method parameters",
+    {
+      preparedMethodParametersFingerprint: fingerprint(prepared.methodParameters),
+      quoteMethodParametersFingerprint: fingerprint(quote.methodParameters),
+    },
+    { code: "METHOD_PARAMETER_FINGERPRINT_MISMATCH", stage: "policy" },
+  );
+  requireCheck(
+    policyChecks,
+    reasons,
+    "expiry_binding",
+    quote.expiresAt === null ||
+      decodedIntent.deadline === null ||
+      parseTimestampMs(quote.expiresAt) === parseTimestampMs(decodedIntent.deadline),
+    "Decoded route deadline does not match retained candidate quote expiry",
+    {
+      decodedDeadline: decodedIntent.deadline,
+      candidateQuoteExpiry: quote.expiresAt,
+    },
+    { code: "EXPIRY_MISMATCH", stage: "policy" },
   );
   passCheck(policyChecks, "decoded_expected_output_constraint", {
     decodedExpectedOutputRaw: decodedIntent.decodedExpectedOutputRaw ?? null,

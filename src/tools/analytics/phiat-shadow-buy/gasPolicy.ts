@@ -10,6 +10,8 @@ export async function buildGasPolicy(args: {
   nativeBalanceWei: string | null;
   maximumGasPls: string | undefined;
   gasSafetyFactor: number;
+  estimatedGasCostUsd?: number | null;
+  inputValueUsd?: string | null;
 }): Promise<Partial<GasPolicy>> {
   const gasUnits = stringToBigInt(args.gasEstimate);
   const nativeBalance = stringToBigInt(args.nativeBalanceWei);
@@ -22,6 +24,8 @@ export async function buildGasPolicy(args: {
     return {
       gasSafetyFactorBps: gasSafetyFactorBps.toString(),
       maximumGasWei: maximumGasWei?.toString() ?? null,
+      estimatedGasCostUsd: args.estimatedGasCostUsd?.toString() ?? null,
+      gasCostAsPercentOfInputValue: gasCostPercent(args.estimatedGasCostUsd, args.inputValueUsd),
       withinMaximumGasPolicy: null,
       nativeBalanceCoversSafetyAdjustedGas: null,
     };
@@ -35,6 +39,8 @@ export async function buildGasPolicy(args: {
       gasSafetyFactorBps: gasSafetyFactorBps.toString(),
       gasUnits: gasUnits.toString(),
       maximumGasWei: maximumGasWei?.toString() ?? null,
+      estimatedGasCostUsd: args.estimatedGasCostUsd?.toString() ?? null,
+      gasCostAsPercentOfInputValue: gasCostPercent(args.estimatedGasCostUsd, args.inputValueUsd),
       withinMaximumGasPolicy: null,
       nativeBalanceCoversSafetyAdjustedGas: null,
     };
@@ -48,12 +54,28 @@ export async function buildGasPolicy(args: {
     gasPriceWei: gasPrice.toString(),
     estimatedGasWei: estimatedGasWei.toString(),
     estimatedGasPls: formatEther(estimatedGasWei),
+    estimatedGasCostPls: formatEther(estimatedGasWei),
     safetyAdjustedGasWei: safetyAdjustedGasWei.toString(),
     safetyAdjustedGasPls: formatEther(safetyAdjustedGasWei),
+    safetyAdjustedGasCostPls: formatEther(safetyAdjustedGasWei),
+    estimatedGasCostUsd: args.estimatedGasCostUsd?.toString() ?? null,
+    gasCostAsPercentOfInputValue: gasCostPercent(args.estimatedGasCostUsd, args.inputValueUsd),
     maximumGasWei: maximumGasWei?.toString() ?? null,
     withinMaximumGasPolicy:
       maximumGasWei === null ? null : safetyAdjustedGasWei <= maximumGasWei,
     nativeBalanceCoversSafetyAdjustedGas:
       nativeBalance === null ? null : nativeBalance >= safetyAdjustedGasWei,
   };
+}
+
+function gasCostPercent(
+  estimatedGasCostUsd: number | null | undefined,
+  inputValueUsd: string | null | undefined,
+): number | null {
+  if (estimatedGasCostUsd === null || estimatedGasCostUsd === undefined) return null;
+  if (!Number.isFinite(estimatedGasCostUsd) || estimatedGasCostUsd < 0) return null;
+  if (typeof inputValueUsd !== "string" || inputValueUsd.trim() === "") return null;
+  const input = Number(inputValueUsd);
+  if (!Number.isFinite(input) || input <= 0) return null;
+  return Number(((estimatedGasCostUsd / input) * 100).toFixed(6));
 }

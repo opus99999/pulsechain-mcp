@@ -22,4 +22,24 @@ export const phiatShadowBuyInputSchema = {
   approvedRouterCodeHashes: z
     .array(z.string().regex(/^0x[a-fA-F0-9]{64}$/))
     .optional(),
+  approvedRouterTrustRecords: z
+    .array(
+      z.object({
+        router: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+        codeHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+        chainId: z.number().int().positive().optional(),
+        implementationAddress: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{40}$/)
+          .nullable()
+          .optional(),
+        implementationCodeHash: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{64}$/)
+          .nullable()
+          .optional(),
+        label: z.string().min(1).optional(),
+      }),
+    )
+    .optional(),
 };

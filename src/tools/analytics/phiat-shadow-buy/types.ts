@@ -17,6 +17,7 @@ export interface PhiatShadowBuyInput {
   referenceAmountHuman?: string;
   gasSafetyFactor?: number;
   approvedRouterCodeHashes?: string[];
+  approvedRouterTrustRecords?: ApprovedRouterTrustRecord[];
 }
 
 export type Decision = "WOULD_BUY" | "NEEDS_APPROVAL" | "REJECT";
@@ -63,6 +64,13 @@ export type SimulationStatus =
   | "GAS_ESTIMATION_FAILED";
 
 export interface ShadowBuyReason {
+  code: string;
+  stage: string;
+  message: string;
+  evidence: Record<string, unknown> | null;
+}
+
+export interface FailedCheck {
   code: string;
   stage: string;
   message: string;
@@ -159,20 +167,40 @@ export interface PreparedIntent {
 
 export interface DecodedIntent {
   decodable: boolean;
+  canonicalFunction: string | null;
   method: string | null;
   selector: string | null;
   tokenIn: string | null;
   tokenOut: string | null;
   amountInRaw: string | null;
   amountInHuman: string | null;
+  minimumOutputRaw: string | null;
   minimumAmountOutRaw: string | null;
   minimumAmountOutHuman: string | null;
   recipient: string | null;
   deadline: string | null;
+  nativeValueWei: string | null;
+  permitDataPresent: boolean;
+  routeDataFingerprint: string | null;
+  calldataFingerprint: string | null;
+  routeData: {
+    decodable: boolean;
+    destinationToken: string | null;
+    expectedOutputRaw: string | null;
+    deadline: string | null;
+    swapPayloadCount: number;
+    swapPayloadFingerprints: string[];
+    embeddedAddresses: string[];
+    validationErrors: string[];
+  } | null;
+  executionTargets: ExecutionTargetEvidence[];
+  unresolvedExecutionTargets: string[];
+  validationErrors: string[];
   spender?: string | null;
   approvalAmountRaw?: string | null;
   unlimitedApproval?: boolean;
   decodedExpectedOutputRaw?: string | null;
+  routeExpectedOutputRaw?: string | null;
   nestedTargets: string[];
   unresolvedTargets: string[];
   errors: string[];
@@ -236,6 +264,15 @@ export interface ApprovalIntent {
   error: string | null;
 }
 
+export interface ApprovedRouterTrustRecord {
+  router?: string;
+  codeHash: string;
+  chainId?: number;
+  implementationAddress?: string | null;
+  implementationCodeHash?: string | null;
+  label?: string;
+}
+
 export interface RouterIntegrity {
   router: string | null;
   expectedRouter: string;
@@ -243,25 +280,50 @@ export interface RouterIntegrity {
   bytecodePresent: boolean | null;
   routerBytecodeHash: string | null;
   approvedRouterCodeHashes: string[];
+  approvedRouterTrustRecords: ApprovedRouterTrustRecord[];
   routerCodeHashApproved: boolean | null;
+  operatorApprovalRequired: boolean;
+  trustRecordFingerprint: string | null;
   rpcCodeHashes: Array<{
     rpcUrl: string;
     ok: boolean;
     codeHash: string | null;
+    bytecode?: string | null;
     bytecodeLength: number | null;
+    blockNumber?: string | null;
+    proxyDetected?: boolean | null;
+    proxyType?: "none" | "eip1967" | "eip1167" | "unavailable";
+    implementationAddress?: string | null;
+    implementationCodeHash?: string | null;
+    implementationBytecode?: string | null;
+    implementationBytecodeLength?: number | null;
     error: string | null;
   }>;
   codeHashAgreement: "agrees" | "disagrees" | "single_rpc" | "unavailable";
+  proxyDetection: {
+    proxyDetected: boolean | null;
+    proxyType: "none" | "eip1967" | "eip1167" | "unavailable";
+    implementationAddress: string | null;
+    implementationCodeHash: string | null;
+    implementationBytecode: string | null;
+    implementationBytecodeLength: number | null;
+    rpcAgreement: "agrees" | "disagrees" | "single_rpc" | "unavailable";
+    blockNumbers: string[];
+  };
   warnings: string[];
 }
 
+export interface ExecutionTargetEvidence {
+  address: string;
+  role: "router" | "nested_call_target" | "route_embedded_address";
+  selector: string | null;
+  codeHash: string | null;
+  approved: boolean | null;
+  source: string;
+}
+
 export interface ExecutionTargetsReport {
-  executionTargets: Array<{
-    address: string;
-    role: "router" | "nested_call_target";
-    source: string;
-    approved: boolean | null;
-  }>;
+  executionTargets: ExecutionTargetEvidence[];
   unresolvedExecutionTargets: string[];
   executionTargetConfidence: "high" | "medium" | "low";
 }
@@ -331,8 +393,12 @@ export interface GasPolicy {
   gasPriceWei: string | null;
   estimatedGasWei: string | null;
   estimatedGasPls: string | null;
+  estimatedGasCostPls: string | null;
   safetyAdjustedGasWei: string | null;
   safetyAdjustedGasPls: string | null;
+  safetyAdjustedGasCostPls: string | null;
+  estimatedGasCostUsd: string | null;
+  gasCostAsPercentOfInputValue: number | null;
   maximumGasPls: string | null;
   maximumGasWei: string | null;
   withinMaximumGasPolicy: boolean | null;
@@ -342,10 +408,16 @@ export interface GasPolicy {
 export interface PhiatShadowBuyCertificate {
   decision: Decision;
   decisionClass: DecisionClass;
+  primaryDecisionClass: DecisionClass;
+  secondaryDecisionClasses: DecisionClass[];
   economicDecisionReached: boolean;
+  transactionIntegrityDecisionReached: boolean;
   retryable: boolean;
   retryDisposition: RetryDisposition;
   reasons: ShadowBuyReason[];
+  passedChecks: string[];
+  failedChecks: FailedCheck[];
+  warnings: string[];
   reasonSummaries: string[];
   quoteBatchStatus: QuoteBatchStatus;
   allowanceStatus: AllowanceStatus;
@@ -411,6 +483,7 @@ export interface PhiatShadowBuyDeps {
     config: AppConfig,
     router: string,
     approvedHashes: string[],
+    approvedTrustRecords?: ApprovedRouterTrustRecord[],
   ) => Promise<RouterIntegrity>;
   nowMs?: () => number;
 }

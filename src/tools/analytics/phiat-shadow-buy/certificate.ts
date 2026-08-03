@@ -1,4 +1,4 @@
-import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence } from "./types.js";
+import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, DecisionClass, FailedCheck } from "./types.js";
 import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
@@ -43,14 +43,27 @@ export function buildCertificate(args: {
   swapEvidenceInvalidAfterApproval?: boolean;
   transactionPrepared?: boolean;
 }): PhiatShadowBuyCertificate {
+  const primaryDecisionClass = args.decisionClass ?? classifyDecision(args.decision, args.reasons);
+  const secondaryDecisionClasses = secondaryClasses(args.decision, args.reasons, primaryDecisionClass);
+  const failedChecks = failedChecksFromReasons(args.reasons);
+  const warnings = warningsFromChecks(args.policyChecks);
+  const passedChecks = passedChecksFromPolicy(args.policyChecks, failedChecks);
   return {
     decision: args.decision,
-    decisionClass: args.decisionClass ?? classifyDecision(args.decision, args.reasons),
+    decisionClass: primaryDecisionClass,
+    primaryDecisionClass,
+    secondaryDecisionClasses,
     economicDecisionReached:
-      args.economicDecisionReached ?? defaultEconomicDecisionReached(args.decision, args.reasons),
+      args.economicDecisionReached ?? defaultEconomicDecisionReached(primaryDecisionClass),
+    transactionIntegrityDecisionReached:
+      primaryDecisionClass === "TRANSACTION_INTEGRITY_REJECT" ||
+      secondaryDecisionClasses.includes("TRANSACTION_INTEGRITY_REJECT"),
     retryable: args.retryable ?? defaultRetryable(args.reasons),
     retryDisposition: args.retryDisposition ?? defaultRetryDisposition(args.decision, args.reasons),
     reasons: args.reasons,
+    passedChecks,
+    failedChecks,
+    warnings,
     reasonSummaries: args.reasons.map((reason) => reason.message),
     quoteBatchStatus: args.quoteBatchStatus ?? "DEADLINE_INSUFFICIENT",
     allowanceStatus: args.allowanceStatus ?? "NOT_EVALUATED",
@@ -115,26 +128,11 @@ function classifyDecision(
 ): PhiatShadowBuyCertificate["decisionClass"] {
   if (decision === "WOULD_BUY") return "WOULD_BUY";
   if (decision === "NEEDS_APPROVAL") return "NEEDS_APPROVAL";
-  const codes = new Set(reasons.map((reason) => reason.code));
-  if (
-    [...codes].some((code) => code.startsWith("PITEAS_")) ||
-    codes.has("RATE_LIMIT_REQUOTE_REQUIRED") ||
-    codes.has("QUOTE_BATCH_INCOMPLETE")
-  ) {
-    return "INFRASTRUCTURE_REQUOTE_REQUIRED";
-  }
-  if (codes.has("INSUFFICIENT_INPUT_BALANCE") || codes.has("INSUFFICIENT_GAS_BALANCE")) {
-    return "INSUFFICIENT_FUNDS";
-  }
-  if (codes.has("REFERENCE_DRIFT_EXCEEDED") || codes.has("CANDIDATE_DETERIORATION_EXCEEDED")) {
-    return "MARKET_POLICY_REJECT";
-  }
-  return "TRANSACTION_INTEGRITY_REJECT";
+  return orderedClassesForReasons(reasons)[0] ?? "TRANSACTION_INTEGRITY_REJECT";
 }
 
-function defaultEconomicDecisionReached(decision: Decision, reasons: ShadowBuyReason[]): boolean {
-  if (decision === "WOULD_BUY" || decision === "NEEDS_APPROVAL") return true;
-  return classifyDecision(decision, reasons) !== "INFRASTRUCTURE_REQUOTE_REQUIRED";
+function defaultEconomicDecisionReached(primaryDecisionClass: DecisionClass): boolean {
+  return primaryDecisionClass !== "INFRASTRUCTURE_REQUOTE_REQUIRED";
 }
 
 function defaultRetryable(reasons: ShadowBuyReason[]): boolean {
@@ -154,6 +152,94 @@ function defaultRetryDisposition(
     return "NEW_BATCH_WHEN_UPSTREAM_RECOVERS";
   }
   return "NONE";
+}
+
+function secondaryClasses(
+  decision: Decision,
+  reasons: ShadowBuyReason[],
+  primary: DecisionClass,
+): DecisionClass[] {
+  if (decision === "WOULD_BUY" || decision === "NEEDS_APPROVAL") return [];
+  return orderedClassesForReasons(reasons).filter((klass) => klass !== primary);
+}
+
+function orderedClassesForReasons(reasons: ShadowBuyReason[]): DecisionClass[] {
+  const classes = new Set(reasons.map(classForReason).filter(Boolean) as DecisionClass[]);
+  const precedence: DecisionClass[] = [
+    "INFRASTRUCTURE_REQUOTE_REQUIRED",
+    "TRANSACTION_INTEGRITY_REJECT",
+    "MARKET_POLICY_REJECT",
+    "INSUFFICIENT_FUNDS",
+    "NEEDS_APPROVAL",
+    "WOULD_BUY",
+  ];
+  return precedence.filter((klass) => classes.has(klass));
+}
+
+function classForReason(reason: ShadowBuyReason): DecisionClass | null {
+  const code = reason.code;
+  if (
+    code.startsWith("PITEAS_") ||
+    code === "RATE_LIMIT_REQUOTE_REQUIRED" ||
+    code === "QUOTE_BATCH_INCOMPLETE"
+  ) {
+    return "INFRASTRUCTURE_REQUOTE_REQUIRED";
+  }
+  if (code === "REFERENCE_DRIFT_EXCEEDED" || code === "CANDIDATE_DETERIORATION_EXCEEDED") {
+    return "MARKET_POLICY_REJECT";
+  }
+  if (code === "INSUFFICIENT_INPUT_BALANCE" || code === "INSUFFICIENT_GAS_BALANCE") {
+    return "INSUFFICIENT_FUNDS";
+  }
+  if (code === "INSUFFICIENT_ALLOWANCE") return "NEEDS_APPROVAL";
+  return "TRANSACTION_INTEGRITY_REJECT";
+}
+
+function failedChecksFromReasons(reasons: ShadowBuyReason[]): FailedCheck[] {
+  return reasons.map((reason) => ({
+    code: reason.code,
+    stage: reason.stage,
+    message: reason.message,
+    evidence: reason.evidence,
+  }));
+}
+
+function warningsFromChecks(checks: Record<string, PolicyCheck>): string[] {
+  return Object.entries(checks)
+    .filter(([, check]) => check.status === "warning")
+    .map(([name, check]) => check.reason ?? check.code ?? name);
+}
+
+function passedChecksFromPolicy(
+  checks: Record<string, PolicyCheck>,
+  failedChecks: FailedCheck[],
+): string[] {
+  const failedCodes = new Set(failedChecks.map((check) => check.code));
+  const passed = Object.entries(checks)
+    .filter(([, check]) => check.status === "pass")
+    .map(([name]) => passedCodeFor(name))
+    .filter((code) => !failedCodes.has(code));
+  return [...new Set(passed)];
+}
+
+function passedCodeFor(name: string): string {
+  const explicit: Record<string, string> = {
+    calldata_decodable: "CALLDATA_DECODABLE",
+    calldata_selector_allowlisted: "CALLDATA_SELECTOR_ALLOWLISTED",
+    decoded_token_in: "DECODED_TOKEN_IN_MATCH",
+    decoded_token_out: "DECODED_TOKEN_OUT_MATCH",
+    decoded_recipient: "DECODED_RECIPIENT_MATCH",
+    decoded_amount_in: "DECODED_AMOUNT_IN_MATCH",
+    decoded_minimum_output: "DECODED_MINIMUM_OUTPUT_MATCH",
+    native_value: "NATIVE_VALUE_MATCH",
+    calldata_fingerprint_binding: "CALLDATA_FINGERPRINT_MATCH",
+    method_parameter_fingerprint_binding: "METHOD_PARAMETER_FINGERPRINT_MATCH",
+    route_data_decodable: "ROUTE_DATA_DECODABLE",
+    route_expected_output: "ROUTE_EXPECTED_OUTPUT_MATCH",
+    route_destination_token: "ROUTE_DESTINATION_TOKEN_MATCH",
+    execution_targets_resolved: "EXECUTION_TARGETS_RESOLVED",
+  };
+  return explicit[name] ?? name.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase();
 }
 
 export function emptySimulation(): SimulationResult {
@@ -232,9 +318,22 @@ export function emptyRouterIntegrity(): RouterIntegrity {
     bytecodePresent: null,
     routerBytecodeHash: null,
     approvedRouterCodeHashes: [],
+    approvedRouterTrustRecords: [],
     routerCodeHashApproved: null,
+    operatorApprovalRequired: true,
+    trustRecordFingerprint: null,
     rpcCodeHashes: [],
     codeHashAgreement: "unavailable",
+    proxyDetection: {
+      proxyDetected: null,
+      proxyType: "unavailable",
+      implementationAddress: null,
+      implementationCodeHash: null,
+      implementationBytecode: null,
+      implementationBytecodeLength: null,
+      rpcAgreement: "unavailable",
+      blockNumbers: [],
+    },
     warnings: [],
   };
 }
@@ -258,8 +357,12 @@ export function emptyGasPolicy(
     gasPriceWei: null,
     estimatedGasWei: null,
     estimatedGasPls: null,
+    estimatedGasCostPls: null,
     safetyAdjustedGasWei: null,
     safetyAdjustedGasPls: null,
+    safetyAdjustedGasCostPls: null,
+    estimatedGasCostUsd: null,
+    gasCostAsPercentOfInputValue: null,
     maximumGasPls: maximumGasPls ?? null,
     maximumGasWei: maximumGasPls ? parseHumanUnitsStrict(maximumGasPls, 18)?.toString() ?? null : null,
     withinMaximumGasPolicy: null,
