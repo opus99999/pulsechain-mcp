@@ -14,6 +14,7 @@ export const phiatShadowBuyInputSchema = {
   maximumReferenceDriftPercent: z.number().finite().min(0).max(100).optional(),
   maximumSlippagePercent: z.number().finite().min(0).max(100).optional(),
   maximumQuoteAgeMs: z.number().int().min(1_000).max(600_000).optional(),
+  maximumBatchDurationMs: z.number().int().min(1_000).max(120_000).optional(),
   maximumGasPls: z.string().min(1).optional(),
   requireOperationalRecommendation: z.boolean().optional(),
   referenceAmountHuman: z.string().min(1).optional(),

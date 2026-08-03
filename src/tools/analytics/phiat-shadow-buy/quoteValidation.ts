@@ -1,13 +1,13 @@
 import { PULSECHAIN_CHAIN_ID } from "../../../constants.js";
 import { type PiteasPrepareResult, type PiteasQuoteData } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PITEAS_ROUTER } from "./constants.js";
-import type { DecodedIntent, PolicyCheck } from "./types.js";
+import type { DecodedIntent, PolicyCheck, ShadowBuyReason } from "./types.js";
 import { passCheck, requireCheck } from "./policyEvaluation.js";
 import { isPositiveIntegerString, safeWei, sameAddress, stringToBigInt } from "./inputNormalization.js";
 
 export function validatePreparedAndDecodedIntent(args: {
   policyChecks: Record<string, PolicyCheck>;
-  reasons: string[];
+  reasons: ShadowBuyReason[];
   quote: PiteasQuoteData;
   prepared: Extract<PiteasPrepareResult, { ok: true }>;
   decodedIntent: DecodedIntent;

@@ -1,11 +1,16 @@
-import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness } from "./types.js";
+import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus } from "./types.js";
 import type { PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
 
 export function buildCertificate(args: {
   decision: Decision;
-  reasons: string[];
+  reasons: ShadowBuyReason[];
+  quoteBatchStatus?: QuoteBatchStatus;
+  allowanceStatus?: AllowanceStatus;
+  approvalStatus?: ApprovalStatus;
+  routerIntegrityStatus?: RouterIntegrityStatus;
+  simulationStatus?: SimulationStatus;
   marketContext: Record<string, unknown>;
   exactAmountEvidence: Record<string, unknown>;
   referenceBefore?: ShadowQuoteSummary | null;
@@ -32,6 +37,12 @@ export function buildCertificate(args: {
   return {
     decision: args.decision,
     reasons: args.reasons,
+    reasonSummaries: args.reasons.map((reason) => reason.message),
+    quoteBatchStatus: args.quoteBatchStatus ?? "DEADLINE_INSUFFICIENT",
+    allowanceStatus: args.allowanceStatus ?? "NOT_EVALUATED",
+    approvalStatus: args.approvalStatus ?? "NOT_EVALUATED",
+    routerIntegrityStatus: args.routerIntegrityStatus ?? "NOT_EVALUATED",
+    simulationStatus: args.simulationStatus ?? "NOT_RUN",
     marketContext: args.marketContext,
     exactAmountEvidence: args.exactAmountEvidence,
     referenceBefore: sanitizeQuote(args.referenceBefore ?? null),
@@ -117,7 +128,7 @@ export function emptyAllowance(owner: string, requiredAmountRaw: string): Allowa
 
 export function emptyApprovalIntent(): ApprovalIntent {
   return {
-    status: "NOT_REQUIRED",
+    status: "NOT_EVALUATED",
     token: PHIAT_SHADOW_BUY_TOKEN_IN,
     spender: null,
     amountRaw: null,

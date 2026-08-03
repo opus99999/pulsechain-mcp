@@ -7,15 +7,15 @@ import { estimateGas, ethCall, getFeeData, getPiteasQuote, preparePiteasSwap, re
 import { registerTool } from "../../define.js";
 import { buildPhiatDashboard } from "../phiatDashboard.js";
 import { phiatShadowBuyInputSchema } from "./schema.js";
-import { DEFAULT_ANALYTICAL_THRESHOLD_PERCENT, DEFAULT_GAS_SAFETY_FACTOR, DEFAULT_MAX_QUOTE_AGE_MS, DEFAULT_OPERATIONAL_THRESHOLD_PERCENT, DEFAULT_REFERENCE_AMOUNT_HUMAN, DEFAULT_REFERENCE_DRIFT_PERCENT, DEFAULT_SLIPPAGE_PERCENT, EUSDC_DECIMALS, PHIAT_SHADOW_BUY_TOKEN_IN, SHADOW_PITEAS_REQUEST_COUNT } from "./constants.js";
-import type { PhiatShadowBuyCertificate, PhiatShadowBuyDeps, PhiatShadowBuyInput, Decision, PolicyCheck } from "./types.js";
+import { DEFAULT_ANALYTICAL_THRESHOLD_PERCENT, DEFAULT_GAS_SAFETY_FACTOR, DEFAULT_MAX_BATCH_DURATION_MS, DEFAULT_MAX_QUOTE_AGE_MS, DEFAULT_OPERATIONAL_THRESHOLD_PERCENT, DEFAULT_REFERENCE_AMOUNT_HUMAN, DEFAULT_REFERENCE_DRIFT_PERCENT, DEFAULT_SLIPPAGE_PERCENT, EUSDC_DECIMALS, MARKET_CONTEXT_TIMEOUT_MS, MAX_BATCH_DURATION_MS, MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS, PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_PER_REQUEST_TIMEOUT_MS, POST_CANDIDATE_VALIDATION_RESERVE_MS, REFERENCE_AFTER_RESERVE_MS, SHADOW_PITEAS_REQUEST_COUNT } from "./constants.js";
+import type { PhiatShadowBuyCertificate, PhiatShadowBuyDeps, PhiatShadowBuyInput, Decision, PolicyCheck, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ShadowQuoteSummary } from "./types.js";
 import { readEusdcAllowance, readAllowance } from "./allowance.js";
 import { readEusdcBalance, readNativeBalance, readBalances } from "./balances.js";
 import { readRouterIntegrity, validateRouterIntegrity } from "./routerIntegrity.js";
 import { emptyAllowance, emptyApprovalIntent, emptyBalances, emptyExecutionTargets, emptyGasPolicy, emptyRouterIntegrity, emptySimulation, buildCertificate, sanitizeQuote } from "./certificate.js";
 import { failCheck, hasFailures, passCheck, requireCheck, warnCheck } from "./policyEvaluation.js";
 import { parseHumanUnitsStrict, quoteFingerprint, fingerprint, isPositiveIntegerString } from "./inputNormalization.js";
-import { readMarketContext, requestShadowQuote, analyzeQuoteFreshness } from "./exactAmountSandwich.js";
+import { readMarketContext, requestShadowQuote, analyzeQuoteFreshness, skippedQuoteSummary } from "./exactAmountSandwich.js";
 import { calculateCandidateDeteriorationPercent, calculateReferenceDriftPercent } from "./deterioration.js";
 import { bindCandidateQuote, buildPreparedIntent } from "./quoteBinding.js";
 import { decodeShadowBuyCalldata } from "./calldataDecode.js";
@@ -44,12 +44,14 @@ export async function buildPhiatShadowBuy(
   input: PhiatShadowBuyInput,
   deps: PhiatShadowBuyDeps = defaultDeps,
 ): Promise<PhiatShadowBuyCertificate> {
-  const reasons: string[] = [];
+  const reasons: ShadowBuyReason[] = [];
   const policyChecks: Record<string, PolicyCheck> = {};
   const now = () => deps.nowMs?.() ?? Date.now();
-  const startedMs = now();
   const maximumQuoteAgeMs = input.maximumQuoteAgeMs ?? DEFAULT_MAX_QUOTE_AGE_MS;
-  const deadlineMs = startedMs + maximumQuoteAgeMs;
+  const maximumBatchDurationMs = Math.min(
+    input.maximumBatchDurationMs ?? DEFAULT_MAX_BATCH_DURATION_MS,
+    MAX_BATCH_DURATION_MS,
+  );
   const analyticalThresholdPercent =
     input.analyticalThresholdPercent ?? DEFAULT_ANALYTICAL_THRESHOLD_PERCENT;
   const operationalThresholdPercent =
@@ -72,12 +74,25 @@ export async function buildPhiatShadowBuy(
   const routerIntegrity = emptyRouterIntegrity();
   const executionTargets = emptyExecutionTargets();
   const gasPolicy = emptyGasPolicy(gasSafetyFactor, input.maximumGasPls);
+  let quoteBatchStatus: QuoteBatchStatus = "DEADLINE_INSUFFICIENT";
+  let allowanceStatus: AllowanceStatus = "NOT_EVALUATED";
+  let approvalStatus: ApprovalStatus = "NOT_EVALUATED";
+  let routerIntegrityStatus: RouterIntegrityStatus = "NOT_EVALUATED";
+  let simulationStatus: SimulationStatus = "NOT_RUN";
 
   if (!isAddress(input.walletAddress)) {
-    failCheck(policyChecks, reasons, "wallet_address", "Invalid walletAddress");
+    failCheck(policyChecks, reasons, "wallet_address", "Invalid walletAddress", undefined, {
+      code: "INVALID_WALLET_ADDRESS",
+      stage: "input_validation",
+    });
     return buildCertificate({
       decision: "REJECT",
       reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
       marketContext: {},
       exactAmountEvidence: {},
       rateLimitBudget: null,
@@ -103,10 +118,17 @@ export async function buildPhiatShadowBuy(
       reasons,
       "amount_in",
       "amountInHuman must be a positive exact eUSDC decimal amount",
+      undefined,
+      { code: "INVALID_AMOUNT_IN", stage: "input_validation" },
     );
     return buildCertificate({
       decision: "REJECT",
       reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
       marketContext: {},
       exactAmountEvidence: {},
       rateLimitBudget: null,
@@ -126,10 +148,17 @@ export async function buildPhiatShadowBuy(
       reasons,
       "reference_amount",
       "referenceAmountHuman must be a positive exact eUSDC decimal amount",
+      undefined,
+      { code: "INVALID_REFERENCE_AMOUNT", stage: "input_validation" },
     );
     return buildCertificate({
       decision: "REJECT",
       reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
       marketContext: {},
       exactAmountEvidence: {},
       rateLimitBudget: null,
@@ -157,27 +186,94 @@ export async function buildPhiatShadowBuy(
     maximumReferenceDriftPercent,
     maximumSlippagePercent,
     maximumQuoteAgeMs,
+    maximumBatchDurationMs,
+    marketContextTimeoutMs: MARKET_CONTEXT_TIMEOUT_MS,
+    piteasPerRequestTimeoutMs: PITEAS_PER_REQUEST_TIMEOUT_MS,
+    referenceAfterReserveMs: REFERENCE_AFTER_RESERVE_MS,
+    postCandidateValidationReserveMs: POST_CANDIDATE_VALIDATION_RESERVE_MS,
+    minimumViablePiteasRequestTimeoutMs: MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS,
     piteasRequestCountRequired: SHADOW_PITEAS_REQUEST_COUNT,
+    piteasRequestCountAttempted: 0,
     warning:
       "This is a shadow-execution certificate only. It is not a signed transaction and is not reusable after any approval or market-state change.",
   };
 
+  const marketContext = await readMarketContext(config, deps, MARKET_CONTEXT_TIMEOUT_MS);
+  exactAmountEvidence.marketContextStartedAt = marketContext.marketContextStartedAt ?? null;
+  exactAmountEvidence.marketContextCompletedAt = marketContext.marketContextCompletedAt ?? null;
+  exactAmountEvidence.marketContextDurationMs = marketContext.marketContextDurationMs ?? null;
+  if (marketContext.ok === false) {
+    policyChecks.market_context = {
+      status: "warning",
+      code: "MARKET_CONTEXT_PARTIAL_FAILURE",
+      stage: "market_context",
+      reason: "Market context failed or timed out; exact quote certification continued.",
+      details: marketContext,
+    };
+  }
+
+  if (!batchBudgetCanStart(maximumBatchDurationMs)) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "batch_deadline",
+      "Configured maximumBatchDurationMs cannot fit the required three-quote sandwich reserves",
+      {
+        maximumBatchDurationMs,
+        requiredMinimumMs: requiredInitialBatchBudgetMs(),
+      },
+      { code: "INSUFFICIENT_BATCH_DEADLINE", stage: "quote_batch" },
+    );
+    return buildCertificate({
+      decision: "REJECT",
+      reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
+      marketContext,
+      exactAmountEvidence,
+      rateLimitBudget: null,
+      balances,
+      allowance: { ...allowance, requiredAmountRaw: amountInRaw },
+      approvalIntent,
+      routerIntegrity,
+      executionTargets,
+      simulation,
+      gasPolicy,
+      policyChecks,
+    });
+  }
+
+  const quoteBatchStartedMs = now();
+  const quoteBatchDeadlineMs = quoteBatchStartedMs + maximumBatchDurationMs;
+  exactAmountEvidence.quoteBatchStartedAt = new Date(quoteBatchStartedMs).toISOString();
+  exactAmountEvidence.quoteBatchDeadlineAt = new Date(quoteBatchDeadlineMs).toISOString();
+
   const rateLimitBudget = deps.reservePiteasRateLimitSlots(
     SHADOW_PITEAS_REQUEST_COUNT,
-    startedMs,
+    quoteBatchStartedMs,
   );
   if (!rateLimitBudget.ok) {
+    quoteBatchStatus = "RATE_LIMITED";
     failCheck(
       policyChecks,
       reasons,
       "piteas_rate_limit",
       "RATE_LIMIT_REQUOTE_REQUIRED",
       rateLimitBudget as unknown as Record<string, unknown>,
+      { code: "RATE_LIMIT_REQUOTE_REQUIRED", stage: "quote_batch" },
     );
     return buildCertificate({
       decision: "REJECT",
       reasons,
-      marketContext: {},
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
+      marketContext,
       exactAmountEvidence,
       rateLimitBudget,
       balances,
@@ -196,53 +292,136 @@ export async function buildPhiatShadowBuy(
     resetAt: rateLimitBudget.resetAt,
   });
 
-  const marketContext = await readMarketContext(config, deps);
+  let referenceBefore: ShadowQuoteSummary;
+  let candidateQuote: ShadowQuoteSummary;
+  let referenceAfter: ShadowQuoteSummary;
+  let deadlineInsufficient = false;
 
-  const referenceBefore = await requestShadowQuote({
-    config,
-    deps,
-    label: "reference_before",
-    inputRaw: referenceRaw,
-    inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
-    account: null,
-    maximumSlippagePercent,
-    deadlineMs,
+  const referenceBeforeTimeoutMs = quoteRequestTimeout({
+    nowMs: now(),
+    batchDeadlineMs: quoteBatchDeadlineMs,
+    reservesMs:
+      MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS +
+      REFERENCE_AFTER_RESERVE_MS +
+      POST_CANDIDATE_VALIDATION_RESERVE_MS,
   });
-  const candidateQuote = await requestShadowQuote({
-    config,
-    deps,
-    label: "candidate",
-    inputRaw: amountInRaw,
-    inputHuman: amountInHuman,
-    account: walletAddress,
-    maximumSlippagePercent,
-    deadlineMs,
-  });
-  const referenceAfter = await requestShadowQuote({
-    config,
-    deps,
-    label: "reference_after",
-    inputRaw: referenceRaw,
-    inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
-    account: null,
-    maximumSlippagePercent,
-    deadlineMs,
-  });
+  if (referenceBeforeTimeoutMs === null) {
+    deadlineInsufficient = true;
+    referenceBefore = skippedQuoteSummary({
+      label: "reference_before",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      atMs: now(),
+      reason: "INSUFFICIENT_BATCH_DEADLINE",
+    });
+  } else {
+    referenceBefore = await requestShadowQuote({
+      config,
+      deps,
+      label: "reference_before",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      maximumSlippagePercent,
+      timeoutMs: referenceBeforeTimeoutMs,
+    });
+  }
+
+  const candidateTimeoutMs = deadlineInsufficient
+    ? null
+    : quoteRequestTimeout({
+        nowMs: now(),
+        batchDeadlineMs: quoteBatchDeadlineMs,
+        reservesMs: REFERENCE_AFTER_RESERVE_MS + POST_CANDIDATE_VALIDATION_RESERVE_MS,
+      });
+  if (candidateTimeoutMs === null) {
+    deadlineInsufficient = true;
+    candidateQuote = skippedQuoteSummary({
+      label: "candidate",
+      inputRaw: amountInRaw,
+      inputHuman: amountInHuman,
+      account: walletAddress,
+      atMs: now(),
+      reason: "INSUFFICIENT_BATCH_DEADLINE",
+    });
+  } else {
+    candidateQuote = await requestShadowQuote({
+      config,
+      deps,
+      label: "candidate",
+      inputRaw: amountInRaw,
+      inputHuman: amountInHuman,
+      account: walletAddress,
+      maximumSlippagePercent,
+      timeoutMs: candidateTimeoutMs,
+    });
+  }
+
+  const referenceAfterTimeoutMs = deadlineInsufficient
+    ? null
+    : quoteRequestTimeout({
+        nowMs: now(),
+        batchDeadlineMs: quoteBatchDeadlineMs,
+        reservesMs: POST_CANDIDATE_VALIDATION_RESERVE_MS,
+        candidateQuote,
+        maximumQuoteAgeMs,
+      });
+  if (referenceAfterTimeoutMs === null) {
+    deadlineInsufficient = true;
+    referenceAfter = skippedQuoteSummary({
+      label: "reference_after",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      atMs: now(),
+      reason: "INSUFFICIENT_BATCH_DEADLINE",
+    });
+  } else {
+    referenceAfter = await requestShadowQuote({
+      config,
+      deps,
+      label: "reference_after",
+      inputRaw: referenceRaw,
+      inputHuman: formatUnits(referenceRawBig, EUSDC_DECIMALS),
+      account: null,
+      maximumSlippagePercent,
+      timeoutMs: referenceAfterTimeoutMs,
+    });
+  }
 
   const batchCompletedMs = now();
-  const batchDurationMs = batchCompletedMs - startedMs;
+  const batchDurationMs = batchCompletedMs - quoteBatchStartedMs;
+  exactAmountEvidence.quoteBatchCompletedAt = new Date(batchCompletedMs).toISOString();
+  exactAmountEvidence.quoteBatchDurationMs = batchDurationMs;
+  exactAmountEvidence.batchStartedAt = new Date(quoteBatchStartedMs).toISOString();
+  exactAmountEvidence.batchCompletedAt = new Date(batchCompletedMs).toISOString();
+  exactAmountEvidence.batchDurationMs = batchDurationMs;
+  exactAmountEvidence.piteasRequestCountAttempted = [
+    referenceBefore,
+    candidateQuote,
+    referenceAfter,
+  ].filter((quote) => quote.attempted).length;
+
+  quoteBatchStatus = deadlineInsufficient
+    ? "DEADLINE_INSUFFICIENT"
+    : !referenceBefore.ok
+      ? "REFERENCE_BEFORE_FAILED"
+      : !candidateQuote.ok
+        ? "CANDIDATE_FAILED"
+        : !referenceAfter.ok
+          ? "REFERENCE_AFTER_FAILED"
+          : "COMPLETE";
+
   const quoteFreshness = analyzeQuoteFreshness({
     referenceBefore,
     candidateQuote,
     referenceAfter,
-    startedMs,
+    startedMs: quoteBatchStartedMs,
     completedMs: batchCompletedMs,
-    deadlineMs,
+    deadlineMs: quoteBatchDeadlineMs,
     maximumQuoteAgeMs,
   });
-  exactAmountEvidence.batchStartedAt = new Date(startedMs).toISOString();
-  exactAmountEvidence.batchCompletedAt = new Date(batchCompletedMs).toISOString();
-  exactAmountEvidence.batchDurationMs = batchDurationMs;
 
   const referenceDriftPercent =
     referenceBefore.data && referenceAfter.data
@@ -264,6 +443,7 @@ export async function buildPhiatShadowBuy(
     referenceBefore.ok,
     "Reference-before Piteas quote failed",
     sanitizeQuote(referenceBefore) ?? undefined,
+    { code: "REFERENCE_BEFORE_FAILED", stage: "quote_batch" },
   );
   requireCheck(
     policyChecks,
@@ -272,6 +452,7 @@ export async function buildPhiatShadowBuy(
     candidateQuote.ok,
     "Exact requested-amount Piteas quote failed",
     sanitizeQuote(candidateQuote) ?? undefined,
+    { code: "CANDIDATE_QUOTE_FAILED", stage: "quote_batch" },
   );
   requireCheck(
     policyChecks,
@@ -280,51 +461,100 @@ export async function buildPhiatShadowBuy(
     referenceAfter.ok,
     "Reference-after Piteas quote failed",
     sanitizeQuote(referenceAfter) ?? undefined,
+    { code: "REFERENCE_AFTER_FAILED", stage: "quote_batch" },
   );
   requireCheck(
     policyChecks,
     reasons,
     "batch_deadline",
-    batchDurationMs <= maximumQuoteAgeMs,
-    "Exact shadow-buy quote batch exceeded the configured deadline",
-    { batchDurationMs, maximumQuoteAgeMs },
+    !deadlineInsufficient && batchDurationMs <= maximumBatchDurationMs,
+    deadlineInsufficient
+      ? "Insufficient quote-batch deadline for required Piteas request reserves"
+      : "Exact shadow-buy quote batch exceeded maximumBatchDurationMs",
+    { batchDurationMs, maximumBatchDurationMs, quoteBatchStatus },
+    { code: "INSUFFICIENT_BATCH_DEADLINE", stage: "quote_batch" },
   );
-  requireCheck(
-    policyChecks,
-    reasons,
-    "quote_freshness",
-    quoteFreshness.referenceBeforeAcceptable &&
-      quoteFreshness.candidateAcceptable &&
-      quoteFreshness.referenceAfterAcceptable,
-    quoteFreshness.reason ?? "One or more quotes are stale or expired",
-    quoteFreshness as unknown as Record<string, unknown>,
-  );
-  requireCheck(
-    policyChecks,
-    reasons,
-    "reference_cache",
-    !quoteFreshness.possibleCacheDetected,
-    "Unresolved possible-cache concern between reference quotes",
-    quoteFreshness as unknown as Record<string, unknown>,
-  );
-  requireCheck(
-    policyChecks,
-    reasons,
-    "reference_drift",
-    referenceDriftPercent !== null &&
-      referenceDriftPercent <= maximumReferenceDriftPercent,
-    "Reference drift exceeds policy or is unavailable",
-    { referenceDriftPercent, maximumReferenceDriftPercent },
-  );
-  requireCheck(
-    policyChecks,
-    reasons,
-    "candidate_deterioration",
-    candidateDeteriorationPercent !== null &&
-      candidateDeteriorationPercent <= operationalThresholdPercent,
-    "Exact requested amount exceeds the operational deterioration threshold",
-    { candidateDeteriorationPercent, operationalThresholdPercent },
-  );
+
+  if (quoteFreshness.freshnessAcceptable) {
+    passCheck(policyChecks, "quote_freshness", quoteFreshness as unknown as Record<string, unknown>);
+  } else if (quoteBatchStatus === "COMPLETE") {
+    failCheck(
+      policyChecks,
+      reasons,
+      "quote_freshness",
+      quoteFreshness.reason ?? "Quote freshness is unacceptable",
+      quoteFreshness as unknown as Record<string, unknown>,
+      { code: quoteFreshness.candidateAcceptable ? "REFERENCE_FRESHNESS_UNAVAILABLE" : "CANDIDATE_QUOTE_STALE", stage: "quote_freshness" },
+    );
+  } else {
+    policyChecks.quote_freshness = {
+      status: "fail",
+      code: "QUOTE_BATCH_INCOMPLETE",
+      stage: "quote_freshness",
+      reason: quoteFreshness.reason ?? "Quote batch incomplete",
+      details: quoteFreshness as unknown as Record<string, unknown>,
+    };
+  }
+
+  if (quoteBatchStatus === "COMPLETE") {
+    requireCheck(
+      policyChecks,
+      reasons,
+      "reference_cache",
+      !quoteFreshness.possibleCacheDetected,
+      "Unresolved possible-cache concern between reference quotes",
+      quoteFreshness as unknown as Record<string, unknown>,
+      { code: "POSSIBLE_CACHE_DETECTED", stage: "quote_freshness" },
+    );
+  }
+
+  if (referenceDriftPercent === null) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "reference_drift",
+      "Reference drift is unavailable because both reference quotes were not available",
+      { referenceDriftPercent, maximumReferenceDriftPercent },
+      { code: "REFERENCE_DRIFT_UNAVAILABLE", stage: "quote_batch" },
+    );
+  } else if (referenceDriftPercent > maximumReferenceDriftPercent) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "reference_drift",
+      "Reference drift exceeds policy",
+      { referenceDriftPercent, maximumReferenceDriftPercent },
+      { code: "REFERENCE_DRIFT_EXCEEDED", stage: "quote_batch" },
+    );
+  } else {
+    passCheck(policyChecks, "reference_drift", { referenceDriftPercent, maximumReferenceDriftPercent });
+  }
+
+  if (candidateDeteriorationPercent === null) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "candidate_deterioration",
+      "Candidate deterioration is unavailable because reference or candidate quote data is unavailable",
+      { candidateDeteriorationPercent, operationalThresholdPercent },
+      { code: "CANDIDATE_DETERIORATION_UNAVAILABLE", stage: "quote_batch" },
+    );
+  } else if (candidateDeteriorationPercent > operationalThresholdPercent) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "candidate_deterioration",
+      "Exact requested amount exceeds the operational deterioration threshold",
+      { candidateDeteriorationPercent, operationalThresholdPercent },
+      { code: "CANDIDATE_DETERIORATION_EXCEEDED", stage: "quote_batch" },
+    );
+  } else {
+    passCheck(policyChecks, "candidate_deterioration", {
+      candidateDeteriorationPercent,
+      operationalThresholdPercent,
+    });
+  }
+
   requireCheck(
     policyChecks,
     reasons,
@@ -337,12 +567,18 @@ export async function buildPhiatShadowBuy(
       amountOut: candidateQuote.data?.amountOut ?? null,
       amountOutMin: candidateQuote.data?.amountOutMin ?? null,
     },
+    { code: "CANDIDATE_OUTPUT_UNAVAILABLE", stage: "quote_batch" },
   );
 
-  if (!candidateQuote.data) {
+  if (quoteBatchStatus !== "COMPLETE" || hasFailures(policyChecks)) {
     return buildCertificate({
       decision: "REJECT",
       reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
       marketContext,
       exactAmountEvidence,
       referenceBefore,
@@ -363,10 +599,53 @@ export async function buildPhiatShadowBuy(
     });
   }
 
+  const retainedCandidateQuote = candidateQuote.data!;
   const binding = bindCandidateQuote(candidateQuote);
   Object.assign(exactAmountEvidence, binding);
+  const candidateAgeBeforePreparationMs = candidateAgeMs(candidateQuote, now());
+  exactAmountEvidence.candidateAgeBeforePreparationMs = candidateAgeBeforePreparationMs;
+  quoteFreshness.candidateAgeBeforePreparationMs = candidateAgeBeforePreparationMs;
+  if (
+    candidateAgeBeforePreparationMs === null ||
+    candidateAgeBeforePreparationMs > maximumQuoteAgeMs
+  ) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "candidate_quote_age_before_preparation",
+      "CANDIDATE_QUOTE_STALE",
+      { candidateAgeBeforePreparationMs, maximumQuoteAgeMs },
+      { code: "CANDIDATE_QUOTE_STALE", stage: "quote_freshness" },
+    );
+    return buildCertificate({
+      decision: "REJECT",
+      reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
+      marketContext,
+      exactAmountEvidence,
+      referenceBefore,
+      candidateQuote,
+      referenceAfter,
+      referenceDriftPercent,
+      candidateDeteriorationPercent,
+      quoteFreshness,
+      rateLimitBudget,
+      balances,
+      allowance: { ...allowance, requiredAmountRaw: amountInRaw },
+      approvalIntent,
+      routerIntegrity,
+      executionTargets,
+      simulation,
+      gasPolicy,
+      policyChecks,
+    });
+  }
 
-  const prepared = deps.preparePiteasSwap(candidateQuote.data, {
+  const prepared = deps.preparePiteasSwap(retainedCandidateQuote, {
     account: walletAddress,
   });
   if (!prepared.ok) {
@@ -379,6 +658,11 @@ export async function buildPhiatShadowBuy(
     return buildCertificate({
       decision: "REJECT",
       reasons,
+      quoteBatchStatus,
+      allowanceStatus,
+      approvalStatus,
+      routerIntegrityStatus,
+      simulationStatus,
       marketContext,
       exactAmountEvidence,
       referenceBefore,
@@ -400,7 +684,7 @@ export async function buildPhiatShadowBuy(
   }
 
   const preparedIntent = buildPreparedIntent(
-    candidateQuote.data,
+    retainedCandidateQuote,
     prepared,
     amountInHuman,
   );
@@ -409,9 +693,9 @@ export async function buildPhiatShadowBuy(
     policyChecks,
     reasons,
     "candidate_quote_binding",
-    binding.candidateQuoteFingerprint === quoteFingerprint(candidateQuote.data) &&
+    binding.candidateQuoteFingerprint === quoteFingerprint(retainedCandidateQuote) &&
       binding.candidateMethodParametersFingerprint === preparedMethodFingerprint &&
-      prepared.intent.data === candidateQuote.data.methodParameters.calldata,
+      prepared.intent.data === retainedCandidateQuote.methodParameters.calldata,
     "Prepared intent did not derive from the retained exact candidate quote",
     {
       candidateQuoteFingerprint: binding.candidateQuoteFingerprint,
@@ -424,7 +708,7 @@ export async function buildPhiatShadowBuy(
   validatePreparedAndDecodedIntent({
     policyChecks,
     reasons,
-    quote: candidateQuote.data,
+    quote: retainedCandidateQuote,
     prepared,
     decodedIntent,
     walletAddress,
@@ -438,6 +722,7 @@ export async function buildPhiatShadowBuy(
     approvedRouterCodeHashes,
   );
   validateRouterIntegrity(policyChecks, reasons, routerReport);
+  routerIntegrityStatus = routerStatusFromChecks(policyChecks, routerReport.bytecodePresent);
   const executionTargetReport = buildExecutionTargets(
     routerReport,
     decodedIntent,
@@ -458,6 +743,7 @@ export async function buildPhiatShadowBuy(
     balances.inputBalanceSufficient === true,
     "INSUFFICIENT_INPUT_BALANCE",
     balances as unknown as Record<string, unknown>,
+    { code: "INSUFFICIENT_INPUT_BALANCE", stage: "balances" },
   );
 
   const allowanceReport = await readAllowance({
@@ -470,22 +756,27 @@ export async function buildPhiatShadowBuy(
   Object.assign(allowance, allowanceReport);
   const allowanceInsufficient = allowance.sufficient === false;
   if (allowance.sufficient === true) {
+    allowanceStatus = "SUFFICIENT";
+    approvalStatus = "NOT_REQUIRED";
+    approvalIntent.status = "NOT_REQUIRED";
     passCheck(policyChecks, "allowance", {
       allowanceRaw: allowance.allowanceRaw,
       requiredAmountRaw: amountInRaw,
     });
   } else if (allowanceInsufficient) {
+    allowanceStatus = "INSUFFICIENT";
     warnCheck(policyChecks, "allowance", "INSUFFICIENT_ALLOWANCE", {
       allowanceRaw: allowance.allowanceRaw,
       requiredAmountRaw: amountInRaw,
     });
   } else {
+    allowanceStatus = "UNAVAILABLE";
     failCheck(policyChecks, reasons, "allowance", "Allowance is unavailable", {
       error: allowance.error,
-    });
+    }, { code: "ALLOWANCE_UNAVAILABLE", stage: "allowance" });
   }
 
-  const candidateGasUseEstimate = candidateQuote.data.gasUseEstimate;
+  const candidateGasUseEstimate = retainedCandidateQuote.gasUseEstimate;
   const quoteGasEstimate =
     typeof candidateGasUseEstimate === "number" &&
     Number.isSafeInteger(candidateGasUseEstimate) &&
@@ -511,7 +802,7 @@ export async function buildPhiatShadowBuy(
       "quote_gas_estimate",
       quoteGasEstimate !== null,
       "Retained candidate quote does not contain a usable positive gas estimate",
-      { gasUseEstimate: candidateQuote.data.gasUseEstimate ?? null },
+      { gasUseEstimate: retainedCandidateQuote.gasUseEstimate ?? null },
     );
     requireCheck(
       policyChecks,
@@ -520,6 +811,7 @@ export async function buildPhiatShadowBuy(
       gasPolicy.nativeBalanceCoversSafetyAdjustedGas === true,
       "INSUFFICIENT_GAS_BALANCE",
       gasPolicy as unknown as Record<string, unknown>,
+      { code: "INSUFFICIENT_GAS_BALANCE", stage: "gas_policy" },
     );
     if (input.maximumGasPls !== undefined) {
       requireCheck(
@@ -529,12 +821,33 @@ export async function buildPhiatShadowBuy(
         gasPolicy.withinMaximumGasPolicy === true,
         "Estimated gas cost exceeds maximumGasPls policy",
         gasPolicy as unknown as Record<string, unknown>,
+        { code: "INSUFFICIENT_GAS_BALANCE", stage: "gas_policy" },
       );
     }
   }
 
   if (allowanceInsufficient && !hasFailures(policyChecks)) {
+    approvalStatus = "NEEDS_APPROVAL";
     approval = buildApprovalIntent(prepared.intent.to, amountInRaw);
+    const candidateAgeBeforeSimulationMs = candidateAgeMs(candidateQuote, now());
+    exactAmountEvidence.candidateAgeBeforeSimulationMs = candidateAgeBeforeSimulationMs;
+    quoteFreshness.candidateAgeBeforeSimulationMs = candidateAgeBeforeSimulationMs;
+    if (
+      candidateAgeBeforeSimulationMs === null ||
+      candidateAgeBeforeSimulationMs > maximumQuoteAgeMs
+    ) {
+      failCheck(
+        policyChecks,
+        reasons,
+        "candidate_quote_age_before_simulation",
+        "CANDIDATE_QUOTE_STALE",
+        { candidateAgeBeforeSimulationMs, maximumQuoteAgeMs },
+        { code: "CANDIDATE_QUOTE_STALE", stage: "quote_freshness" },
+      );
+    }
+  }
+
+  if (allowanceInsufficient && !hasFailures(policyChecks) && approval.status === "APPROVAL_REQUIRED") {
     const approvalSimulation = await simulateTransaction({
       config,
       deps,
@@ -553,18 +866,39 @@ export async function buildPhiatShadowBuy(
         "Approval simulation failed",
         approvalSimulation as unknown as Record<string, unknown>,
       );
+      approvalStatus = "SIMULATION_FAILED";
     } else {
       passCheck(policyChecks, "approval_simulation", {
         gasEstimate: approvalSimulation.gasEstimate,
       });
     }
   } else if (allowanceInsufficient) {
+    approvalStatus = hasFailures(policyChecks) ? "INVALID" : approvalStatus;
     approval = {
       ...approvalIntent,
       status: "UNAVAILABLE",
       spender: prepared.intent.to,
       error: "Approval intent withheld because mandatory shadow-buy checks failed.",
     };
+  }
+
+  if (!allowanceInsufficient && !hasFailures(policyChecks)) {
+    const candidateAgeBeforeSimulationMs = candidateAgeMs(candidateQuote, now());
+    exactAmountEvidence.candidateAgeBeforeSimulationMs = candidateAgeBeforeSimulationMs;
+    quoteFreshness.candidateAgeBeforeSimulationMs = candidateAgeBeforeSimulationMs;
+    if (
+      candidateAgeBeforeSimulationMs === null ||
+      candidateAgeBeforeSimulationMs > maximumQuoteAgeMs
+    ) {
+      failCheck(
+        policyChecks,
+        reasons,
+        "candidate_quote_age_before_simulation",
+        "CANDIDATE_QUOTE_STALE",
+        { candidateAgeBeforeSimulationMs, maximumQuoteAgeMs },
+        { code: "CANDIDATE_QUOTE_STALE", stage: "quote_freshness" },
+      );
+    }
   }
 
   if (!allowanceInsufficient && !hasFailures(policyChecks)) {
@@ -584,6 +918,7 @@ export async function buildPhiatShadowBuy(
       swapSimulation.ethCallOk,
       "Simulation reverted",
       swapSimulation as unknown as Record<string, unknown>,
+      { code: "SIMULATION_ETH_CALL_FAILED", stage: "simulation" },
     );
     requireCheck(
       policyChecks,
@@ -592,6 +927,30 @@ export async function buildPhiatShadowBuy(
       swapSimulation.estimateGasOk,
       "Gas cannot be estimated",
       swapSimulation as unknown as Record<string, unknown>,
+      { code: "SIMULATION_GAS_ESTIMATION_FAILED", stage: "simulation" },
+    );
+    simulationStatus = !swapSimulation.ethCallOk
+      ? "ETH_CALL_FAILED"
+      : !swapSimulation.estimateGasOk
+        ? "GAS_ESTIMATION_FAILED"
+        : "PASSED";
+  }
+
+  const candidateAgeAfterSimulationMs = candidateAgeMs(candidateQuote, now());
+  exactAmountEvidence.candidateAgeAfterSimulationMs = candidateAgeAfterSimulationMs;
+  quoteFreshness.candidateAgeAfterSimulationMs = candidateAgeAfterSimulationMs;
+  if (
+    simulationStatus === "PASSED" &&
+    (candidateAgeAfterSimulationMs === null ||
+      candidateAgeAfterSimulationMs > maximumQuoteAgeMs)
+  ) {
+    failCheck(
+      policyChecks,
+      reasons,
+      "candidate_quote_age_after_simulation",
+      "CANDIDATE_QUOTE_STALE",
+      { candidateAgeAfterSimulationMs, maximumQuoteAgeMs },
+      { code: "CANDIDATE_QUOTE_STALE", stage: "quote_freshness" },
     );
   }
 
@@ -613,6 +972,7 @@ export async function buildPhiatShadowBuy(
       gasPolicy.nativeBalanceCoversSafetyAdjustedGas === true,
       "INSUFFICIENT_GAS_BALANCE",
       gasPolicy as unknown as Record<string, unknown>,
+      { code: "INSUFFICIENT_GAS_BALANCE", stage: "gas_policy" },
     );
     if (input.maximumGasPls !== undefined) {
       requireCheck(
@@ -639,22 +999,30 @@ export async function buildPhiatShadowBuy(
       : "WOULD_BUY";
   const finalReasons =
     decision === "WOULD_BUY"
-      ? [
-          automaticExecutionEligible
-            ? "All shadow-buy checks passed; no signing or broadcast was performed."
-            : "Shadow-buy checks passed, but automatic execution is not eligible until router code hash and targets are operator-approved.",
-        ]
+      ? []
       : decision === "NEEDS_APPROVAL"
         ? [
-            "INSUFFICIENT_ALLOWANCE",
-            "Approval is required before any swap could be reconsidered.",
-            "The current swap evidence is invalid after approval; run phiat_shadow_buy again after approval confirmation.",
+            {
+              code: "INSUFFICIENT_ALLOWANCE",
+              stage: "allowance",
+              message: "Approval is required before any swap could be reconsidered.",
+              evidence: {
+                allowanceRaw: allowance.allowanceRaw,
+                requiredAmountRaw: amountInRaw,
+                swapEvidenceInvalidAfterApproval: true,
+              },
+            },
           ]
         : reasons;
 
   return buildCertificate({
     decision,
     reasons: finalReasons,
+    quoteBatchStatus,
+    allowanceStatus,
+    approvalStatus,
+    routerIntegrityStatus,
+    simulationStatus,
     marketContext,
     exactAmountEvidence,
     referenceBefore,
@@ -678,6 +1046,56 @@ export async function buildPhiatShadowBuy(
     swapEvidenceInvalidAfterApproval: decision === "NEEDS_APPROVAL",
     transactionPrepared: true,
   });
+}
+
+function requiredInitialBatchBudgetMs(): number {
+  return (
+    PITEAS_PER_REQUEST_TIMEOUT_MS * 2 +
+    REFERENCE_AFTER_RESERVE_MS +
+    POST_CANDIDATE_VALIDATION_RESERVE_MS
+  );
+}
+
+function batchBudgetCanStart(maximumBatchDurationMs: number): boolean {
+  return maximumBatchDurationMs >= requiredInitialBatchBudgetMs();
+}
+
+function quoteRequestTimeout(args: {
+  nowMs: number;
+  batchDeadlineMs: number;
+  reservesMs: number;
+  candidateQuote?: ShadowQuoteSummary;
+  maximumQuoteAgeMs?: number;
+}): number | null {
+  const batchRemainingMs = args.batchDeadlineMs - args.nowMs;
+  const candidateRemainingMs =
+    args.candidateQuote?.ok === true && args.maximumQuoteAgeMs !== undefined
+      ? args.maximumQuoteAgeMs - (candidateAgeMs(args.candidateQuote, args.nowMs) ?? Number.POSITIVE_INFINITY)
+      : Number.POSITIVE_INFINITY;
+  const availableMs = Math.min(batchRemainingMs, candidateRemainingMs) - args.reservesMs;
+  if (availableMs < MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS) return null;
+  return Math.min(PITEAS_PER_REQUEST_TIMEOUT_MS, availableMs);
+}
+
+function candidateAgeMs(candidateQuote: ShadowQuoteSummary, nowMs: number): number | null {
+  if (!candidateQuote.ok) return null;
+  const responseMs = Date.parse(candidateQuote.responseReceivedAt);
+  if (!Number.isFinite(responseMs)) return null;
+  return nowMs - responseMs;
+}
+
+function routerStatusFromChecks(
+  checks: Record<string, PolicyCheck>,
+  bytecodePresent: boolean | null,
+): RouterIntegrityStatus {
+  const routerFailures = [
+    "router_allowlist",
+    "router_bytecode_present",
+    "router_code_hash_agreement",
+  ].some((name) => checks[name]?.status === "fail");
+  if (routerFailures) return "FAILED";
+  if (bytecodePresent !== true) return "UNAVAILABLE";
+  return "PASSED";
 }
 
 export function registerPhiatShadowBuyTool(

@@ -1,13 +1,13 @@
 import { keccak256, type Hex } from "viem";
 import type { AppConfig } from "../../../types.js";
 import { PITEAS_ROUTER } from "./constants.js";
-import type { PolicyCheck, RouterIntegrity } from "./types.js";
+import type { PolicyCheck, RouterIntegrity, ShadowBuyReason } from "./types.js";
 import { passCheck, requireCheck, warnCheck } from "./policyEvaluation.js";
 import { errorMessage, sameAddress } from "./inputNormalization.js";
 
 export function validateRouterIntegrity(
   checks: Record<string, PolicyCheck>,
-  reasons: string[],
+  reasons: ShadowBuyReason[],
   router: RouterIntegrity,
 ): void {
   requireCheck(

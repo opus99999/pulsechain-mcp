@@ -11,6 +11,7 @@ export interface PhiatShadowBuyInput {
   maximumReferenceDriftPercent?: number;
   maximumSlippagePercent?: number;
   maximumQuoteAgeMs?: number;
+  maximumBatchDurationMs?: number;
   maximumGasPls?: string;
   requireOperationalRecommendation?: boolean;
   referenceAmountHuman?: string;
@@ -20,18 +21,57 @@ export interface PhiatShadowBuyInput {
 
 export type Decision = "WOULD_BUY" | "NEEDS_APPROVAL" | "REJECT";
 export type PolicyStatus = "pass" | "fail" | "not_run" | "warning";
+export type QuoteBatchStatus =
+  | "COMPLETE"
+  | "RATE_LIMITED"
+  | "DEADLINE_INSUFFICIENT"
+  | "REFERENCE_BEFORE_FAILED"
+  | "CANDIDATE_FAILED"
+  | "REFERENCE_AFTER_FAILED";
+export type AllowanceStatus =
+  | "NOT_EVALUATED"
+  | "SUFFICIENT"
+  | "INSUFFICIENT"
+  | "UNAVAILABLE";
+export type ApprovalStatus =
+  | "NOT_EVALUATED"
+  | "NOT_REQUIRED"
+  | "NEEDS_APPROVAL"
+  | "INVALID"
+  | "SIMULATION_FAILED";
+export type RouterIntegrityStatus =
+  | "NOT_EVALUATED"
+  | "PASSED"
+  | "FAILED"
+  | "UNAVAILABLE";
+export type SimulationStatus =
+  | "NOT_RUN"
+  | "PASSED"
+  | "ETH_CALL_FAILED"
+  | "GAS_ESTIMATION_FAILED";
+
+export interface ShadowBuyReason {
+  code: string;
+  stage: string;
+  message: string;
+  evidence: Record<string, unknown> | null;
+}
 
 export interface PolicyCheck {
   status: PolicyStatus;
+  code?: string;
+  stage?: string;
   reason?: string;
   details?: Record<string, unknown>;
 }
 
 export interface ShadowQuoteSummary {
   label: "reference_before" | "candidate" | "reference_after";
+  attempted: boolean;
   inputHuman: string;
   inputRaw: string;
   account: string | null;
+  timeoutMs: number | null;
   requestStartedAt: string;
   responseReceivedAt: string;
   latencyMs: number;
@@ -146,7 +186,7 @@ export interface AllowanceEvidence {
 }
 
 export interface ApprovalIntent {
-  status: "NOT_REQUIRED" | "APPROVAL_REQUIRED" | "UNAVAILABLE";
+  status: "NOT_EVALUATED" | "NOT_REQUIRED" | "APPROVAL_REQUIRED" | "UNAVAILABLE";
   token: string;
   spender: string | null;
   amountRaw: string | null;
@@ -197,10 +237,14 @@ export interface QuoteFreshness {
   referenceBeforeAcceptable: boolean;
   candidateAcceptable: boolean;
   referenceAfterAcceptable: boolean;
+  freshnessAcceptable: boolean;
   referencesByteIdentical: boolean;
   possibleCacheDetected: boolean;
-  freshnessConfidence: "high" | "medium" | "low";
+  freshnessConfidence: "high" | "medium" | "low" | "unavailable";
   candidateQuoteAgeMs: number | null;
+  candidateAgeBeforePreparationMs: number | null;
+  candidateAgeBeforeSimulationMs: number | null;
+  candidateAgeAfterSimulationMs: number | null;
   maximumQuoteAgeMs: number;
   batchStartedAt: string;
   batchCompletedAt: string;
@@ -226,7 +270,13 @@ export interface GasPolicy {
 
 export interface PhiatShadowBuyCertificate {
   decision: Decision;
-  reasons: string[];
+  reasons: ShadowBuyReason[];
+  reasonSummaries: string[];
+  quoteBatchStatus: QuoteBatchStatus;
+  allowanceStatus: AllowanceStatus;
+  approvalStatus: ApprovalStatus;
+  routerIntegrityStatus: RouterIntegrityStatus;
+  simulationStatus: SimulationStatus;
   marketContext: Record<string, unknown>;
   exactAmountEvidence: Record<string, unknown>;
   referenceBefore: Record<string, unknown> | null;

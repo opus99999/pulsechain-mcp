@@ -1,4 +1,4 @@
-import type { DecodedIntent, ExecutionTargetsReport, PolicyCheck, RouterIntegrity } from "./types.js";
+import type { DecodedIntent, ExecutionTargetsReport, PolicyCheck, RouterIntegrity, ShadowBuyReason } from "./types.js";
 import { PITEAS_ROUTER } from "./constants.js";
 import { requireCheck } from "./policyEvaluation.js";
 
@@ -32,7 +32,7 @@ export function buildExecutionTargets(
 
 export function validateExecutionTargets(
   checks: Record<string, PolicyCheck>,
-  reasons: string[],
+  reasons: ShadowBuyReason[],
   targets: ExecutionTargetsReport,
 ): void {
   requireCheck(
