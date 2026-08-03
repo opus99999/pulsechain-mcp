@@ -605,6 +605,104 @@ export function publicKeyIdFromSpkiDerBase64(publicKeySpkiDerBase64: string): st
   return keccak256(bytesToHex(validation.canonicalSpkiDer));
 }
 
+export function publicKeyIdFromSpkiDer(publicKeySpkiDer: Uint8Array): string {
+  return publicKeyIdFromSpkiDerBase64(Buffer.from(publicKeySpkiDer).toString("base64"));
+}
+
+export function parseTrustManifestJsonText(input: string): { ok: true; value: unknown } | { ok: false; error: string } {
+  return strictJsonParse(input);
+}
+
+export function trustManifestSchemaErrors(manifest: TrustManifest): string[] {
+  return manifestShapeErrors(manifest);
+}
+
+export function extractUnsignedTrustManifest(input: unknown): {
+  ok: true;
+  manifest: TrustManifest;
+} | {
+  ok: false;
+  errors: string[];
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, errors: ["UNSIGNED_MANIFEST_INPUT_NOT_OBJECT"] };
+  }
+  const value = input as Record<string, unknown>;
+  if (value.signature !== undefined) return { ok: false, errors: ["SIGNED_WRAPPER_NOT_UNSIGNED_CANDIDATE"] };
+  const manifest = value.version === "phiat-execution-trust-v1" ? value : value.manifest;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    return { ok: false, errors: ["UNSIGNED_MANIFEST_MISSING"] };
+  }
+  return { ok: true, manifest: manifest as TrustManifest };
+}
+
+export function normalizeTrustManifestSemanticSets(manifest: TrustManifest): TrustManifest {
+  const normalized = structuredClone(manifest) as TrustManifest;
+  normalized.records = normalized.records
+    .map((record) => ({
+      ...record,
+      approvedSelectors: [...record.approvedSelectors].sort(lexCompare),
+      allowedCallTypes: [...record.allowedCallTypes].sort(lexCompare),
+      parentConstraints: [...record.parentConstraints].sort((a, b) =>
+        lexCompare(parentConstraintKey(a), parentConstraintKey(b)),
+      ),
+      callerConstraints: [...record.callerConstraints].sort((a, b) =>
+        lexCompare(callerConstraintKey(a), callerConstraintKey(b)),
+      ),
+      tokenConstraints: record.tokenConstraints
+        ? { ...record.tokenConstraints, assets: [...record.tokenConstraints.assets].sort(lexCompare) }
+        : null,
+      delegatecallContext: record.delegatecallContext
+        ? {
+            ...record.delegatecallContext,
+            allowedSelectors: [...record.delegatecallContext.allowedSelectors].sort(lexCompare),
+          }
+        : null,
+      residualRisks: [...record.residualRisks].sort(lexCompare),
+    }))
+    .sort((a, b) => lexCompare(recordSortKey(a), recordSortKey(b)));
+  normalized.allowedEdges = [...normalized.allowedEdges].sort((a, b) => lexCompare(edgeKey(a), edgeKey(b)));
+  normalized.prohibitedOperations = [...normalized.prohibitedOperations].sort((a, b) =>
+    lexCompare(prohibitedOperationSortKey(a), prohibitedOperationSortKey(b)),
+  ) as TrustManifest["prohibitedOperations"];
+  normalized.manifestId = manifestIdFor(normalized);
+  return normalized;
+}
+
+export function prepareCanonicalTrustManifest(input: unknown): {
+  ok: true;
+  manifest: TrustManifest;
+  manifestFingerprint: string;
+  canonicalManifestJson: string;
+  signatureFrame: Buffer;
+} | {
+  ok: false;
+  errors: string[];
+} {
+  const extracted = extractUnsignedTrustManifest(input);
+  if (!extracted.ok) return extracted;
+  let manifest: TrustManifest;
+  try {
+    manifest = normalizeTrustManifestSemanticSets(extracted.manifest);
+  } catch {
+    return { ok: false, errors: ["MANIFEST_NORMALIZATION_FAILED"] };
+  }
+  const errors = trustManifestSchemaErrors(manifest);
+  if (errors.length > 0) return { ok: false, errors };
+  try {
+    const canonicalManifestJson = canonicalizeJson(manifest);
+    return {
+      ok: true,
+      manifest,
+      manifestFingerprint: manifestFingerprint(manifest),
+      canonicalManifestJson,
+      signatureFrame: signatureFrameForManifest(manifest),
+    };
+  } catch {
+    return { ok: false, errors: ["MANIFEST_CANONICALIZATION_FAILED"] };
+  }
+}
+
 export async function buildTrustManifestCandidate(
   args: BuildTrustManifestCandidateArgs,
 ): Promise<TrustManifestCandidateResult> {
@@ -2070,6 +2168,11 @@ function edgeErrors(edge: TrustManifestEdge): string[] {
 
 function allowedCallType(value: string): boolean {
   return ["CALL", "DELEGATECALL", "STATICCALL"].includes(value);
+}
+
+function prohibitedOperationSortKey(value: string): string {
+  const index = ["CREATE", "CREATE2", "SELFDESTRUCT", "CALLCODE"].indexOf(value);
+  return index === -1 ? `9:${value}` : `${index}:${value}`;
 }
 
 function boundedInteger(value: number): boolean {
