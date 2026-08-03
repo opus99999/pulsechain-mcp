@@ -44,18 +44,6 @@ export function decodeShadowBuyCalldata(
     const [detail, routeData] = decoded.args;
     const route = decodePiteasRouteData(routeData);
     const validationErrors = [...route.validationErrors];
-    const embeddedTargets = route.embeddedAddresses.map((address, index) => ({
-      address,
-      role: "route_embedded_address" as const,
-      selector: null,
-      codeHash: null,
-      approved: null,
-      source: `piteas_route_data.embedded_addresses[${index}]`,
-    }));
-    const unresolvedExecutionTargets =
-      route.swapPayloadCount > 0
-        ? ["piteas_route_payload_targets_unclassified"]
-        : [];
 
     return {
       decodable: true,
@@ -74,6 +62,7 @@ export function decodeShadowBuyCalldata(
       nativeValueWei,
       permitDataPresent: route.permitDataPresent,
       routeDataFingerprint: fingerprint(routeData),
+      routeDataRaw: routeData,
       calldataFingerprint: fingerprint(calldata),
       routeData: {
         decodable: route.decodable,
@@ -85,13 +74,13 @@ export function decodeShadowBuyCalldata(
         embeddedAddresses: route.embeddedAddresses,
         validationErrors: route.validationErrors,
       },
-      executionTargets: embeddedTargets,
-      unresolvedExecutionTargets,
+      executionTargets: [],
+      unresolvedExecutionTargets: [],
       validationErrors,
       decodedExpectedOutputRaw: route.expectedOutputRaw,
       routeExpectedOutputRaw: route.expectedOutputRaw,
-      nestedTargets: embeddedTargets.map((target) => target.address),
-      unresolvedTargets: unresolvedExecutionTargets,
+      nestedTargets: [],
+      unresolvedTargets: [],
       errors: validationErrors,
     };
   } catch (err) {
@@ -132,6 +121,7 @@ function tryDecodeApproval(
       nativeValueWei,
       permitDataPresent: false,
       routeDataFingerprint: null,
+      routeDataRaw: null,
       calldataFingerprint: fingerprint(calldata),
       routeData: null,
       executionTargets: [],
@@ -175,6 +165,7 @@ function undecodable(
     nativeValueWei,
     permitDataPresent: false,
     routeDataFingerprint: null,
+    routeDataRaw: null,
     calldataFingerprint: calldata ? fingerprint(calldata) : null,
     routeData: null,
     executionTargets: [],

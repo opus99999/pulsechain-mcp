@@ -18,6 +18,7 @@ export interface PhiatShadowBuyInput {
   gasSafetyFactor?: number;
   approvedRouterCodeHashes?: string[];
   approvedRouterTrustRecords?: ApprovedRouterTrustRecord[];
+  approvedExecutionTrustRecords?: ExecutionTrustRecord[];
 }
 
 export type Decision = "WOULD_BUY" | "NEEDS_APPROVAL" | "REJECT";
@@ -62,6 +63,23 @@ export type SimulationStatus =
   | "PASSED"
   | "ETH_CALL_FAILED"
   | "GAS_ESTIMATION_FAILED";
+export type ManagerIntegrityStatus =
+  | "NOT_EVALUATED"
+  | "PASSED"
+  | "FAILED"
+  | "UNAVAILABLE";
+export type ExecutionTraceStatus =
+  | "NOT_RUN"
+  | "PASSED"
+  | "FAILED"
+  | "UNSUPPORTED"
+  | "STATE_INSUFFICIENT";
+export type ExecutionGraphStatus =
+  | "NOT_EVALUATED"
+  | "RESOLVED"
+  | "PARTIALLY_RESOLVED"
+  | "UNRESOLVED"
+  | "FAILED";
 
 export interface ShadowBuyReason {
   code: string;
@@ -182,6 +200,7 @@ export interface DecodedIntent {
   nativeValueWei: string | null;
   permitDataPresent: boolean;
   routeDataFingerprint: string | null;
+  routeDataRaw: string | null;
   calldataFingerprint: string | null;
   routeData: {
     decodable: boolean;
@@ -273,6 +292,31 @@ export interface ApprovedRouterTrustRecord {
   label?: string;
 }
 
+export type ExecutionTrustRole =
+  | "PiteasRouter"
+  | "SwapManager"
+  | "ManagerImplementation"
+  | "DelegatecallTarget"
+  | "ProtocolRouter"
+  | "PoolFactory"
+  | "Pool"
+  | "Token";
+
+export interface ExecutionTrustRecord {
+  chainId: number;
+  address: string;
+  role: ExecutionTrustRole;
+  runtimeCodeHash: string;
+  implementationAddress?: string | null;
+  implementationCodeHash?: string | null;
+  sourceFingerprint?: string | null;
+  approvedSelectors: string[];
+  approvalEvidence: string;
+  approvedAtBlock?: string | null;
+  expiresAtBlockOrTime?: string | null;
+  operatorApproved: boolean;
+}
+
 export interface RouterIntegrity {
   router: string | null;
   expectedRouter: string;
@@ -326,6 +370,182 @@ export interface ExecutionTargetsReport {
   executionTargets: ExecutionTargetEvidence[];
   unresolvedExecutionTargets: string[];
   executionTargetConfidence: "high" | "medium" | "low";
+}
+
+export interface SourceEvidence {
+  sourceRepository: string;
+  sourceCommit: string;
+  routerSourceHash: string;
+  pitErc20SourceHash: string;
+  swapManagerInterfaceSourceHash: string;
+  compilerVersion: string;
+  optimizerSettings: {
+    enabled: boolean;
+    runs: number | null;
+    evmVersion: string;
+  };
+  verifiedAbiFingerprint: string;
+  verifiedSourceFingerprint: string;
+  verifiedAbiFragment: string;
+  verifiedRouterAbi: boolean;
+  verifiedRouterSource: boolean;
+  bytecodeReproduction: {
+    attempted: boolean;
+    matched: boolean | null;
+    reason: string;
+  };
+}
+
+export interface ActiveSwapManager {
+  address: string | null;
+  blockNumber: string | null;
+  storageSlot: string;
+  storageOffsetBytes: number;
+  storageEvidenceByRpc: Array<{
+    rpcUrl: string;
+    ok: boolean;
+    blockNumber: string | null;
+    storageWord: string | null;
+    decodedAddress: string | null;
+    error: string | null;
+  }>;
+  latestChangeEvent: {
+    address: string | null;
+    blockNumber: string | null;
+    transactionHash: string | null;
+    logIndex: string | null;
+    topic: string;
+  } | null;
+  storageEventAgreement: "agrees" | "disagrees" | "event_unavailable" | "storage_unavailable";
+  officialDocumentationMatch: boolean | null;
+  confidence: "high" | "medium" | "low" | "unavailable";
+}
+
+export interface SwapManagerIntegrity {
+  address: string | null;
+  codeHashesByRpc: Array<{
+    rpcUrl: string;
+    ok: boolean;
+    blockNumber: string | null;
+    bytecode: string | null;
+    runtimeCodeHash: string | null;
+    bytecodeLength: number | null;
+    error: string | null;
+  }>;
+  codeHashAgreement: RouterIntegrity["codeHashAgreement"];
+  proxyType: "none" | "eip1967" | "eip1967_beacon" | "eip1167" | "unknown" | "unavailable";
+  implementationAddress: string | null;
+  implementationCodeHashesByRpc: Array<{
+    rpcUrl: string;
+    ok: boolean;
+    blockNumber: string | null;
+    runtimeCodeHash: string | null;
+    bytecodeLength: number | null;
+    error: string | null;
+  }>;
+  sourceVerificationStatus: "verified" | "unverified" | "unavailable";
+  abiFingerprint: string | null;
+  sourceFingerprint: string | null;
+  operatorApprovalRequired: boolean;
+  trustRecordFingerprint: string | null;
+  trusted: boolean;
+}
+
+export interface RouterManagerBinding {
+  quoteBeforeBlock: string | null;
+  candidateQuoteBlock: string | null;
+  quoteAfterBlock: string | null;
+  certificationBlock: string | null;
+  simulationBlock: string | null;
+  managerChangedSinceQuote: boolean | null;
+  routerCodeChangedSinceQuote: boolean | null;
+  managerCodeChangedSinceQuote: boolean | null;
+}
+
+export interface RouteDataCertification {
+  rawFingerprint: string | null;
+  length: number;
+  managerCodeHash: string | null;
+  decoderVersion: string;
+  decoderMatchesManagerHash: boolean;
+  authoritativeFields: string[];
+  heuristicObservations: Array<{
+    kind: string;
+    value: string;
+    source: string;
+  }>;
+}
+
+export interface TraceBackend {
+  rpc: string | null;
+  method: "debug_traceCall" | "trace_call" | null;
+  blockNumber: string | null;
+  stateOverridesUsed: boolean;
+  supported: boolean;
+  failureReason: string | null;
+}
+
+export interface RouterCallSequenceEntry {
+  callType: string;
+  from: string | null;
+  to: string | null;
+  selector: string | null;
+  value: string | null;
+  success: boolean | null;
+  gasUsed: string | null;
+  codeHash: string | null;
+  classification: string;
+}
+
+export interface ExecutionGraphCall {
+  depth: number;
+  callType: string;
+  from: string | null;
+  to: string | null;
+  selector: string | null;
+  value: string | null;
+  inputFingerprint: string | null;
+  outputFingerprint: string | null;
+  success: boolean | null;
+  revertReason: string | null;
+  codeHash: string | null;
+  protocolClassification: string;
+  trustStatus: "trusted" | "untrusted" | "unresolved" | "prohibited";
+}
+
+export interface InternalApprovalEvidence {
+  token: string | null;
+  ownerContext: string;
+  spender: string | null;
+  amount: string | null;
+  initiatedBy: string | null;
+  walletApproval: boolean;
+  managerInternalApproval: boolean;
+  approvedByPolicy: boolean;
+}
+
+export interface ExecutionLayerCertification {
+  sourceEvidence: SourceEvidence;
+  managerIntegrityStatus: ManagerIntegrityStatus;
+  executionTraceStatus: ExecutionTraceStatus;
+  executionGraphStatus: ExecutionGraphStatus;
+  activeSwapManager: ActiveSwapManager;
+  swapManagerIntegrity: SwapManagerIntegrity;
+  routerManagerBinding: RouterManagerBinding;
+  routeData: RouteDataCertification;
+  traceBackend: TraceBackend;
+  routerCallSequence: RouterCallSequenceEntry[];
+  executionGraph: ExecutionGraphCall[];
+  approvedTargets: ExecutionTrustRecord[];
+  unresolvedTargets: string[];
+  prohibitedOperations: string[];
+  internalApprovals: InternalApprovalEvidence[];
+  managerChangedSinceQuote: boolean | null;
+  trustRecordFingerprint: string | null;
+  automaticExecutionEligible: boolean;
+  failureCodes: string[];
+  validationErrors: string[];
+  warnings: string[];
 }
 
 export type ReferenceValidityStatus = "VALID" | "INVALID" | "UNAVAILABLE" | "NOT_EVALUATED";
@@ -423,7 +643,10 @@ export interface PhiatShadowBuyCertificate {
   allowanceStatus: AllowanceStatus;
   approvalStatus: ApprovalStatus;
   routerIntegrityStatus: RouterIntegrityStatus;
+  managerIntegrityStatus: ManagerIntegrityStatus;
   simulationStatus: SimulationStatus;
+  executionTraceStatus: ExecutionTraceStatus;
+  executionGraphStatus: ExecutionGraphStatus;
   marketContext: Record<string, unknown>;
   exactAmountEvidence: Record<string, unknown>;
   referenceBefore: Record<string, unknown> | null;
@@ -447,6 +670,19 @@ export interface PhiatShadowBuyCertificate {
   approvalIntent: ApprovalIntent;
   routerIntegrity: RouterIntegrity;
   executionTargets: ExecutionTargetsReport;
+  executionLayer: ExecutionLayerCertification;
+  activeSwapManager: ActiveSwapManager;
+  swapManagerIntegrity: SwapManagerIntegrity;
+  routerManagerBinding: RouterManagerBinding;
+  routeData: RouteDataCertification;
+  traceBackend: TraceBackend;
+  routerCallSequence: RouterCallSequenceEntry[];
+  executionGraph: ExecutionGraphCall[];
+  approvedTargets: ExecutionTrustRecord[];
+  unresolvedTargets: string[];
+  prohibitedOperations: string[];
+  managerChangedSinceQuote: boolean | null;
+  trustRecordFingerprint: string | null;
   preparedIntent: PreparedIntent | null;
   decodedIntent: DecodedIntent | null;
   simulation: SimulationResult;
@@ -485,5 +721,23 @@ export interface PhiatShadowBuyDeps {
     approvedHashes: string[],
     approvedTrustRecords?: ApprovedRouterTrustRecord[],
   ) => Promise<RouterIntegrity>;
+  certifyExecutionLayer: (
+    config: AppConfig,
+    args: {
+      walletAddress: string;
+      router: string;
+      tokenIn: string;
+      tokenOut: string;
+      recipient: string;
+      amountInRaw: string;
+      calldata: string;
+      valueWei: string;
+      routeDataRaw: string | null;
+      referenceBeforeBlock: string | null;
+      candidateQuoteBlock: string | null;
+      referenceAfterBlock: string | null;
+      approvedTrustRecords: ExecutionTrustRecord[];
+    },
+  ) => Promise<ExecutionLayerCertification>;
   nowMs?: () => number;
 }

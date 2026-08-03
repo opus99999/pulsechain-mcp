@@ -1,4 +1,4 @@
-import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, DecisionClass, FailedCheck } from "./types.js";
+import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, DecisionClass, FailedCheck, ManagerIntegrityStatus, ExecutionTraceStatus, ExecutionGraphStatus, ExecutionLayerCertification } from "./types.js";
 import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
@@ -14,7 +14,10 @@ export function buildCertificate(args: {
   allowanceStatus?: AllowanceStatus;
   approvalStatus?: ApprovalStatus;
   routerIntegrityStatus?: RouterIntegrityStatus;
+  managerIntegrityStatus?: ManagerIntegrityStatus;
   simulationStatus?: SimulationStatus;
+  executionTraceStatus?: ExecutionTraceStatus;
+  executionGraphStatus?: ExecutionGraphStatus;
   marketContext: Record<string, unknown>;
   exactAmountEvidence: Record<string, unknown>;
   referenceBefore?: ShadowQuoteSummary | null;
@@ -34,6 +37,7 @@ export function buildCertificate(args: {
   approvalIntent: ApprovalIntent;
   routerIntegrity: RouterIntegrity;
   executionTargets: ExecutionTargetsReport;
+  executionLayer?: ExecutionLayerCertification | null;
   preparedIntent?: PreparedIntent | null;
   decodedIntent?: DecodedIntent | null;
   simulation: SimulationResult;
@@ -69,7 +73,10 @@ export function buildCertificate(args: {
     allowanceStatus: args.allowanceStatus ?? "NOT_EVALUATED",
     approvalStatus: args.approvalStatus ?? "NOT_EVALUATED",
     routerIntegrityStatus: args.routerIntegrityStatus ?? "NOT_EVALUATED",
+    managerIntegrityStatus: args.managerIntegrityStatus ?? "NOT_EVALUATED",
     simulationStatus: args.simulationStatus ?? "NOT_RUN",
+    executionTraceStatus: args.executionTraceStatus ?? "NOT_RUN",
+    executionGraphStatus: args.executionGraphStatus ?? "NOT_EVALUATED",
     marketContext: args.marketContext,
     exactAmountEvidence: args.exactAmountEvidence,
     referenceBefore: sanitizeQuote(args.referenceBefore ?? null),
@@ -97,6 +104,19 @@ export function buildCertificate(args: {
     approvalIntent: args.approvalIntent,
     routerIntegrity: args.routerIntegrity,
     executionTargets: args.executionTargets,
+    executionLayer: args.executionLayer ?? emptyExecutionLayer(),
+    activeSwapManager: (args.executionLayer ?? emptyExecutionLayer()).activeSwapManager,
+    swapManagerIntegrity: (args.executionLayer ?? emptyExecutionLayer()).swapManagerIntegrity,
+    routerManagerBinding: (args.executionLayer ?? emptyExecutionLayer()).routerManagerBinding,
+    routeData: (args.executionLayer ?? emptyExecutionLayer()).routeData,
+    traceBackend: (args.executionLayer ?? emptyExecutionLayer()).traceBackend,
+    routerCallSequence: (args.executionLayer ?? emptyExecutionLayer()).routerCallSequence,
+    executionGraph: (args.executionLayer ?? emptyExecutionLayer()).executionGraph,
+    approvedTargets: (args.executionLayer ?? emptyExecutionLayer()).approvedTargets,
+    unresolvedTargets: (args.executionLayer ?? emptyExecutionLayer()).unresolvedTargets,
+    prohibitedOperations: (args.executionLayer ?? emptyExecutionLayer()).prohibitedOperations,
+    managerChangedSinceQuote: (args.executionLayer ?? emptyExecutionLayer()).managerChangedSinceQuote,
+    trustRecordFingerprint: (args.executionLayer ?? emptyExecutionLayer()).trustRecordFingerprint,
     preparedIntent: args.preparedIntent ?? null,
     decodedIntent: args.decodedIntent ?? null,
     simulation: args.simulation,
@@ -343,6 +363,101 @@ export function emptyExecutionTargets(): ExecutionTargetsReport {
     executionTargets: [],
     unresolvedExecutionTargets: [],
     executionTargetConfidence: "low",
+  };
+}
+
+export function emptyExecutionLayer(): ExecutionLayerCertification {
+  return {
+    sourceEvidence: {
+      sourceRepository: "",
+      sourceCommit: "",
+      routerSourceHash: "",
+      pitErc20SourceHash: "",
+      swapManagerInterfaceSourceHash: "",
+      compilerVersion: "",
+      optimizerSettings: {
+        enabled: false,
+        runs: null,
+        evmVersion: "",
+      },
+      verifiedAbiFingerprint: "",
+      verifiedSourceFingerprint: "",
+      verifiedAbiFragment: "",
+      verifiedRouterAbi: false,
+      verifiedRouterSource: false,
+      bytecodeReproduction: {
+        attempted: false,
+        matched: null,
+        reason: "Execution layer was not evaluated.",
+      },
+    },
+    managerIntegrityStatus: "NOT_EVALUATED",
+    executionTraceStatus: "NOT_RUN",
+    executionGraphStatus: "NOT_EVALUATED",
+    activeSwapManager: {
+      address: null,
+      blockNumber: null,
+      storageSlot: "",
+      storageOffsetBytes: 0,
+      storageEvidenceByRpc: [],
+      latestChangeEvent: null,
+      storageEventAgreement: "storage_unavailable",
+      officialDocumentationMatch: null,
+      confidence: "unavailable",
+    },
+    swapManagerIntegrity: {
+      address: null,
+      codeHashesByRpc: [],
+      codeHashAgreement: "unavailable",
+      proxyType: "unavailable",
+      implementationAddress: null,
+      implementationCodeHashesByRpc: [],
+      sourceVerificationStatus: "unavailable",
+      abiFingerprint: null,
+      sourceFingerprint: null,
+      operatorApprovalRequired: true,
+      trustRecordFingerprint: null,
+      trusted: false,
+    },
+    routerManagerBinding: {
+      quoteBeforeBlock: null,
+      candidateQuoteBlock: null,
+      quoteAfterBlock: null,
+      certificationBlock: null,
+      simulationBlock: null,
+      managerChangedSinceQuote: null,
+      routerCodeChangedSinceQuote: null,
+      managerCodeChangedSinceQuote: null,
+    },
+    routeData: {
+      rawFingerprint: null,
+      length: 0,
+      managerCodeHash: null,
+      decoderVersion: "not_evaluated",
+      decoderMatchesManagerHash: false,
+      authoritativeFields: [],
+      heuristicObservations: [],
+    },
+    traceBackend: {
+      rpc: null,
+      method: null,
+      blockNumber: null,
+      stateOverridesUsed: false,
+      supported: false,
+      failureReason: null,
+    },
+    routerCallSequence: [],
+    executionGraph: [],
+    approvedTargets: [],
+    unresolvedTargets: [],
+    prohibitedOperations: [],
+    internalApprovals: [],
+    managerChangedSinceQuote: null,
+    trustRecordFingerprint: null,
+    automaticExecutionEligible: false,
+    failureCodes: [],
+    validationErrors: [],
+    warnings: [],
   };
 }
 

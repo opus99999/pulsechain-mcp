@@ -22,16 +22,30 @@ import {
   PHIAT_SHADOW_BUY_TOKEN_OUT,
   PITEAS_SWAP_CANONICAL_SIGNATURE,
   PITEAS_SWAP_SELECTOR,
+  PITEAS_SWAP_MANAGER_SELECTOR,
+  PITEAS_CHANGED_SWAP_MANAGER_TOPIC,
+  PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER,
+  PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
+  PITEAS_SWAP_MANAGER_STORAGE_SLOT,
+  PITEAS_SWAP_MANAGER_CANONICAL_SIGNATURE,
+  certifyPiteasExecutionLayer,
+  discoverActiveSwapManager,
+  readSwapManagerIntegrity,
   registerPhiatShadowBuyTool,
   piteasRouterSwapAbi,
+  routerSourceEvidence,
   type PhiatShadowBuyDeps,
+  type ExecutionLayerCertification,
 } from "../src/tools/analytics/phiatShadowBuy.js";
+import { emptyExecutionLayer } from "../src/tools/analytics/phiat-shadow-buy/certificate.js";
 import { readRouterIntegrity } from "../src/tools/analytics/phiat-shadow-buy/routerIntegrity.js";
 
 const WALLET = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
 const POOL = "0x3333333333333333333333333333333333333333";
 const BAD_ROUTER = "0x4444444444444444444444444444444444444444";
+const MANAGER = "0x5555555555555555555555555555555555555555";
+const PROTOCOL = "0x6666666666666666666666666666666666666666";
 const NOW = Date.parse("2026-08-03T00:00:00.000Z");
 const REF_RAW = "5000000";
 const AMOUNT_50_RAW = "50000000";
@@ -43,6 +57,10 @@ const APPROVED_HASH =
   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const UNAPPROVED_HASH =
   "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const MANAGER_HASH =
+  "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const PROTOCOL_HASH =
+  "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 const erc20ApproveAbi = [
   {
@@ -78,6 +96,7 @@ const baseConfig: AppConfig = {
 beforeEach(() => {
   resetPiteasRateLimitForTests();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   (defaultQuoteMock as unknown as { count?: number }).count = 0;
 });
 
@@ -329,6 +348,485 @@ function baseRouterIntegrity() {
   };
 }
 
+function executionTrustRecord(
+  address: string,
+  role: ExecutionLayerCertification["approvedTargets"][number]["role"],
+  runtimeCodeHash: string,
+  approvedSelectors: string[] = [],
+) {
+  return {
+    chainId: 369,
+    address,
+    role,
+    runtimeCodeHash,
+    implementationAddress: null,
+    implementationCodeHash: null,
+    sourceFingerprint: null,
+    approvedSelectors,
+    approvalEvidence: "mock operator approval for regression fixture",
+    approvedAtBlock: "123",
+    expiresAtBlockOrTime: null,
+    operatorApproved: true,
+  };
+}
+
+function packedManagerStorage(address: string): `0x${string}` {
+  return `0x${"0".repeat(22)}${address.slice(2).toLowerCase()}01` as `0x${string}`;
+}
+
+function resolvedExecutionLayer(
+  overrides: Partial<ExecutionLayerCertification> = {},
+): ExecutionLayerCertification {
+  const managerRecord = executionTrustRecord(MANAGER, "SwapManager", MANAGER_HASH, [
+    PITEAS_SWAP_MANAGER_SELECTOR,
+  ]);
+  const protocolRecord = executionTrustRecord(PROTOCOL, "ProtocolRouter", PROTOCOL_HASH, [
+    "0xabcdef01",
+  ]);
+  const base: ExecutionLayerCertification = {
+    ...emptyExecutionLayer(),
+    sourceEvidence: routerSourceEvidence(),
+    managerIntegrityStatus: "PASSED",
+    executionTraceStatus: "PASSED",
+    executionGraphStatus: "RESOLVED",
+    activeSwapManager: {
+      address: MANAGER,
+      blockNumber: "124",
+      storageSlot: PITEAS_SWAP_MANAGER_STORAGE_SLOT,
+      storageOffsetBytes: PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
+      storageEvidenceByRpc: [
+        {
+          rpcUrl: "https://rpc-a.example",
+          ok: true,
+          blockNumber: "124",
+          storageWord: packedManagerStorage(MANAGER),
+          decodedAddress: MANAGER,
+          error: null,
+        },
+        {
+          rpcUrl: "https://rpc-b.example",
+          ok: true,
+          blockNumber: "124",
+          storageWord: packedManagerStorage(MANAGER),
+          decodedAddress: MANAGER,
+          error: null,
+        },
+      ],
+      latestChangeEvent: {
+        address: MANAGER,
+        blockNumber: "100",
+        transactionHash: `0x${"12".repeat(32)}`,
+        logIndex: "0",
+        topic: PITEAS_CHANGED_SWAP_MANAGER_TOPIC,
+      },
+      storageEventAgreement: "agrees",
+      officialDocumentationMatch: false,
+      confidence: "high",
+    },
+    swapManagerIntegrity: {
+      address: MANAGER,
+      codeHashesByRpc: [
+        {
+          rpcUrl: "https://rpc-a.example",
+          ok: true,
+          blockNumber: "124",
+          bytecode: "0x60016000",
+          runtimeCodeHash: MANAGER_HASH,
+          bytecodeLength: 4,
+          error: null,
+        },
+        {
+          rpcUrl: "https://rpc-b.example",
+          ok: true,
+          blockNumber: "124",
+          bytecode: "0x60016000",
+          runtimeCodeHash: MANAGER_HASH,
+          bytecodeLength: 4,
+          error: null,
+        },
+      ],
+      codeHashAgreement: "agrees",
+      proxyType: "none",
+      implementationAddress: null,
+      implementationCodeHashesByRpc: [],
+      sourceVerificationStatus: "verified",
+      abiFingerprint: `0x${"ab".repeat(32)}`,
+      sourceFingerprint: `0x${"bc".repeat(32)}`,
+      operatorApprovalRequired: false,
+      trustRecordFingerprint: "0xmanager-trust",
+      trusted: true,
+    },
+    routerManagerBinding: {
+      quoteBeforeBlock: "123",
+      candidateQuoteBlock: "123",
+      quoteAfterBlock: "124",
+      certificationBlock: "124",
+      simulationBlock: "124",
+      managerChangedSinceQuote: false,
+      routerCodeChangedSinceQuote: false,
+      managerCodeChangedSinceQuote: false,
+    },
+    routeData: {
+      rawFingerprint: `0x${"34".repeat(32)}`,
+      length: 160,
+      managerCodeHash: MANAGER_HASH,
+      decoderVersion: "opaque-manager-bound-v1",
+      decoderMatchesManagerHash: false,
+      authoritativeFields: [],
+      heuristicObservations: [],
+    },
+    traceBackend: {
+      rpc: "https://rpc-a.example",
+      method: "debug_traceCall",
+      blockNumber: "124",
+      stateOverridesUsed: false,
+      supported: true,
+      failureReason: null,
+    },
+    routerCallSequence: [
+      {
+        callType: "CALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_IN,
+        selector: "0x23b872dd",
+        value: "0",
+        success: true,
+        gasUsed: "10000",
+        codeHash: APPROVED_HASH,
+        classification: "source_token_transfer_from_wallet_to_swap_manager",
+      },
+      {
+        callType: "CALL",
+        from: PITEAS_ROUTER,
+        to: MANAGER,
+        selector: PITEAS_SWAP_MANAGER_SELECTOR,
+        value: "0",
+        success: true,
+        gasUsed: "20000",
+        codeHash: MANAGER_HASH,
+        classification: "router_call_to_active_swap_manager",
+      },
+      {
+        callType: "STATICCALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_OUT,
+        selector: "0x70a08231",
+        value: "0",
+        success: true,
+        gasUsed: "5000",
+        codeHash: APPROVED_HASH,
+        classification: "destination_token_balance_check",
+      },
+      {
+        callType: "CALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_OUT,
+        selector: "0xa9059cbb",
+        value: "0",
+        success: true,
+        gasUsed: "7000",
+        codeHash: APPROVED_HASH,
+        classification: "destination_token_transfer_to_recipient",
+      },
+    ],
+    executionGraph: [
+      {
+        depth: 2,
+        callType: "CALL",
+        from: MANAGER,
+        to: PROTOCOL,
+        selector: "0xabcdef01",
+        value: "0",
+        inputFingerprint: `0x${"56".repeat(32)}`,
+        outputFingerprint: `0x${"78".repeat(32)}`,
+        success: true,
+        revertReason: null,
+        codeHash: PROTOCOL_HASH,
+        protocolClassification: "protocol_router",
+        trustStatus: "trusted",
+      },
+    ],
+    approvedTargets: [managerRecord, protocolRecord],
+    unresolvedTargets: [],
+    prohibitedOperations: [],
+    internalApprovals: [],
+    managerChangedSinceQuote: false,
+    trustRecordFingerprint: "0xexecution-trust",
+    automaticExecutionEligible: true,
+    failureCodes: [],
+    validationErrors: [],
+    warnings: [],
+  };
+  return { ...base, ...overrides };
+}
+
+function executionLayer(overrides: Partial<ExecutionLayerCertification> = {}) {
+  return vi.fn(async () => resolvedExecutionLayer(overrides)) as never;
+}
+
+const EMPTY_STORAGE_WORD = `0x${"0".repeat(64)}` as const;
+const EIP1967_IMPLEMENTATION_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const EIP1967_BEACON_SLOT =
+  "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
+const BEACON_IMPLEMENTATION_SELECTOR = "0x5c60da1b";
+const DIRECT_MANAGER_CODE = "0x60016000" as const;
+const DIRECT_PROTOCOL_CODE = "0x60026000" as const;
+const DIRECT_ROUTER_CODE = "0x60036000" as const;
+const DIRECT_TOKEN_IN_CODE = "0x60046000" as const;
+const DIRECT_TOKEN_OUT_CODE = "0x60056000" as const;
+const DIRECT_BEACON_CODE = "0x60066000" as const;
+
+interface RpcFailure {
+  __rpcFailure: string;
+}
+
+interface ExecutionRpcMockOptions {
+  manager?: string;
+  eventManager?: string | null;
+  managerAtQuote?: string;
+  managerCode?: `0x${string}`;
+  managerCodeByRpc?: Record<string, `0x${string}`>;
+  routerCode?: `0x${string}`;
+  routerCodeAtQuote?: `0x${string}`;
+  managerCodeAtQuote?: `0x${string}`;
+  implementationAddress?: string | null;
+  implementationCode?: `0x${string}`;
+  beaconAddress?: string | null;
+  protocolCode?: `0x${string}`;
+  extraCodeByAddress?: Record<string, `0x${string}`>;
+  traceRoot?: Record<string, unknown>;
+  debugTraceError?: string | null;
+  traceCallError?: string | null;
+  explorerVerified?: boolean;
+}
+
+function rpcFailure(message: string): RpcFailure {
+  return { __rpcFailure: message };
+}
+
+function isRpcFailure(value: unknown): value is RpcFailure {
+  return Boolean(value && typeof value === "object" && "__rpcFailure" in value);
+}
+
+function storageAddress(address: string): `0x${string}` {
+  return `0x${"0".repeat(24)}${address.slice(2).toLowerCase()}` as `0x${string}`;
+}
+
+function eventTopicAddress(address: string): `0x${string}` {
+  return storageAddress(address);
+}
+
+function erc20TransferFromData(from: string, to: string, amount: string): `0x${string}` {
+  return `0x23b872dd${addressWord(from)}${addressWord(to)}${uintWord(BigInt(amount))}` as `0x${string}`;
+}
+
+function erc20TransferData(to: string, amount: string): `0x${string}` {
+  return `0xa9059cbb${addressWord(to)}${uintWord(BigInt(amount))}` as `0x${string}`;
+}
+
+function erc20BalanceOfData(owner: string): `0x${string}` {
+  return `0x70a08231${addressWord(owner)}` as `0x${string}`;
+}
+
+function erc20ApproveData(spender: string, amount: string): `0x${string}` {
+  return `0x095ea7b3${addressWord(spender)}${uintWord(BigInt(amount))}` as `0x${string}`;
+}
+
+function successfulTrace(overrides: { managerInput?: `0x${string}`; managerCalls?: Record<string, unknown>[] } = {}) {
+  return {
+    type: "CALL",
+    from: WALLET,
+    to: PITEAS_ROUTER,
+    input: swapCalldata(),
+    value: "0x0",
+    gasUsed: "0x10000",
+    calls: [
+      {
+        type: "CALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_IN,
+        input: erc20TransferFromData(WALLET, MANAGER, AMOUNT_50_RAW),
+        value: "0x0",
+        gasUsed: "0x5208",
+      },
+      {
+        type: "CALL",
+        from: PITEAS_ROUTER,
+        to: MANAGER,
+        input: overrides.managerInput ?? `${PITEAS_SWAP_MANAGER_SELECTOR}${"0".repeat(64)}`,
+        value: "0x0",
+        gasUsed: "0x9000",
+        calls: overrides.managerCalls ?? [
+          {
+            type: "CALL",
+            from: MANAGER,
+            to: PROTOCOL,
+            input: `0xabcdef01${"0".repeat(64)}`,
+            output: "0x",
+            value: "0x0",
+            gasUsed: "0x1234",
+          },
+        ],
+      },
+      {
+        type: "STATICCALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_OUT,
+        input: erc20BalanceOfData(PITEAS_ROUTER),
+        output: "0x",
+        value: "0x0",
+        gasUsed: "0x1000",
+      },
+      {
+        type: "CALL",
+        from: PITEAS_ROUTER,
+        to: PHIAT_SHADOW_BUY_TOKEN_OUT,
+        input: erc20TransferData(WALLET, CANDIDATE_MIN_RAW),
+        output: "0x",
+        value: "0x0",
+        gasUsed: "0x2000",
+      },
+    ],
+  };
+}
+
+function executionCertArgs(overrides: Partial<Parameters<typeof certifyPiteasExecutionLayer>[1]> = {}) {
+  const managerHash = keccak256(DIRECT_MANAGER_CODE);
+  const protocolHash = keccak256(DIRECT_PROTOCOL_CODE);
+  return {
+    walletAddress: WALLET,
+    router: PITEAS_ROUTER,
+    tokenIn: PHIAT_SHADOW_BUY_TOKEN_IN,
+    tokenOut: PHIAT_SHADOW_BUY_TOKEN_OUT,
+    recipient: WALLET,
+    amountInRaw: AMOUNT_50_RAW,
+    calldata: swapCalldata(),
+    valueWei: "0",
+    routeDataRaw: piteasRouteData({ payloads: [routePayloadWithAddresses(POOL)] }),
+    referenceBeforeBlock: "123",
+    candidateQuoteBlock: "123",
+    referenceAfterBlock: "123",
+    approvedTrustRecords: [
+      executionTrustRecord(MANAGER, "SwapManager", managerHash, [PITEAS_SWAP_MANAGER_SELECTOR]),
+      executionTrustRecord(PROTOCOL, "ProtocolRouter", protocolHash, ["0xabcdef01"]),
+    ],
+    ...overrides,
+  };
+}
+
+function stubExecutionRpc(options: ExecutionRpcMockOptions = {}) {
+  const manager = options.manager ?? MANAGER;
+  const eventManager = options.eventManager === undefined ? manager : options.eventManager;
+  const managerAtQuote = options.managerAtQuote ?? manager;
+  const managerCode = options.managerCode ?? DIRECT_MANAGER_CODE;
+  const routerCode = options.routerCode ?? DIRECT_ROUTER_CODE;
+  const protocolCode = options.protocolCode ?? DIRECT_PROTOCOL_CODE;
+  const implementationAddress = options.implementationAddress ?? null;
+  const implementationCode = options.implementationCode ?? "0x60076000";
+  const beaconAddress = options.beaconAddress ?? null;
+  const explorerVerified = options.explorerVerified ?? true;
+  const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const urlText = String(url);
+    if (init?.method !== "POST") {
+      const result = urlText.includes("getabi")
+        ? "[{\"type\":\"function\",\"name\":\"swap\",\"inputs\":[{\"type\":\"bytes\"}]}]"
+        : [{ SourceCode: "contract MockSwapManager {}", ABI: "[]" }];
+      return new Response(
+        JSON.stringify({ status: explorerVerified ? "1" : "0", message: "OK", result }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    const body = JSON.parse(String(init.body ?? "{}")) as {
+      id?: number;
+      method: string;
+      params?: unknown[];
+    };
+    const result = rpcResultFor(urlText, body.method, body.params ?? []);
+    if (isRpcFailure(result)) {
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, error: { message: result.__rpcFailure } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  function rpcResultFor(rpcUrl: string, method: string, params: unknown[]): unknown {
+    if (method === "eth_blockNumber") return "0x7c";
+    if (method === "eth_getLogs") {
+      if (eventManager === null) return [];
+      return [
+        {
+          address: PITEAS_ROUTER,
+          topics: [PITEAS_CHANGED_SWAP_MANAGER_TOPIC, eventTopicAddress(eventManager)],
+          blockNumber: "0x64",
+          transactionHash: `0x${"98".repeat(32)}`,
+          logIndex: "0x0",
+        },
+      ];
+    }
+    if (method === "eth_getStorageAt") {
+      const [address, slot, block] = params.map(String);
+      if (addressMatches(address, PITEAS_ROUTER) && slot.toLowerCase() === PITEAS_SWAP_MANAGER_STORAGE_SLOT) {
+        return packedManagerStorage(block === "0x7b" ? managerAtQuote : manager);
+      }
+      if (slot.toLowerCase() === EIP1967_IMPLEMENTATION_SLOT) {
+        return implementationAddress && !beaconAddress ? storageAddress(implementationAddress) : EMPTY_STORAGE_WORD;
+      }
+      if (slot.toLowerCase() === EIP1967_BEACON_SLOT) {
+        return beaconAddress ? storageAddress(beaconAddress) : EMPTY_STORAGE_WORD;
+      }
+      return EMPTY_STORAGE_WORD;
+    }
+    if (method === "eth_call") {
+      const call = params[0] as { to?: string; data?: string };
+      if (beaconAddress && addressMatches(call.to, beaconAddress) && call.data === BEACON_IMPLEMENTATION_SELECTOR) {
+        return implementationAddress ? storageAddress(implementationAddress) : EMPTY_STORAGE_WORD;
+      }
+      return "0x";
+    }
+    if (method === "eth_getCode") {
+      const [address, block] = params.map(String);
+      const extra = options.extraCodeByAddress?.[address.toLowerCase()];
+      if (extra) return extra;
+      if (addressMatches(address, manager)) {
+        if (block === "0x7b" && options.managerCodeAtQuote) return options.managerCodeAtQuote;
+        return options.managerCodeByRpc?.[rpcUrl] ?? managerCode;
+      }
+      if (addressMatches(address, PITEAS_ROUTER)) {
+        if (block === "0x7b" && options.routerCodeAtQuote) return options.routerCodeAtQuote;
+        return routerCode;
+      }
+      if (implementationAddress && addressMatches(address, implementationAddress)) return implementationCode;
+      if (beaconAddress && addressMatches(address, beaconAddress)) return DIRECT_BEACON_CODE;
+      if (addressMatches(address, PROTOCOL)) return protocolCode;
+      if (addressMatches(address, PHIAT_SHADOW_BUY_TOKEN_IN)) return DIRECT_TOKEN_IN_CODE;
+      if (addressMatches(address, PHIAT_SHADOW_BUY_TOKEN_OUT)) return DIRECT_TOKEN_OUT_CODE;
+      return "0x";
+    }
+    if (method === "debug_traceCall") {
+      return options.debugTraceError
+        ? rpcFailure(options.debugTraceError)
+        : (options.traceRoot ?? successfulTrace());
+    }
+    if (method === "trace_call") {
+      return options.traceCallError ? rpcFailure(options.traceCallError) : [];
+    }
+    return rpcFailure(`Unexpected RPC method ${method}`);
+  }
+
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function addressMatches(a: string | null | undefined, b: string | null | undefined): boolean {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+}
+
 function deps(overrides: Partial<PhiatShadowBuyDeps> = {}): PhiatShadowBuyDeps {
   (defaultQuoteMock as unknown as { count: number }).count = 0;
   return {
@@ -366,6 +864,7 @@ function deps(overrides: Partial<PhiatShadowBuyDeps> = {}): PhiatShadowBuyDeps {
     getInputBalance: vi.fn(async () => AMOUNT_50_RAW),
     getNativeBalanceWei: vi.fn(async () => "1000000000000000000"),
     getRouterIntegrity: routerIntegrity(),
+    certifyExecutionLayer: executionLayer(),
     nowMs: () => NOW,
     ...overrides,
   };
@@ -1552,6 +2051,428 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it("pins Piteas router source evidence and the SwapManager selector", () => {
+    const evidence = routerSourceEvidence();
+
+    expect(toFunctionSelector(PITEAS_SWAP_MANAGER_CANONICAL_SIGNATURE)).toBe(PITEAS_SWAP_MANAGER_SELECTOR);
+    expect(PITEAS_SWAP_MANAGER_SELECTOR).toBe("0x627dd56a");
+    expect(evidence.sourceRepository).toBe("https://github.com/piteasio/piteas-contracts");
+    expect(evidence.sourceCommit).toMatch(/^[a-f0-9]{40}$/);
+    expect(evidence.routerSourceHash).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(evidence.pitErc20SourceHash).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(evidence.swapManagerInterfaceSourceHash).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(evidence.compilerVersion).toBe("v0.8.18+commit.87f61d96");
+    expect(evidence.optimizerSettings.enabled).toBe(false);
+    expect(evidence.verifiedRouterAbi).toBe(true);
+    expect(evidence.verifiedRouterSource).toBe(true);
+  });
+
+  it("derives active SwapManager from storage and reconciles ChangedSwapManager events", async () => {
+    stubExecutionRpc({ manager: MANAGER, eventManager: MANAGER });
+
+    const active = await discoverActiveSwapManager(baseConfig, "0x7c");
+
+    expect(active.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
+    expect(active.storageSlot).toBe(PITEAS_SWAP_MANAGER_STORAGE_SLOT);
+    expect(active.storageOffsetBytes).toBe(1);
+    expect(active.storageEvidenceByRpc).toHaveLength(2);
+    expect(active.storageEvidenceByRpc.every((row) => row.decodedAddress?.toLowerCase() === MANAGER.toLowerCase())).toBe(true);
+    expect(active.latestChangeEvent?.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
+    expect(active.latestChangeEvent?.topic).toBe(PITEAS_CHANGED_SWAP_MANAGER_TOPIC);
+    expect(active.storageEventAgreement).toBe("agrees");
+    expect(active.officialDocumentationMatch).toBe(false);
+    expect(PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER.toLowerCase()).not.toBe(MANAGER.toLowerCase());
+    expect(active.confidence).toBe("high");
+  });
+
+  it("fails manager discovery confidence when storage and latest event disagree", async () => {
+    stubExecutionRpc({ manager: MANAGER, eventManager: OTHER });
+
+    const active = await discoverActiveSwapManager(baseConfig, "0x7c");
+
+    expect(active.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
+    expect(active.latestChangeEvent?.address?.toLowerCase()).toBe(OTHER.toLowerCase());
+    expect(active.storageEventAgreement).toBe("disagrees");
+    expect(active.confidence).toBe("medium");
+  });
+
+  it("requires independent event and two-RPC storage confirmation for manager automation", async () => {
+    stubExecutionRpc({ manager: MANAGER, eventManager: null });
+    const noEvent = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(noEvent.activeSwapManager.storageEventAgreement).toBe("event_unavailable");
+    expect(noEvent.failureCodes).toContain("SWAP_MANAGER_EVENT_UNAVAILABLE");
+    expect(noEvent.automaticExecutionEligible).toBe(false);
+
+    stubExecutionRpc({ manager: MANAGER, eventManager: MANAGER });
+    const singleRpc = await certifyPiteasExecutionLayer(
+      { ...baseConfig, rpcUrls: ["https://rpc-a.example"] },
+      executionCertArgs(),
+    );
+
+    expect(singleRpc.failureCodes).toContain("SWAP_MANAGER_STORAGE_RPC_AGREEMENT_UNAVAILABLE");
+    expect(singleRpc.automaticExecutionEligible).toBe(false);
+  });
+
+  it("certifies a verified direct SwapManager with a structured trust record", async () => {
+    stubExecutionRpc({ manager: MANAGER });
+    const managerHash = keccak256(DIRECT_MANAGER_CODE);
+
+    const integrity = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", [
+      executionTrustRecord(MANAGER, "SwapManager", managerHash, [PITEAS_SWAP_MANAGER_SELECTOR]),
+    ]);
+
+    expect(integrity.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
+    expect(integrity.codeHashAgreement).toBe("agrees");
+    expect(integrity.codeHashesByRpc).toHaveLength(2);
+    expect(integrity.codeHashesByRpc.every((row) => row.runtimeCodeHash === managerHash)).toBe(true);
+    expect(integrity.proxyType).toBe("none");
+    expect(integrity.sourceVerificationStatus).toBe("verified");
+    expect(integrity.abiFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(integrity.sourceFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(integrity.trusted).toBe(true);
+    expect(integrity.operatorApprovalRequired).toBe(false);
+  });
+
+  it("detects SwapManager code-hash disagreement across RPCs", async () => {
+    stubExecutionRpc({
+      managerCodeByRpc: {
+        "https://rpc-a.example": "0x60016000",
+        "https://rpc-b.example": "0x60026000",
+      },
+    });
+
+    const integrity = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", []);
+
+    expect(integrity.codeHashAgreement).toBe("disagrees");
+    expect(new Set(integrity.codeHashesByRpc.map((row) => row.runtimeCodeHash))).toHaveLength(2);
+    expect(integrity.trusted).toBe(false);
+    expect(integrity.operatorApprovalRequired).toBe(true);
+  });
+
+  it("resolves EIP-1967 implementation and beacon proxies for SwapManager integrity", async () => {
+    const implementation = "0x7777777777777777777777777777777777777777";
+    const implementationCode = "0x60076000" as const;
+    const managerHash = keccak256(DIRECT_MANAGER_CODE);
+    const implementationHash = keccak256(implementationCode);
+    stubExecutionRpc({ implementationAddress: implementation, implementationCode });
+
+    const eip1967 = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", [
+      {
+        ...executionTrustRecord(MANAGER, "SwapManager", managerHash, [PITEAS_SWAP_MANAGER_SELECTOR]),
+        implementationAddress: implementation,
+        implementationCodeHash: implementationHash,
+      },
+    ]);
+
+    expect(eip1967.proxyType).toBe("eip1967");
+    expect(eip1967.implementationAddress?.toLowerCase()).toBe(implementation.toLowerCase());
+    expect(eip1967.implementationCodeHashesByRpc.every((row) => row.runtimeCodeHash === implementationHash)).toBe(true);
+    expect(eip1967.trusted).toBe(true);
+
+    const beacon = "0x8888888888888888888888888888888888888888";
+    stubExecutionRpc({ beaconAddress: beacon, implementationAddress: implementation, implementationCode });
+    const beaconIntegrity = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", []);
+
+    expect(beaconIntegrity.proxyType).toBe("eip1967_beacon");
+    expect(beaconIntegrity.implementationAddress?.toLowerCase()).toBe(implementation.toLowerCase());
+    expect(beaconIntegrity.implementationCodeHashesByRpc.every((row) => row.runtimeCodeHash === implementationHash)).toBe(true);
+  });
+
+  it("detects EIP-1167 minimal proxy SwapManagers", async () => {
+    const implementation = "0x7777777777777777777777777777777777777777";
+    const minimalProxy =
+      `0x363d3d373d3d3d363d73${implementation.slice(2).toLowerCase()}5af43d82803e903d91602b57fd5bf3` as const;
+    stubExecutionRpc({ managerCode: minimalProxy, implementationAddress: null });
+
+    const integrity = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", []);
+
+    expect(integrity.proxyType).toBe("eip1167");
+    expect(integrity.implementationAddress?.toLowerCase()).toBe(implementation.toLowerCase());
+    expect(integrity.implementationCodeHashesByRpc).toHaveLength(2);
+  });
+
+  it("treats route bytes as manager-specific opaque data with heuristic addresses only", async () => {
+    stubExecutionRpc({ manager: MANAGER });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.routeData.rawFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(certificate.routeData.length).toBeGreaterThan(0);
+    expect(certificate.routeData.managerCodeHash).toBe(keccak256(DIRECT_MANAGER_CODE));
+    expect(certificate.routeData.decoderVersion).toBe("opaque-manager-bound-v1");
+    expect(certificate.routeData.decoderMatchesManagerHash).toBe(false);
+    expect(certificate.routeData.authoritativeFields).toEqual([]);
+    expect(certificate.routeData.heuristicObservations.map((row) => row.value.toLowerCase())).toContain(
+      POOL.toLowerCase(),
+    );
+
+    stubExecutionRpc({ manager: MANAGER, managerCode: "0x60018000" });
+    const changedHashCertificate = await certifyPiteasExecutionLayer(
+      baseConfig,
+      executionCertArgs({
+        approvedTrustRecords: [
+          executionTrustRecord(MANAGER, "SwapManager", keccak256("0x60018000"), [
+            PITEAS_SWAP_MANAGER_SELECTOR,
+          ]),
+          executionTrustRecord(PROTOCOL, "ProtocolRouter", keccak256(DIRECT_PROTOCOL_CODE), ["0xabcdef01"]),
+        ],
+      }),
+    );
+    expect(changedHashCertificate.routeData.managerCodeHash).toBe(keccak256("0x60018000"));
+    expect(changedHashCertificate.routeData.decoderMatchesManagerHash).toBe(false);
+  });
+
+  it("traces the exact prepared call and resolves the router sequence and manager graph", async () => {
+    stubExecutionRpc({ traceRoot: successfulTrace() });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.managerIntegrityStatus).toBe("PASSED");
+    expect(certificate.executionTraceStatus).toBe("PASSED");
+    expect(certificate.executionGraphStatus).toBe("RESOLVED");
+    expect(certificate.traceBackend).toMatchObject({
+      method: "debug_traceCall",
+      stateOverridesUsed: false,
+      supported: true,
+    });
+    expect(certificate.routerCallSequence.map((call) => call.classification)).toEqual([
+      "source_token_transfer_from_wallet_to_swap_manager",
+      "router_call_to_active_swap_manager",
+      "destination_token_balance_check",
+      "destination_token_transfer_to_recipient",
+    ]);
+    expect(certificate.executionGraph).toHaveLength(1);
+    expect(certificate.executionGraph[0]).toMatchObject({
+      to: PROTOCOL,
+      selector: "0xabcdef01",
+      protocolClassification: "state_changing_selector_unknown",
+      trustStatus: "trusted",
+    });
+    expect(certificate.automaticExecutionEligible).toBe(true);
+  });
+
+  it("reports unsupported and state-insufficient trace infrastructure honestly", async () => {
+    stubExecutionRpc({
+      debugTraceError: "the method debug_traceCall does not exist",
+      traceCallError: "the method trace_call does not exist",
+    });
+    const unsupported = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(unsupported.executionTraceStatus).toBe("UNSUPPORTED");
+    expect(unsupported.executionGraphStatus).toBe("UNRESOLVED");
+    expect(unsupported.failureCodes).toContain("EXECUTION_TRACE_UNSUPPORTED");
+    expect(unsupported.automaticExecutionEligible).toBe(false);
+
+    stubExecutionRpc({
+      debugTraceError: "insufficient funds for gas * price + value",
+      traceCallError: "the method trace_call does not exist",
+    });
+    const stateInsufficient = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(stateInsufficient.executionTraceStatus).toBe("STATE_INSUFFICIENT");
+    expect(stateInsufficient.failureCodes).toContain("EXECUTION_TRACE_STATE_INSUFFICIENT");
+    expect(stateInsufficient.automaticExecutionEligible).toBe(false);
+  });
+
+  it("does not let a state-override diagnostic qualify automatic execution", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        certifyExecutionLayer: executionLayer({
+          traceBackend: {
+            ...resolvedExecutionLayer().traceBackend,
+            stateOverridesUsed: true,
+          },
+          automaticExecutionEligible: true,
+        }),
+      }),
+    );
+
+    expect(result.decision).toBe("WOULD_BUY");
+    expect(result.executionTraceStatus).toBe("PASSED");
+    expect(result.traceBackend.stateOverridesUsed).toBe(true);
+    expect(result.automaticExecutionEligible).toBe(false);
+  });
+
+  it("rejects manager, router, and manager-code changes between quote and simulation", async () => {
+    stubExecutionRpc({
+      managerAtQuote: OTHER,
+      routerCodeAtQuote: "0x60111100",
+      managerCodeAtQuote: "0x60222200",
+    });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.managerChangedSinceQuote).toBe(true);
+    expect(certificate.routerManagerBinding.routerCodeChangedSinceQuote).toBe(true);
+    expect(certificate.routerManagerBinding.managerCodeChangedSinceQuote).toBe(true);
+    expect(certificate.failureCodes).toContain("SWAP_MANAGER_CHANGED");
+    expect(certificate.failureCodes).toContain("ROUTER_CODE_CHANGED");
+    expect(certificate.failureCodes).toContain("SWAP_MANAGER_CODE_CHANGED");
+    expect(certificate.automaticExecutionEligible).toBe(false);
+  });
+
+  it("rejects unexpected router targets and SwapManager selector mismatches", async () => {
+    stubExecutionRpc({
+      traceRoot: successfulTrace({ managerInput: `0xdeadbeef${"0".repeat(64)}` }),
+    });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.executionGraphStatus).toBe("UNRESOLVED");
+    expect(certificate.unresolvedTargets).toContain("router_to_active_swap_manager_call");
+    expect(certificate.unresolvedTargets.some((target) => target.startsWith("unexpected_router_target:"))).toBe(true);
+    expect(certificate.failureCodes).toContain("EXECUTION_GRAPH_UNRESOLVED");
+    expect(certificate.automaticExecutionEligible).toBe(false);
+  });
+
+  it("rejects unknown delegatecall and unresolved protocol targets", async () => {
+    stubExecutionRpc({
+      traceRoot: successfulTrace({
+        managerCalls: [
+          {
+            type: "DELEGATECALL",
+            from: MANAGER,
+            to: PROTOCOL,
+            input: `0xdeadbeef${"0".repeat(64)}`,
+            value: "0x0",
+            gasUsed: "0x1234",
+          },
+        ],
+      }),
+    });
+
+    const certificate = await certifyPiteasExecutionLayer(
+      baseConfig,
+      executionCertArgs({
+        approvedTrustRecords: [
+          executionTrustRecord(MANAGER, "SwapManager", keccak256(DIRECT_MANAGER_CODE), [
+            PITEAS_SWAP_MANAGER_SELECTOR,
+          ]),
+        ],
+      }),
+    );
+
+    expect(certificate.executionGraphStatus).toBe("PARTIALLY_RESOLVED");
+    expect(certificate.unresolvedTargets.some((target) => target.startsWith("unknown_delegatecall_target:"))).toBe(true);
+    expect(certificate.unresolvedTargets.some((target) => target.startsWith("unresolved_protocol_target:"))).toBe(true);
+    expect(certificate.failureCodes).toContain("EXECUTION_GRAPH_UNRESOLVED");
+    expect(certificate.automaticExecutionEligible).toBe(false);
+  });
+
+  it("rejects CREATE, CREATE2, SELFDESTRUCT, and CALLCODE in the manager graph", async () => {
+    stubExecutionRpc({
+      traceRoot: successfulTrace({
+        managerCalls: [
+          { type: "CREATE", from: MANAGER, input: "0x", value: "0x0", gasUsed: "0x1" },
+          { type: "CREATE2", from: MANAGER, input: "0x", value: "0x0", gasUsed: "0x1" },
+          { type: "SELFDESTRUCT", from: MANAGER, to: PROTOCOL, input: "0x", value: "0x0", gasUsed: "0x1" },
+          { type: "CALLCODE", from: MANAGER, to: PROTOCOL, input: "0x", value: "0x0", gasUsed: "0x1" },
+        ],
+      }),
+    });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.executionGraphStatus).toBe("FAILED");
+    expect(certificate.prohibitedOperations).toEqual([
+      "CREATE_REJECTED",
+      "CREATE2_REJECTED",
+      "SELFDESTRUCT_REJECTED",
+      "CALLCODE_REJECTED",
+    ]);
+    expect(certificate.failureCodes).toEqual(expect.arrayContaining(certificate.prohibitedOperations));
+    expect(certificate.automaticExecutionEligible).toBe(false);
+  });
+
+  it("distinguishes wallet unlimited approvals from trusted manager-internal approvals", async () => {
+    const max = ((1n << 256n) - 1n).toString();
+    stubExecutionRpc({
+      traceRoot: successfulTrace({
+        managerCalls: [
+          {
+            type: "CALL",
+            from: MANAGER,
+            to: PHIAT_SHADOW_BUY_TOKEN_IN,
+            input: erc20ApproveData(PROTOCOL, max),
+            value: "0x0",
+            gasUsed: "0x1234",
+          },
+        ],
+      }),
+    });
+    const trustedInternal = await certifyPiteasExecutionLayer(
+      baseConfig,
+      executionCertArgs({
+        approvedTrustRecords: [
+          executionTrustRecord(MANAGER, "SwapManager", keccak256(DIRECT_MANAGER_CODE), [
+            PITEAS_SWAP_MANAGER_SELECTOR,
+          ]),
+          executionTrustRecord(PROTOCOL, "ProtocolRouter", keccak256(DIRECT_PROTOCOL_CODE), [
+            "0xabcdef01",
+            "0x095ea7b3",
+          ]),
+        ],
+      }),
+    );
+
+    expect(trustedInternal.internalApprovals).toHaveLength(1);
+    expect(trustedInternal.internalApprovals[0]).toMatchObject({
+      ownerContext: "swap_manager",
+      walletApproval: false,
+      managerInternalApproval: true,
+      approvedByPolicy: true,
+    });
+
+    stubExecutionRpc({
+      traceRoot: successfulTrace({
+        managerCalls: [
+          {
+            type: "CALL",
+            from: WALLET,
+            to: PHIAT_SHADOW_BUY_TOKEN_IN,
+            input: erc20ApproveData(PROTOCOL, max),
+            value: "0x0",
+            gasUsed: "0x1234",
+          },
+        ],
+      }),
+    });
+    const walletUnlimited = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(walletUnlimited.internalApprovals[0]).toMatchObject({
+      ownerContext: "wallet",
+      walletApproval: true,
+      managerInternalApproval: false,
+      approvedByPolicy: false,
+    });
+    expect(walletUnlimited.unresolvedTargets).toContain("wallet_unlimited_or_unapproved_approval");
+    expect(walletUnlimited.automaticExecutionEligible).toBe(false);
+  });
+
+  it("keeps automatic execution disabled until every manager trust gate passes", async () => {
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        certifyExecutionLayer: executionLayer({
+          swapManagerIntegrity: {
+            ...resolvedExecutionLayer().swapManagerIntegrity,
+            trusted: false,
+            operatorApprovalRequired: true,
+          },
+          automaticExecutionEligible: true,
+        }),
+      }),
+    );
+
+    expect(result.decision).toBe("WOULD_BUY");
+    expect(result.swapManagerIntegrity.operatorApprovalRequired).toBe(true);
+    expect(result.automaticExecutionEligible).toBe(false);
+  });
+
   it("rejects decoded recipient, token, input amount, native value, and min-output mismatches", async () => {
     const wrongTokenIn = await buildPhiatShadowBuy(
       baseConfig,
@@ -1666,8 +2587,11 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(decoded.routeExpectedOutputRaw).toBe(CANDIDATE_OUTPUT_RAW);
     expect(decoded.routeDataFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
     expect(decoded.calldataFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
-    expect(decoded.executionTargets.map((target) => target.address.toLowerCase())).toContain(POOL.toLowerCase());
-    expect(decoded.unresolvedExecutionTargets).toContain("piteas_route_payload_targets_unclassified");
+    expect(decoded.routeData?.embeddedAddresses.map((address) => address.toLowerCase())).toContain(
+      POOL.toLowerCase(),
+    );
+    expect(decoded.executionTargets).toEqual([]);
+    expect(decoded.unresolvedExecutionTargets).toEqual([]);
   });
 
   it("rejects unknown selectors, malformed calldata, and unresolved execution targets", async () => {
@@ -1711,12 +2635,20 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
             },
           },
         }),
+        certifyExecutionLayer: executionLayer({
+          executionGraphStatus: "UNRESOLVED",
+          automaticExecutionEligible: false,
+          failureCodes: ["EXECUTION_GRAPH_UNRESOLVED"],
+          validationErrors: ["Full state-changing execution graph is not resolved."],
+          unresolvedTargets: ["protocol_target_unresolved"],
+        }),
       }),
     );
     expect(unresolved.decision).toBe("REJECT");
     expect(unresolved.primaryDecisionClass).toBe("TRANSACTION_INTEGRITY_REJECT");
-    expect(unresolved.policyChecks.execution_targets_resolved?.status).toBe("fail");
-    expect(reasonCodes(unresolved)).toContain("EXECUTION_TARGETS_UNRESOLVED");
+    expect(unresolved.policyChecks.execution_layer_execution_graph_unresolved?.status).toBe("fail");
+    expect(reasonCodes(unresolved)).toContain("EXECUTION_GRAPH_UNRESOLVED");
+    expect(unresolved.unresolvedTargets).toContain("protocol_target_unresolved");
     expect(unresolved.automaticExecutionEligible).toBe(false);
   });
 

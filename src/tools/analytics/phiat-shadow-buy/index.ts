@@ -3,3 +3,4 @@ export * from "./schema.js";
 export * from "./types.js";
 export * from "./tool.js";
 export * from "./calldataDecode.js";
+export * from "./executionCertification.js";

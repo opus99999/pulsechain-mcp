@@ -8,11 +8,11 @@ import { registerTool } from "../../define.js";
 import { buildPhiatDashboard } from "../phiatDashboard.js";
 import { phiatShadowBuyInputSchema } from "./schema.js";
 import { CANDIDATE_TIMEOUT_MS, DEFAULT_ANALYTICAL_THRESHOLD_PERCENT, DEFAULT_GAS_SAFETY_FACTOR, DEFAULT_MAX_BATCH_DURATION_MS, DEFAULT_MAX_QUOTE_AGE_MS, DEFAULT_OPERATIONAL_THRESHOLD_PERCENT, DEFAULT_REFERENCE_AMOUNT_HUMAN, DEFAULT_REFERENCE_DRIFT_PERCENT, DEFAULT_SLIPPAGE_PERCENT, EUSDC_DECIMALS, MARKET_CONTEXT_TIMEOUT_MS, MAX_BATCH_DURATION_MS, MINIMUM_VIABLE_PITEAS_REQUEST_TIMEOUT_MS, PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_PER_REQUEST_TIMEOUT_MS, POST_CANDIDATE_VALIDATION_RESERVE_MS, REFERENCE_AFTER_RESERVE_MS, REFERENCE_AFTER_TIMEOUT_MS, REFERENCE_BEFORE_TIMEOUT_MS, SHADOW_PITEAS_REQUEST_COUNT } from "./constants.js";
-import type { PhiatShadowBuyCertificate, PhiatShadowBuyDeps, PhiatShadowBuyInput, Decision, PolicyCheck, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ShadowQuoteSummary, QuoteFreshness, CandidateFreshness } from "./types.js";
+import type { PhiatShadowBuyCertificate, PhiatShadowBuyDeps, PhiatShadowBuyInput, Decision, PolicyCheck, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ShadowQuoteSummary, QuoteFreshness, CandidateFreshness, ExecutionLayerCertification } from "./types.js";
 import { readEusdcAllowance, readAllowance } from "./allowance.js";
 import { readEusdcBalance, readNativeBalance, readBalances } from "./balances.js";
 import { readRouterIntegrity, validateRouterIntegrity } from "./routerIntegrity.js";
-import { emptyAllowance, emptyApprovalIntent, emptyBalances, emptyExecutionTargets, emptyGasPolicy, emptyRouterIntegrity, emptySimulation, buildCertificate, sanitizeQuote } from "./certificate.js";
+import { emptyAllowance, emptyApprovalIntent, emptyBalances, emptyExecutionLayer, emptyExecutionTargets, emptyGasPolicy, emptyRouterIntegrity, emptySimulation, buildCertificate, sanitizeQuote } from "./certificate.js";
 import { failCheck, hasFailures, passCheck, requireCheck, warnCheck } from "./policyEvaluation.js";
 import { parseHumanUnitsStrict, quoteFingerprint, fingerprint, isPositiveIntegerString, parseTimestampMs } from "./inputNormalization.js";
 import { readMarketContext, requestShadowQuote, analyzeQuoteFreshness, skippedQuoteSummary } from "./exactAmountSandwich.js";
@@ -24,6 +24,7 @@ import { buildExecutionTargets, validateExecutionTargets } from "./executionTarg
 import { buildApprovalIntent } from "./approvalIntent.js";
 import { simulateTransaction } from "./simulation.js";
 import { buildGasPolicy } from "./gasPolicy.js";
+import { certifyPiteasExecutionLayer } from "./executionCertification.js";
 import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 
 const defaultDeps: PhiatShadowBuyDeps = {
@@ -41,6 +42,7 @@ const defaultDeps: PhiatShadowBuyDeps = {
   getInputBalance: readEusdcBalance,
   getNativeBalanceWei: readNativeBalance,
   getRouterIntegrity: readRouterIntegrity,
+  certifyExecutionLayer: certifyPiteasExecutionLayer,
 };
 
 export async function buildPhiatShadowBuy(
@@ -71,6 +73,7 @@ export async function buildPhiatShadowBuy(
     h.toLowerCase(),
   );
   const approvedRouterTrustRecords = input.approvedRouterTrustRecords ?? [];
+  const approvedExecutionTrustRecords = input.approvedExecutionTrustRecords ?? [];
 
   const simulation = emptySimulation();
   const balances = emptyBalances(input.walletAddress);
@@ -78,11 +81,15 @@ export async function buildPhiatShadowBuy(
   const approvalIntent = emptyApprovalIntent();
   const routerIntegrity = emptyRouterIntegrity();
   const executionTargets = emptyExecutionTargets();
+  const unevaluatedExecutionLayer = emptyExecutionLayer();
   const gasPolicy = emptyGasPolicy(gasSafetyFactor, input.maximumGasPls);
   let quoteBatchStatus: QuoteBatchStatus = "DEADLINE_INSUFFICIENT";
   let allowanceStatus: AllowanceStatus = "NOT_EVALUATED";
   let approvalStatus: ApprovalStatus = "NOT_EVALUATED";
   let routerIntegrityStatus: RouterIntegrityStatus = "NOT_EVALUATED";
+  let managerIntegrityStatus = unevaluatedExecutionLayer.managerIntegrityStatus;
+  let executionTraceStatus = unevaluatedExecutionLayer.executionTraceStatus;
+  let executionGraphStatus = unevaluatedExecutionLayer.executionGraphStatus;
   let simulationStatus: SimulationStatus = "NOT_RUN";
 
   if (!isAddress(input.walletAddress)) {
@@ -972,6 +979,25 @@ export async function buildPhiatShadowBuy(
     decodedIntent,
   );
   validateExecutionTargets(policyChecks, reasons, executionTargetReport);
+  const executionLayer = await deps.certifyExecutionLayer(config, {
+    walletAddress,
+    router: prepared.intent.to,
+    tokenIn: decodedIntent.tokenIn ?? retainedCandidateQuote.srcToken.address,
+    tokenOut: decodedIntent.tokenOut ?? retainedCandidateQuote.destToken.address,
+    recipient: decodedIntent.recipient ?? walletAddress,
+    amountInRaw,
+    calldata: prepared.intent.data,
+    valueWei: prepared.intent.valueWei,
+    routeDataRaw: decodedIntent.routeDataRaw,
+    referenceBeforeBlock: referenceBefore?.blockNumber ?? null,
+    candidateQuoteBlock: candidateQuote.blockNumber,
+    referenceAfterBlock: referenceAfter?.blockNumber ?? null,
+    approvedTrustRecords: approvedExecutionTrustRecords,
+  });
+  managerIntegrityStatus = executionLayer.managerIntegrityStatus;
+  executionTraceStatus = executionLayer.executionTraceStatus;
+  executionGraphStatus = executionLayer.executionGraphStatus;
+  validateExecutionLayerCertification(policyChecks, reasons, executionLayer);
 
   const balanceReport = await readBalances({
     config,
@@ -1337,7 +1363,16 @@ export async function buildPhiatShadowBuy(
     !allowanceInsufficient &&
     routerReport.routerCodeHashApproved === true &&
     routerReport.codeHashAgreement !== "disagrees" &&
-    executionTargetReport.unresolvedExecutionTargets.length === 0;
+    executionTargetReport.unresolvedExecutionTargets.length === 0 &&
+    executionLayer.managerIntegrityStatus === "PASSED" &&
+    executionLayer.executionTraceStatus === "PASSED" &&
+    executionLayer.executionGraphStatus === "RESOLVED" &&
+    executionLayer.traceBackend.stateOverridesUsed === false &&
+    executionLayer.swapManagerIntegrity.trusted === true &&
+    executionLayer.unresolvedTargets.length === 0 &&
+    executionLayer.prohibitedOperations.length === 0 &&
+    executionLayer.failureCodes.length === 0 &&
+    executionLayer.automaticExecutionEligible === true;
   const decision: Decision = hasFailures(policyChecks)
     ? "REJECT"
     : allowanceInsufficient
@@ -1368,7 +1403,10 @@ export async function buildPhiatShadowBuy(
     allowanceStatus,
     approvalStatus,
     routerIntegrityStatus,
+    managerIntegrityStatus,
     simulationStatus,
+    executionTraceStatus,
+    executionGraphStatus,
     marketContext,
     exactAmountEvidence,
     referenceBefore,
@@ -1388,6 +1426,7 @@ export async function buildPhiatShadowBuy(
     approvalIntent: approval,
     routerIntegrity: routerReport,
     executionTargets: executionTargetReport,
+    executionLayer,
     preparedIntent,
     decodedIntent,
     simulation,
@@ -1614,6 +1653,59 @@ function releaseUnusedLeaseSlots(
     consumedSlots: current.attemptedSlots,
     remainingBudget: Math.min(current.limit, current.remainingBudget + releasedUnusedSlots),
   };
+}
+
+function validateExecutionLayerCertification(
+  checks: Record<string, PolicyCheck>,
+  reasons: ShadowBuyReason[],
+  certification: ExecutionLayerCertification,
+): void {
+  if (certification.failureCodes.length === 0) {
+    passCheck(checks, "execution_layer_certified", {
+      managerIntegrityStatus: certification.managerIntegrityStatus,
+      executionTraceStatus: certification.executionTraceStatus,
+      executionGraphStatus: certification.executionGraphStatus,
+      activeSwapManager: certification.activeSwapManager.address,
+    });
+  } else {
+    for (const [index, code] of certification.failureCodes.entries()) {
+      failCheck(
+        checks,
+        reasons,
+        executionLayerCheckName(code),
+        certification.validationErrors[index] ?? executionLayerMessage(code),
+        {
+          activeSwapManager: certification.activeSwapManager,
+          swapManagerIntegrity: certification.swapManagerIntegrity,
+          routerManagerBinding: certification.routerManagerBinding,
+          traceBackend: certification.traceBackend,
+          executionGraphStatus: certification.executionGraphStatus,
+          unresolvedTargets: certification.unresolvedTargets,
+          prohibitedOperations: certification.prohibitedOperations,
+        },
+        { code, stage: "execution_graph" },
+      );
+    }
+  }
+  if (certification.swapManagerIntegrity.operatorApprovalRequired) {
+    warnCheck(
+      checks,
+      "swap_manager_trust_record",
+      "SWAP_MANAGER_OPERATOR_APPROVAL_REQUIRED",
+      {
+        swapManager: certification.swapManagerIntegrity.address,
+        trustRecordFingerprint: certification.swapManagerIntegrity.trustRecordFingerprint,
+      },
+    );
+  }
+}
+
+function executionLayerCheckName(code: string): string {
+  return `execution_layer_${code.toLowerCase()}`;
+}
+
+function executionLayerMessage(code: string): string {
+  return code.replace(/_/g, " ");
 }
 
 function routerStatusFromChecks(

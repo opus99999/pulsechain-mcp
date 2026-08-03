@@ -42,4 +42,43 @@ export const phiatShadowBuyInputSchema = {
       }),
     )
     .optional(),
+  approvedExecutionTrustRecords: z
+    .array(
+      z.object({
+        chainId: z.number().int().positive(),
+        address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        role: z.enum([
+          "PiteasRouter",
+          "SwapManager",
+          "ManagerImplementation",
+          "DelegatecallTarget",
+          "ProtocolRouter",
+          "PoolFactory",
+          "Pool",
+          "Token",
+        ]),
+        runtimeCodeHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+        implementationAddress: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{40}$/)
+          .nullable()
+          .optional(),
+        implementationCodeHash: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{64}$/)
+          .nullable()
+          .optional(),
+        sourceFingerprint: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{64}$/)
+          .nullable()
+          .optional(),
+        approvedSelectors: z.array(z.string().regex(/^0x[a-fA-F0-9]{8}$/)),
+        approvalEvidence: z.string().min(1),
+        approvedAtBlock: z.string().regex(/^\d+$/).nullable().optional(),
+        expiresAtBlockOrTime: z.string().min(1).nullable().optional(),
+        operatorApproved: z.boolean(),
+      }),
+    )
+    .optional(),
 };
