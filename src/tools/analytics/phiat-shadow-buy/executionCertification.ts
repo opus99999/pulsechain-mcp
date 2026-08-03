@@ -285,7 +285,10 @@ async function evaluateTrustManifestGate(
   } = await import("./executionTrustManifest.js");
   const verification = verifySignedTrustManifest(args.signedExecutionTrustManifest, {
     pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
+    keyRegistry: config.phiatTrustOperatorKeyRegistry,
+    revocations: config.phiatTrustRevocations,
     currentBlock: args.block.blockNumber,
+    currentChainId: PULSECHAIN_CHAIN_ID,
   });
   if (verification.executionAuthority !== "VALID") {
     return { verification, comparison: null, executionAuthority: verification.executionAuthority };

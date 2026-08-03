@@ -9,7 +9,13 @@ import {
   DEFAULT_TESTNET_RPC_URLS,
 } from "./constants.js";
 import { logger } from "./logger.js";
-import type { AppConfig, LogLevel, PulseNetwork } from "./types.js";
+import type {
+  AppConfig,
+  LogLevel,
+  PhiatTrustOperatorPublicKeyRegistryEntry,
+  PhiatTrustRevocationRegistry,
+  PulseNetwork,
+} from "./types.js";
 import { ConfigError } from "./utils/errors.js";
 import { AGENT_WALLET_ENABLE_WARNING } from "./wallet/types.js";
 
@@ -51,6 +57,16 @@ const envSchema = z.object({
    * Public keys only. Private operator signing keys must never be configured here.
    */
   PHIAT_TRUST_OPERATOR_PUBLIC_KEYS: z.string().optional(),
+  /**
+   * JSON array or {"keys":[...]} public-key registry entries. Public SPKI
+   * material only; no private operator key belongs in MCP configuration.
+   */
+  PHIAT_TRUST_OPERATOR_KEY_REGISTRY: z.string().optional(),
+  /**
+   * JSON read-only revocation registry:
+   *   {"manifests":[...],"keys":[...]}
+   */
+  PHIAT_TRUST_REVOCATIONS: z.string().optional(),
 });
 
 function parseBool(value: string | undefined): boolean {
@@ -152,6 +168,84 @@ function parsePublicKeyPins(raw: string | undefined): Record<string, string> | u
     out[keyId] = publicKey;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function parseOperatorKeyRegistry(
+  raw: string | undefined,
+): PhiatTrustOperatorPublicKeyRegistryEntry[] | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("PHIAT_TRUST_OPERATOR_KEY_REGISTRY must be valid JSON.");
+  }
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && Array.isArray((parsed as { keys?: unknown }).keys)
+      ? (parsed as { keys: unknown[] }).keys
+      : null;
+  if (!entries) {
+    throw new ConfigError("PHIAT_TRUST_OPERATOR_KEY_REGISTRY must be an array or an object with a keys array.");
+  }
+  const seen = new Set<string>();
+  const out: PhiatTrustOperatorPublicKeyRegistryEntry[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") {
+      throw new ConfigError("PHIAT_TRUST_OPERATOR_KEY_REGISTRY entries must be objects.");
+    }
+    const candidate = entry as Partial<PhiatTrustOperatorPublicKeyRegistryEntry>;
+    if (
+      typeof candidate.keyId !== "string" ||
+      candidate.algorithm !== "Ed25519" ||
+      typeof candidate.spkiDerBase64 !== "string" ||
+      !["ACTIVE", "REVOKED", "DISABLED"].includes(String(candidate.status))
+    ) {
+      throw new ConfigError(
+        "PHIAT_TRUST_OPERATOR_KEY_REGISTRY entries require keyId, algorithm=Ed25519, spkiDerBase64, and ACTIVE/REVOKED/DISABLED status.",
+      );
+    }
+    const status = candidate.status as PhiatTrustOperatorPublicKeyRegistryEntry["status"];
+    if (seen.has(candidate.keyId)) {
+      throw new ConfigError(`Duplicate PHIAT trust operator key id "${candidate.keyId}".`);
+    }
+    seen.add(candidate.keyId);
+    out.push({
+      keyId: candidate.keyId,
+      algorithm: "Ed25519",
+      spkiDerBase64: candidate.spkiDerBase64,
+      status,
+      validFrom: candidate.validFrom ?? null,
+      validUntil: candidate.validUntil ?? null,
+      allowedManifestVersions: candidate.allowedManifestVersions,
+      allowedChainIds: candidate.allowedChainIds,
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseTrustRevocations(raw: string | undefined): PhiatTrustRevocationRegistry | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("PHIAT_TRUST_REVOCATIONS must be valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ConfigError("PHIAT_TRUST_REVOCATIONS must be an object.");
+  }
+  const value = parsed as Partial<PhiatTrustRevocationRegistry>;
+  if (value.manifests !== undefined && !Array.isArray(value.manifests)) {
+    throw new ConfigError("PHIAT_TRUST_REVOCATIONS.manifests must be an array when provided.");
+  }
+  if (value.keys !== undefined && !Array.isArray(value.keys)) {
+    throw new ConfigError("PHIAT_TRUST_REVOCATIONS.keys must be an array when provided.");
+  }
+  return {
+    manifests: value.manifests,
+    keys: value.keys,
+  };
 }
 
 /**
@@ -408,5 +502,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     logLevel: (e.LOG_LEVEL ?? DEFAULT_LOG_LEVEL) as LogLevel,
     httpTimeoutMs,
     phiatTrustOperatorPublicKeys: parsePublicKeyPins(e.PHIAT_TRUST_OPERATOR_PUBLIC_KEYS),
+    phiatTrustOperatorKeyRegistry: parseOperatorKeyRegistry(e.PHIAT_TRUST_OPERATOR_KEY_REGISTRY),
+    phiatTrustRevocations: parseTrustRevocations(e.PHIAT_TRUST_REVOCATIONS),
   };
 }

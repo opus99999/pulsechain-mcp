@@ -1,16 +1,25 @@
-import { generateKeyPairSync, sign as signPayload } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, sign as signPayload, verify as verifyPayload } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../src/types.js";
+import type { PhiatTrustOperatorPublicKeyRegistryEntry } from "../src/types.js";
 import {
   PITEAS_ROUTER,
   PITEAS_SWAP_MANAGER_SELECTOR,
   buildTrustManifestCandidateFromReport,
+  canonicalManifestBytes,
+  canonicalizationProfile,
   canonicalizeJson,
   compareLiveExecutionGraphToApprovedManifest,
   manifestFingerprint,
+  manifestIdFor,
   publicKeyIdFromSpkiDerBase64,
   registerPhiatTrustManifestTools,
+  signatureFrameForManifest,
+  signatureFrameSpecification,
   signedManifestPayload,
+  TRUST_MANIFEST_CANONICALIZATION,
+  TRUST_MANIFEST_DOMAIN_SEPARATOR,
+  TRUST_MANIFEST_SIGNATURE_FRAME_MAGIC,
   TRUST_MANIFEST_SIGNATURE_ALGORITHM,
   verifySignedTrustManifest,
   type LiveChainStateForManifest,
@@ -75,8 +84,26 @@ function keyMaterial() {
   return { ...pair, publicKeySpkiDerBase64, publicKeyId };
 }
 
+function keyRegistryEntry(
+  key: ReturnType<typeof keyMaterial>,
+  overrides: Partial<PhiatTrustOperatorPublicKeyRegistryEntry> = {},
+): PhiatTrustOperatorPublicKeyRegistryEntry {
+  return {
+    keyId: key.publicKeyId,
+    algorithm: TRUST_MANIFEST_SIGNATURE_ALGORITHM,
+    spkiDerBase64: key.publicKeySpkiDerBase64,
+    status: "ACTIVE",
+    validFrom: "2026-08-01T00:00:00.000Z",
+    validUntil: "2026-08-05T00:00:00.000Z",
+    allowedManifestVersions: ["phiat-execution-trust-v1"],
+    allowedChainIds: [369],
+    ...overrides,
+  };
+}
+
 function signManifest(manifest: TrustManifest, key = keyMaterial()): SignedTrustManifest {
-  const manifestForSigning = { ...manifest, operatorPublicKeyId: key.publicKeyId };
+  const withKey = { ...manifest, operatorPublicKeyId: key.publicKeyId };
+  const manifestForSigning = { ...withKey, manifestId: manifestIdFor(withKey) };
   return {
     manifest: manifestForSigning,
     manifestFingerprint: manifestFingerprint(manifestForSigning),
@@ -147,14 +174,20 @@ function trustManifest(args: {
   routerHash?: string;
   managerAddress?: string;
   managerHash?: string;
+  approvedAt?: string | null;
+  approvedAtBlock?: string | null;
   expiresAt?: string | null;
   expiresAtBlock?: string | null;
 } = {}): TrustManifest {
-  const records = args.records ?? [managerRecord(), protocolRecord()];
-  const allowedEdges = args.allowedEdges ?? [protocolEdge()];
-  return {
+  const records = [...(args.records ?? [managerRecord(), protocolRecord()])].sort((a, b) =>
+    testRecordSortKey(a) < testRecordSortKey(b) ? -1 : testRecordSortKey(a) > testRecordSortKey(b) ? 1 : 0,
+  );
+  const allowedEdges = [...(args.allowedEdges ?? [protocolEdge()])].sort((a, b) =>
+    testEdgeKey(a) < testEdgeKey(b) ? -1 : testEdgeKey(a) > testEdgeKey(b) ? 1 : 0,
+  );
+  const manifest = {
     version: "phiat-execution-trust-v1",
-    manifestId: "0x9999999999999999999999999999999999999999999999999999999999999999",
+    manifestId: `0x${"00".repeat(32)}`,
     chainId: args.chainId ?? 369,
     historicalTransaction: HISTORICAL_TX,
     historicalBlock: HISTORICAL_BLOCK,
@@ -184,12 +217,28 @@ function trustManifest(args: {
       routerChange: "REJECT",
       expiredManifest: "REJECT",
     },
-    approvedAt: "2026-08-03T00:00:00.000Z",
-    approvedAtBlock: "27195533",
+    approvedAt: args.approvedAt ?? "2026-08-03T00:00:00.000Z",
+    approvedAtBlock: args.approvedAtBlock ?? "27195533",
     expiresAt: args.expiresAt ?? "2026-08-04T00:00:00.000Z",
     expiresAtBlock: args.expiresAtBlock ?? "27195600",
     operatorPublicKeyId: "operator-key-id-required",
   };
+  return { ...manifest, manifestId: manifestIdFor(manifest) };
+}
+
+function testRecordSortKey(record: TrustManifestRecord): string {
+  return [record.role, record.address, record.runtimeCodeHash ?? "null"].join("|");
+}
+
+function testEdgeKey(edge: TrustManifestEdge): string {
+  return [
+    edge.fromRole ?? "null",
+    edge.fromAddress ?? "null",
+    edge.toRole,
+    edge.toAddress,
+    edge.callType,
+    edge.selector ?? "none",
+  ].join("|");
 }
 
 function protocolEdge(overrides: Partial<TrustManifestEdge> = {}): TrustManifestEdge {
@@ -249,10 +298,98 @@ function liveState(overrides: Partial<LiveChainStateForManifest> = {}): LiveChai
 describe("signed PHIAT execution trust manifests", () => {
   it("canonicalizes object keys deterministically and fingerprints semantic changes", () => {
     expect(canonicalizeJson({ b: 2, a: 1 })).toBe('{"a":1,"b":2}');
+    expect(canonicalizeJson({ z: null, a: [true, false, "A\n"] })).toBe('{"a":[true,false,"A\\n"],"z":null}');
+    expect(canonicalizeJson({ a: [2, 1] })).toBe('{"a":[2,1]}');
+    expect(canonicalizeJson({ a: [1, 2] })).toBe('{"a":[1,2]}');
+    expect(() => canonicalizeJson({ amount: 1.5 })).toThrow();
+    expect(() => canonicalizeJson({ block: 9_007_199_254_740_992 })).toThrow();
+    expect(canonicalizationProfile()).toMatchObject({
+      standard: TRUST_MANIFEST_CANONICALIZATION,
+      canonicalizationVersion: 1,
+    });
     const manifest = trustManifest();
     const reordered = Object.fromEntries(Object.entries(manifest).reverse()) as TrustManifest;
     expect(manifestFingerprint(reordered)).toBe(manifestFingerprint(manifest));
     expect(manifestFingerprint({ ...manifest, chainId: 943 })).not.toBe(manifestFingerprint(manifest));
+  });
+
+  it("rejects duplicate keys, trailing JSON, malformed Unicode, and unsafe number input before authority", () => {
+    const key = keyMaterial();
+    const signed = signManifest(trustManifest(), key);
+    const verifyString = (json: string) =>
+      verifySignedTrustManifest(json, {
+        pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+        nowMs: NOW,
+        currentBlock: "27195533",
+      });
+
+    expect(verifyString(`{"manifest":{},"manifest":{},"manifestFingerprint":"${`0x${"00".repeat(32)}`}","signatureAlgorithm":"Ed25519","operatorPublicKeyId":"${key.publicKeyId}","signature":"AA=="}`).validationErrors).toContain("STRICT_JSON_DUPLICATE_KEY");
+    expect(verifyString(`{"manifest":{"version":"a","version":"b"},"manifestFingerprint":"${`0x${"00".repeat(32)}`}","signatureAlgorithm":"Ed25519","operatorPublicKeyId":"${key.publicKeyId}","signature":"AA=="}`).validationErrors).toContain("STRICT_JSON_DUPLICATE_KEY");
+    expect(verifyString(`{"manifest":{},"\\u006d\\u0061\\u006e\\u0069\\u0066\\u0065\\u0073\\u0074":{}}`).validationErrors).toContain("STRICT_JSON_DUPLICATE_KEY");
+    expect(verifyString(`${JSON.stringify(signed)} {}`).validationErrors).toContain("STRICT_JSON_TRAILING_DATA");
+    expect(verifyString(`{"manifest":{"version":"\\ud800"}}`).validationErrors).toContain("STRICT_JSON_MALFORMED_UNICODE");
+    expect(verifyString(`{"manifest":{"chainId":NaN}}`).validationErrors).toContain("STRICT_JSON_INVALID_VALUE");
+    expect(verifyString(`{"manifest":{"chainId":Infinity}}`).validationErrors).toContain("STRICT_JSON_INVALID_VALUE");
+    expect(verifyString(`{"manifest":{"chainId":9007199254740992}}`).validationErrors).toContain("STRICT_JSON_UNSAFE_INTEGER");
+
+    const unsafeBlock = verifySignedTrustManifest({
+      ...signed,
+      manifest: { ...signed.manifest, historicalBlock: 9_007_199_254_740_992 },
+    }, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(unsafeBlock.validationErrors).toContain("HISTORICAL_BLOCK_INVALID");
+    expect(unsafeBlock.executionAuthority).toBe("INVALID");
+  });
+
+  it("uses deterministic source-set ordering while canonicalization preserves raw array order", () => {
+    const firstReport = mockTrustReportWithTwoRecords(false);
+    const secondReport = mockTrustReportWithTwoRecords(true);
+    const first = buildTrustManifestCandidateFromReport(firstReport, {
+      expiresAtBlock: "27195600",
+      expiresAt: "2026-08-04T00:00:00.000Z",
+    });
+    const second = buildTrustManifestCandidateFromReport(secondReport, {
+      expiresAtBlock: "27195600",
+      expiresAt: "2026-08-04T00:00:00.000Z",
+    });
+    expect(first.manifestFingerprint).toBe(second.manifestFingerprint);
+
+    const manifest = trustManifest();
+    const reorderedArrays = { ...manifest, records: [...manifest.records].reverse() };
+    expect(manifestFingerprint({ ...reorderedArrays, manifestId: manifestIdFor(reorderedArrays) })).not.toBe(
+      manifestFingerprint(manifest),
+    );
+
+    const key = keyMaterial();
+    const reorderedSigned = signManifest(reorderedArrays, key);
+    const reorderedResult = verifySignedTrustManifest(reorderedSigned, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(reorderedResult.validationErrors).toContain("RECORDS_NOT_SORTED");
+    expect(reorderedResult.executionAuthority).toBe("INVALID");
+
+    const duplicateSelector = signManifest(trustManifest({
+      records: [managerRecord(), protocolRecord({ approvedSelectors: ["0xabcdef01", "0xabcdef01"] })],
+    }), key);
+    expect(verifySignedTrustManifest(duplicateSelector, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).validationErrors).toContain("APPROVED_SELECTORS_DUPLICATE");
+
+    const duplicateEdge = signManifest(trustManifest({
+      allowedEdges: [protocolEdge(), protocolEdge()],
+    }), key);
+    expect(verifySignedTrustManifest(duplicateEdge, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).validationErrors).toContain("ALLOWED_EDGES_DUPLICATE");
   });
 
   it("verifies valid Ed25519 signatures and rejects invalid signatures or keys", () => {
@@ -304,6 +441,147 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(wrongPublicKey.executionAuthority).toBe("INVALID");
   });
 
+  it("uses an explicit binary signature frame and rejects downgrade, truncation, and wrapper tampering", () => {
+    const key = keyMaterial();
+    const manifest = trustManifest();
+    const signed = signManifest(manifest, key);
+    const frame = signatureFrameForManifest(signed.manifest);
+    const spec = signatureFrameSpecification(signed.manifest);
+    expect(spec.version).toBe(1);
+    expect(spec.domainSeparator).toBe(TRUST_MANIFEST_DOMAIN_SEPARATOR);
+    expect(frame.subarray(0, "PHIAT_TRUST_MANIFEST_SIG".length).toString("ascii")).toBe("PHIAT_TRUST_MANIFEST_SIG");
+    expect(frame.readUInt8("PHIAT_TRUST_MANIFEST_SIG".length)).toBe(1);
+    expect(signedManifestPayload(signed.manifest).equals(frame)).toBe(true);
+
+    const prettyJson = JSON.stringify(signed, null, 2);
+    expect(verifySignedTrustManifest(prettyJson, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).executionAuthority).toBe("VALID");
+
+    const oldAmbiguousPayload = Buffer.concat([
+      Buffer.from(TRUST_MANIFEST_DOMAIN_SEPARATOR, "utf8"),
+      Buffer.from(canonicalManifestBytes(signed.manifest)),
+      Buffer.from(signed.manifestFingerprint.slice(2), "hex"),
+    ]);
+    const oldStyleSignature = {
+      ...signed,
+      signature: signPayload(null, oldAmbiguousPayload, key.privateKey).toString("base64"),
+    };
+    expect(verifySignedTrustManifest(oldStyleSignature, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).executionAuthority).toBe("INVALID");
+
+    const wrongDomain = Buffer.from("PULSECHAIN_MCP_OTHER_DOMAIN_V1", "utf8");
+    const wrongDomainLength = Buffer.alloc(4);
+    wrongDomainLength.writeUInt32BE(wrongDomain.length, 0);
+    const manifestBytes = Buffer.from(canonicalManifestBytes(signed.manifest));
+    const manifestLength = Buffer.alloc(8);
+    manifestLength.writeBigUInt64BE(BigInt(manifestBytes.length), 0);
+    const wrongDomainFrame = Buffer.concat([
+      Buffer.from(TRUST_MANIFEST_SIGNATURE_FRAME_MAGIC, "ascii"),
+      Buffer.from([1]),
+      wrongDomainLength,
+      wrongDomain,
+      manifestLength,
+      manifestBytes,
+      Buffer.from(signed.manifestFingerprint.slice(2), "hex"),
+    ]);
+    const wrongDomainSignature = {
+      ...signed,
+      signature: signPayload(null, wrongDomainFrame, key.privateKey).toString("base64"),
+    };
+    expect(verifySignedTrustManifest(wrongDomainSignature, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).executionAuthority).toBe("INVALID");
+
+    expect(verifySignedTrustManifest({ ...signed, signature: signed.signature.slice(0, -4) }, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).validationErrors).toContain("SIGNATURE_LENGTH_INVALID");
+
+    expect(verifySignedTrustManifest({ ...signed, manifestFingerprint: `0x${"11".repeat(32)}` }, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).validationErrors).toContain("MANIFEST_FINGERPRINT_MISMATCH");
+
+    const alteredManifestOldWrapper = verifySignedTrustManifest({
+      ...signed,
+      manifest: { ...signed.manifest, chainId: 943 },
+    }, {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(alteredManifestOldWrapper.validationErrors).toEqual(expect.arrayContaining([
+      "MANIFEST_FINGERPRINT_MISMATCH",
+      "MANIFEST_ID_MISMATCH",
+      "SIGNATURE_INVALID",
+    ]));
+    expect(alteredManifestOldWrapper.executionAuthority).toBe("INVALID");
+  });
+
+  it("validates Ed25519 SPKI keys, derived key IDs, and RFC 8032 verification vectors", () => {
+    const rfcPublicKey = Buffer.concat([
+      Buffer.from("302a300506032b6570032100", "hex"),
+      Buffer.from("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex"),
+    ]);
+    const rfcSignature = Buffer.from(
+      "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "hex",
+    );
+    expect(verifyPayload(null, Buffer.alloc(0), createPublicKey({
+      key: rfcPublicKey,
+      format: "der",
+      type: "spki",
+    }), rfcSignature)).toBe(true);
+
+    const key = keyMaterial();
+    const signed = signManifest(trustManifest(), key);
+    const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const ec = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const x25519 = generateKeyPairSync("x25519").publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const ed448 = generateKeyPairSync("ed448").publicKey.export({ format: "der", type: "spki" }).toString("base64");
+
+    for (const spkiDerBase64 of [rsa, ec, x25519, ed448]) {
+      const result = verifySignedTrustManifest(signed, {
+        keyRegistry: [{ ...keyRegistryEntry(key), spkiDerBase64 }],
+        nowMs: NOW,
+        currentBlock: "27195533",
+      });
+      expect(result.validationErrors).toContain("PUBLIC_KEY_NOT_ED25519");
+      expect(result.executionAuthority).toBe("INVALID");
+    }
+
+    const trailingDer = `${Buffer.concat([
+      Buffer.from(key.publicKeySpkiDerBase64, "base64"),
+      Buffer.from([0]),
+    ]).toString("base64")}`;
+    const trailingDerResult = verifySignedTrustManifest(signed, {
+      keyRegistry: [{ ...keyRegistryEntry(key), spkiDerBase64: trailingDer }],
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(trailingDerResult.validationErrors.some((error) =>
+      ["PUBLIC_KEY_DER_INVALID", "PUBLIC_KEY_DER_NOT_CANONICAL"].includes(error),
+    )).toBe(true);
+
+    const wrongKeyId = verifySignedTrustManifest(signed, {
+      keyRegistry: [{ ...keyRegistryEntry(key), keyId: `0x${"12".repeat(32)}` }],
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(wrongKeyId.validationErrors).toContain("OPERATOR_PUBLIC_KEY_UNKNOWN");
+    expect(wrongKeyId.executionAuthority).toBe("INVALID");
+  });
+
   it("rejects wrong chain, router, manager, and expired manifests", () => {
     const key = keyMaterial();
     for (const manifest of [
@@ -322,6 +600,7 @@ describe("signed PHIAT execution trust manifests", () => {
     }
 
     const expiredByTime = verifySignedTrustManifest(signManifest(trustManifest({
+      approvedAt: "2026-08-01T00:00:00.000Z",
       expiresAt: "2026-08-02T00:00:00.000Z",
       expiresAtBlock: null,
     }), key), {
@@ -332,6 +611,7 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(expiredByTime.executionAuthority).toBe("EXPIRED");
 
     const expiredByBlock = verifySignedTrustManifest(signManifest(trustManifest({
+      approvedAtBlock: "27195531",
       expiresAt: null,
       expiresAtBlock: "27195532",
     }), key), {
@@ -340,6 +620,97 @@ describe("signed PHIAT execution trust manifests", () => {
       currentBlock: "27195533",
     });
     expect(expiredByBlock.executionAuthority).toBe("EXPIRED");
+  });
+
+  it("enforces public-key registry status, validity windows, chain policy, and revocations", () => {
+    const key = keyMaterial();
+    const signed = signManifest(trustManifest(), key);
+    const verifyWithEntry = (
+      entry: PhiatTrustOperatorPublicKeyRegistryEntry,
+      extra: Parameters<typeof verifySignedTrustManifest>[1] = {},
+    ) => verifySignedTrustManifest(signed, {
+      keyRegistry: [entry],
+      nowMs: NOW,
+      currentBlock: "27195533",
+      ...extra,
+    });
+
+    expect(verifyWithEntry(keyRegistryEntry(key)).executionAuthority).toBe("VALID");
+    expect(verifyWithEntry(keyRegistryEntry(key, { status: "REVOKED" })).keyStatus).toBe("REVOKED");
+    expect(verifyWithEntry(keyRegistryEntry(key, { status: "DISABLED" })).keyStatus).toBe("DISABLED");
+    expect(verifyWithEntry(keyRegistryEntry(key, { validFrom: "2026-08-04T00:00:00.000Z" })).validationErrors).toContain("OPERATOR_PUBLIC_KEY_NOT_YET_VALID");
+    expect(verifyWithEntry(keyRegistryEntry(key, { validUntil: "2026-08-02T00:00:00.000Z" })).validationErrors).toContain("OPERATOR_PUBLIC_KEY_EXPIRED");
+    expect(verifyWithEntry(keyRegistryEntry(key, { allowedManifestVersions: ["future-version"] })).validationErrors).toContain("OPERATOR_PUBLIC_KEY_VERSION_NOT_ALLOWED");
+    expect(verifyWithEntry(keyRegistryEntry(key, { allowedChainIds: [943] })).validationErrors).toContain("OPERATOR_PUBLIC_KEY_CHAIN_NOT_ALLOWED");
+
+    const duplicateKeys = verifySignedTrustManifest(signed, {
+      keyRegistry: [keyRegistryEntry(key), keyRegistryEntry(key)],
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(duplicateKeys.validationErrors).toEqual(expect.arrayContaining([
+      "OPERATOR_PUBLIC_KEY_ID_DUPLICATE",
+      "OPERATOR_PUBLIC_KEY_DER_DUPLICATE",
+    ]));
+
+    const revokedManifest = verifySignedTrustManifest(signed, {
+      keyRegistry: [keyRegistryEntry(key)],
+      revocations: {
+        manifests: [{ manifestFingerprint: signed.manifestFingerprint, revokedAt: "2026-08-03T00:00:00.000Z", reason: "test" }],
+      },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(revokedManifest.revocationStatus).toBe("REVOKED");
+    expect(revokedManifest.executionAuthority).toBe("INVALID");
+
+    const revokedKey = verifySignedTrustManifest(signed, {
+      keyRegistry: [keyRegistryEntry(key)],
+      revocations: {
+        keys: [{ keyId: key.publicKeyId, revokedAt: "2026-08-03T00:00:00.000Z", reason: "test" }],
+      },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(revokedKey.revocationStatus).toBe("REVOKED");
+    expect(revokedKey.executionAuthority).toBe("INVALID");
+
+    expect(verifySignedTrustManifest(signed, {
+      keyRegistry: [keyRegistryEntry(key)],
+      nowMs: NOW,
+      currentBlock: "27195533",
+    }).revocationStatus).toBe("UNCONFIGURED");
+  });
+
+  it("fails closed for future approval, invalid expiration ordering, and unbounded windows", () => {
+    const key = keyMaterial();
+    const cases: Array<[TrustManifest, string]> = [
+      [trustManifest({ approvedAt: "2026-08-04T00:00:00.000Z" }), "APPROVED_AT_IN_FUTURE"],
+      [trustManifest({ approvedAtBlock: "27195534" }), "APPROVED_AT_BLOCK_IN_FUTURE"],
+      [trustManifest({ approvedAt: "2026-08-03T00:00:00.000Z", expiresAt: "2026-08-03T00:00:00.000Z" }), "EXPIRES_AT_NOT_AFTER_APPROVED_AT"],
+      [trustManifest({ approvedAtBlock: "27195533", expiresAtBlock: "27195533" }), "EXPIRES_AT_BLOCK_NOT_AFTER_APPROVED_AT_BLOCK"],
+      [trustManifest({ approvedAt: "2026-08-03T00:00:00.000Z", expiresAt: "2026-08-20T00:00:00.000Z" }), "EXPIRATION_WINDOW_TOO_LONG"],
+      [trustManifest({ approvedAtBlock: "27195533", expiresAtBlock: "27300000" }), "EXPIRATION_BLOCK_WINDOW_TOO_LONG"],
+    ];
+
+    for (const [manifest, error] of cases) {
+      const result = verifySignedTrustManifest(signManifest(manifest, key), {
+        pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+        nowMs: NOW,
+        currentBlock: "27195533",
+      });
+      expect(result.validationErrors).toContain(error);
+      expect(result.executionAuthority).toBe("INVALID");
+    }
+
+    const missingCurrentBlock = verifySignedTrustManifest(signManifest(trustManifest(), key), {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: null,
+    });
+    expect(missingCurrentBlock.validationErrors).toContain("CURRENT_BLOCK_REQUIRED_FOR_APPROVAL_BLOCK");
+    expect(missingCurrentBlock.validationErrors).toContain("CURRENT_BLOCK_REQUIRED_FOR_BLOCK_EXPIRATION");
+    expect(missingCurrentBlock.executionAuthority).toBe("INVALID");
   });
 
   it("rejects code-hash, target, selector, edge, call-type, parent, caller, and prohibited-operation mismatches", () => {
@@ -354,6 +725,62 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(compareLiveExecutionGraphToApprovedManifest([liveCall({ parentAddress: OTHER })], approved, liveState()).failureCodes).toContain("PARENT_CONSTRAINT_MISMATCH");
     expect(compareLiveExecutionGraphToApprovedManifest([liveCall({ from: OTHER, parentAddress: MANAGER })], approved, liveState()).failureCodes).toContain("CALLER_CONSTRAINT_MISMATCH");
     expect(compareLiveExecutionGraphToApprovedManifest([{ from: MANAGER, to: null, callType: "CREATE", selector: null }], approved, liveState()).failureCodes).toContain("PROHIBITED_OPERATION");
+    expect(compareLiveExecutionGraphToApprovedManifest([{
+      from: MANAGER,
+      to: TARGET,
+      callType: "STATICCALL",
+      selector: "0xabcdef01",
+      codeHash: TARGET_HASH,
+      parentAddress: MANAGER,
+    }], approved, liveState()).failureCodes).toContain("CALL_TYPE_MISMATCH");
+    expect(compareLiveExecutionGraphToApprovedManifest([liveCall()], approved, liveState({
+      swapManager: {
+        address: MANAGER,
+        runtimeCodeHash: MANAGER_HASH,
+        storageSlot: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        storageAddress: MANAGER,
+        managerChangeEventBlock: "27195534",
+      },
+    })).failureCodes).toContain("SWAP_MANAGER_CHANGED");
+  });
+
+  it("rejects unknown authority fields and changed graph or bundle bindings", () => {
+    const key = keyMaterial();
+    const withExtraManifestField = {
+      ...trustManifest(),
+      extraAuthority: "grant",
+    } as TrustManifest & { extraAuthority: string };
+    const extraManifestResult = verifySignedTrustManifest(signManifest(withExtraManifestField as TrustManifest, key), {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(extraManifestResult.validationErrors).toContain("MANIFEST_UNKNOWN_FIELD_extraAuthority");
+    expect(extraManifestResult.executionAuthority).toBe("INVALID");
+
+    const graphChanged = verifySignedTrustManifest(signManifest({
+      ...trustManifest(),
+      graphFingerprint: `0x${"44".repeat(32)}`,
+    }, key), {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(graphChanged.signatureValid).toBe(true);
+    expect(graphChanged.validationErrors).toContain("GRAPH_FINGERPRINT_MISMATCH");
+    expect(graphChanged.executionAuthority).toBe("STATE_MISMATCH");
+
+    const bundleChanged = verifySignedTrustManifest(signManifest({
+      ...trustManifest(),
+      bundleFingerprint: `0x${"55".repeat(32)}`,
+    }, key), {
+      pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
+      nowMs: NOW,
+      currentBlock: "27195533",
+    });
+    expect(bundleChanged.signatureValid).toBe(true);
+    expect(bundleChanged.validationErrors).toContain("BUNDLE_FINGERPRINT_MISMATCH");
+    expect(bundleChanged.executionAuthority).toBe("STATE_MISMATCH");
   });
 
   it("rejects SmartRouterHelper delegatecalls outside the exact parent and selector context", () => {
@@ -519,6 +946,10 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(compareLiveExecutionGraphToApprovedManifest([exact], approved, {
       ...state,
       poolStates: { [POOL]: { factoryAddress: FACTORY, token0: TOKEN0, token1: TOKEN1, fee: 3000, tickSpacing: 50 } },
+    }).failureCodes).toContain("FEE_TIER_MISMATCH");
+    expect(compareLiveExecutionGraphToApprovedManifest([exact], approved, {
+      ...state,
+      poolStates: { [POOL]: { factoryAddress: FACTORY, token0: TOKEN0, token1: TOKEN1, fee: 2500, tickSpacing: 200 } },
     }).failureCodes).toContain("FEE_TIER_MISMATCH");
   });
 
@@ -691,5 +1122,34 @@ function mockTrustReport(): ExecutionTrustReport {
       warnings: [],
       automaticExecutionEligible: false,
     },
+  };
+}
+
+function mockTrustReportWithTwoRecords(reversed: boolean): ExecutionTrustReport {
+  const report = mockTrustReport();
+  const secondRecord = {
+    ...report.candidateRecords[0]!,
+    address: OTHER,
+    normalizedAddress: OTHER,
+    runtimeCodeHash: OTHER_HASH,
+    observedSelectors: ["0x12345678"],
+    callerConstraints: [{ caller: MANAGER, selector: "0x12345678", callType: "CALL" }],
+  };
+  const secondCall = {
+    ...report.normalizedCalls[0]!,
+    to: OTHER,
+    selector: "0x12345678",
+    runtimeCodeHash: OTHER_HASH,
+  };
+  const candidateRecords = reversed
+    ? [secondRecord, report.candidateRecords[0]!]
+    : [report.candidateRecords[0]!, secondRecord];
+  const normalizedCalls = reversed
+    ? [secondCall, report.normalizedCalls[0]!]
+    : [report.normalizedCalls[0]!, secondCall];
+  return {
+    ...report,
+    normalizedCalls,
+    candidateRecords,
   };
 }

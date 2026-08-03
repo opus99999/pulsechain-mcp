@@ -11,6 +11,36 @@ export type ToolCategory =
 
 export type PulseNetwork = "mainnet" | "testnet";
 
+export type PhiatTrustOperatorKeyStatus = "ACTIVE" | "REVOKED" | "DISABLED";
+
+export interface PhiatTrustOperatorPublicKeyRegistryEntry {
+  keyId: string;
+  algorithm: "Ed25519";
+  spkiDerBase64: string;
+  status: PhiatTrustOperatorKeyStatus;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  allowedManifestVersions?: string[];
+  allowedChainIds?: number[];
+}
+
+export interface PhiatTrustRevokedManifest {
+  manifestFingerprint: string;
+  revokedAt: string;
+  reason: string;
+}
+
+export interface PhiatTrustRevokedKey {
+  keyId: string;
+  revokedAt: string;
+  reason: string;
+}
+
+export interface PhiatTrustRevocationRegistry {
+  manifests?: PhiatTrustRevokedManifest[];
+  keys?: PhiatTrustRevokedKey[];
+}
+
 export interface AppConfig {
   /**
    * Ordered RPC endpoints (local → LAN → g4mm4 → public when user-configured).
@@ -50,6 +80,17 @@ export interface AppConfig {
    * private keys or wallet secrets.
    */
   phiatTrustOperatorPublicKeys?: Record<string, string>;
+  /**
+   * Explicit public-key authorization registry for PHIAT execution trust
+   * manifests. Public keys are not secrets; the registry still encodes
+   * authorization state and must contain public SPKI material only.
+   */
+  phiatTrustOperatorKeyRegistry?: PhiatTrustOperatorPublicKeyRegistryEntry[];
+  /**
+   * Optional read-only operator revocation configuration. MCP tools only read
+   * this state; they never create or write revocations.
+   */
+  phiatTrustRevocations?: PhiatTrustRevocationRegistry;
 }
 
 /**
