@@ -334,6 +334,6 @@ describe("Tier B tool registration", () => {
         true,
       );
     }
-    expect(meta.length).toBe(96);
+    expect(meta.length).toBe(97);
   });
 });

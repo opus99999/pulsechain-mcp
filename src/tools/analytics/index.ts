@@ -17,6 +17,7 @@ import { registerAdvancedAnalyticsTools } from "./advanced.js";
 import { registerDexScreenerTools } from "./dexscreener.js";
 import { registerFreeTierAnalyticsTools } from "./freeTier.js";
 import { registerPhiatDashboardTool } from "./phiatDashboard.js";
+import { registerPhiatShadowBuyTool } from "./phiatShadowBuy.js";
 import { registerPiteasAccumulationPlanTool } from "./piteasAccumulationPlan.js";
 import { registerTierATools } from "./tierA.js";
 import { registerTierBTools } from "./tierB.js";
@@ -30,6 +31,7 @@ export { registerFreeTierAnalyticsTools } from "./freeTier.js";
 export { registerAdvancedAnalyticsTools } from "./advanced.js";
 export { registerDexScreenerTools } from "./dexscreener.js";
 export { registerPhiatDashboardTool, buildPhiatDashboard } from "./phiatDashboard.js";
+export { registerPhiatShadowBuyTool, buildPhiatShadowBuy } from "./phiatShadowBuy.js";
 export {
   registerPiteasAccumulationPlanTool,
   buildPiteasAccumulationPlan,
@@ -71,6 +73,8 @@ export function registerAnalyticsTools(
   registerDexScreenerTools(server, config);
   // Consolidated PHIAT research dashboard (address-first, read-only)
   registerPhiatDashboardTool(server, config);
+  // Shadow-only PHIAT buyer certificate: prepare/decode/simulate, never sign/broadcast
+  registerPhiatShadowBuyTool(server, config);
   // Research-only Piteas eUSDC -> PHIAT quote-curve planner
   registerPiteasAccumulationPlanTool(server, config);
   // Tier A: BlockScout enrichment + DefiLlama + PulseSwap quotes

@@ -595,6 +595,7 @@ describe("Switch tool registration", () => {
     expect(names).toContain("switch_quote");
     expect(names).toContain("switch_prepare_swap");
     expect(names).toContain("piteas_quote");
+    expect(names).toContain("phiat_shadow_buy");
     const meta = getRegisteredTools();
     for (const n of ["switch_quote", "switch_prepare_swap"]) {
       const t = meta.find((m) => m.name === n);
@@ -611,7 +612,7 @@ describe("Switch tool registration", () => {
     expect(meta.find((m) => m.name === "switch_prepare_swap")?.description).toMatch(
       /piteas|SWITCH_API_KEY|request-api-key/i,
     );
-    // 92 prior + switch_quote + switch_prepare_swap
-    expect(meta.length).toBe(96);
+    // Existing inventory plus phiat_shadow_buy.
+    expect(meta.length).toBe(97);
   });
 });

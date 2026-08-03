@@ -233,6 +233,14 @@ export {
 } from "./piteas.js";
 
 export {
+  reservePiteasRateLimitSlots,
+  getPiteasRateLimitBudget,
+  resetPiteasRateLimitForTests,
+  type PiteasRateLimitBudget,
+  type PiteasRateLimitReservation,
+} from "./piteasRateLimit.js";
+
+export {
   SWITCH_API_BASE,
   SWITCH_NATIVE_SENTINEL,
   SWITCH_DEFAULT_NETWORK,
