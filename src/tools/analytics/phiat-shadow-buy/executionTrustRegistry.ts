@@ -704,13 +704,11 @@ export function compareLiveTraceAgainstTrustBundle(args: {
   if (!sameString(args.routerCodeHash, args.bundle.routerCodeHash)) failureCodes.push("ROUTER_CODE_HASH_CHANGED");
   if (!sameAddress(args.swapManagerAddress, args.bundle.swapManagerAddress)) failureCodes.push("MANAGER_ADDRESS_CHANGED");
   if (!sameString(args.swapManagerCodeHash, args.bundle.swapManagerCodeHash)) failureCodes.push("MANAGER_CODE_HASH_CHANGED");
-  if (args.requireOperatorApproval !== false && !args.bundle.operatorApproved) {
-    failureCodes.push("BUNDLE_NOT_OPERATOR_APPROVED");
-  }
+  failureCodes.push("SIGNED_TRUST_MANIFEST_REQUIRED");
+  if (args.requireOperatorApproval !== false && !args.bundle.operatorApproved) failureCodes.push("BUNDLE_NOT_OPERATOR_APPROVED");
 
   const approvedRecords = new Map(
     [...args.bundle.requiredRecords, ...args.bundle.optionalRecords]
-      .filter((record) => record.operatorApproved)
       .map((record) => [record.normalizedAddress, record]),
   );
   const historicalEdges = new Set(
@@ -747,7 +745,7 @@ export function compareLiveTraceAgainstTrustBundle(args: {
     status: failureCodes.length === 0 ? "PASSED" : "REJECTED",
     failureCodes: uniqueStrings(failureCodes).sort(),
     warnings: uniqueStrings(warnings).sort(),
-    automaticExecutionEligible: failureCodes.length === 0,
+    automaticExecutionEligible: false,
   };
 }
 

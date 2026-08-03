@@ -81,4 +81,10 @@ export const phiatShadowBuyInputSchema = {
       }),
     )
     .optional(),
+  signedExecutionTrustManifest: z
+    .union([z.record(z.string(), z.unknown()), z.string()])
+    .optional()
+    .describe(
+      "Externally signed execution trust manifest. Verification is read-only and never signs or submits a transaction.",
+    ),
 };

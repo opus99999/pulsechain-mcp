@@ -456,6 +456,6 @@ describe("Piteas tool registration", () => {
     expect(meta.find((m) => m.name === "piteas_quote")?.description).toMatch(
       /best-price|oracle|Preferred aggregator/i,
     );
-    expect(meta.length).toBe(98);
+    expect(meta.length).toBe(100);
   });
 });

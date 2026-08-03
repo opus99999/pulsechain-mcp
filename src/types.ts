@@ -44,6 +44,12 @@ export interface AppConfig {
   httpTransportPort: number | undefined;
   logLevel: LogLevel;
   httpTimeoutMs: number;
+  /**
+   * Public Ed25519 operator keys allowed to sign PHIAT execution trust manifests.
+   * Values are base64-encoded SPKI public-key DER bytes. This must never contain
+   * private keys or wallet secrets.
+   */
+  phiatTrustOperatorPublicKeys?: Record<string, string>;
 }
 
 /**

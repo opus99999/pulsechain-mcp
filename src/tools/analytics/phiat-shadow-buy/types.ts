@@ -2,6 +2,7 @@ import type { AppConfig } from "../../../types.js";
 import type { PiteasQuoteData, PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import type { buildPhiatDashboard } from "../phiatDashboard.js";
 import type { getPiteasQuote, preparePiteasSwap, ethCall, estimateGas, getFeeData, reservePiteasRateLimitSlots, markPiteasRateLimitSlotAttempted, markPiteasRateLimitSlotCompleted, releaseUnusedPiteasRateLimitSlots } from "../../../data/index.js";
+import type { ManifestComparisonResult, VerifiedTrustManifest } from "./executionTrustManifest.js";
 
 export interface PhiatShadowBuyInput {
   walletAddress: string;
@@ -19,6 +20,7 @@ export interface PhiatShadowBuyInput {
   approvedRouterCodeHashes?: string[];
   approvedRouterTrustRecords?: ApprovedRouterTrustRecord[];
   approvedExecutionTrustRecords?: ExecutionTrustRecord[];
+  signedExecutionTrustManifest?: unknown;
 }
 
 export type Decision = "WOULD_BUY" | "NEEDS_APPROVAL" | "REJECT";
@@ -603,6 +605,9 @@ export interface ExecutionLayerCertification {
   managerChangedSinceQuote: boolean | null;
   trustRecordFingerprint: string | null;
   automaticExecutionEligible: boolean;
+  trustManifestVerification: VerifiedTrustManifest | null;
+  trustManifestComparison: ManifestComparisonResult | null;
+  executionAuthority: "VALID" | "INVALID" | "EXPIRED" | "STATE_MISMATCH" | "MISSING";
   failureCodes: string[];
   validationErrors: string[];
   warnings: string[];
@@ -818,6 +823,8 @@ export interface PhiatShadowBuyDeps {
       candidateQuoteBlock: string | null;
       referenceAfterBlock: string | null;
       approvedTrustRecords: ExecutionTrustRecord[];
+      signedExecutionTrustManifest?: unknown;
+      routerCodeHash?: string | null;
     },
   ) => Promise<ExecutionLayerCertification>;
   nowMs?: () => number;

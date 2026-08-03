@@ -74,6 +74,7 @@ export async function buildPhiatShadowBuy(
   );
   const approvedRouterTrustRecords = input.approvedRouterTrustRecords ?? [];
   const approvedExecutionTrustRecords = input.approvedExecutionTrustRecords ?? [];
+  const signedExecutionTrustManifest = input.signedExecutionTrustManifest;
 
   const simulation = emptySimulation();
   const balances = emptyBalances(input.walletAddress);
@@ -992,8 +993,15 @@ export async function buildPhiatShadowBuy(
     referenceBeforeBlock: referenceBefore?.blockNumber ?? null,
     candidateQuoteBlock: candidateQuote.blockNumber,
     referenceAfterBlock: referenceAfter?.blockNumber ?? null,
-    approvedTrustRecords: approvedExecutionTrustRecords,
+    approvedTrustRecords: [],
+    signedExecutionTrustManifest,
+    routerCodeHash: routerReport.routerBytecodeHash,
   });
+  if (approvedExecutionTrustRecords.length > 0) {
+    executionLayer.warnings.push(
+      "Legacy approvedExecutionTrustRecords input was ignored for execution authority; a signed trust manifest is required.",
+    );
+  }
   managerIntegrityStatus = executionLayer.managerIntegrityStatus;
   executionTraceStatus = executionLayer.executionTraceStatus;
   executionGraphStatus = executionLayer.executionGraphStatus;
@@ -1366,10 +1374,9 @@ export async function buildPhiatShadowBuy(
     executionTargetReport.unresolvedExecutionTargets.length === 0 &&
     executionLayer.managerIntegrityStatus === "PASSED" &&
     executionLayer.executionTraceStatus === "PASSED" &&
-    executionLayer.executionGraphStatus === "RESOLVED" &&
     executionLayer.traceBackend.stateOverridesUsed === false &&
-    executionLayer.swapManagerIntegrity.trusted === true &&
-    executionLayer.unresolvedTargets.length === 0 &&
+    executionLayer.executionAuthority === "VALID" &&
+    executionLayer.trustManifestComparison?.automaticExecutionEligible === true &&
     executionLayer.prohibitedOperations.length === 0 &&
     executionLayer.failureCodes.length === 0 &&
     executionLayer.automaticExecutionEligible === true;
@@ -1682,6 +1689,9 @@ function validateExecutionLayerCertification(
           executionGraphStatus: certification.executionGraphStatus,
           unresolvedTargets: certification.unresolvedTargets,
           prohibitedOperations: certification.prohibitedOperations,
+          trustManifestVerification: certification.trustManifestVerification,
+          trustManifestComparison: certification.trustManifestComparison,
+          executionAuthority: certification.executionAuthority,
         },
         { code, stage: "execution_graph" },
       );

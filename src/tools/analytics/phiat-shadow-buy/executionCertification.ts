@@ -41,6 +41,12 @@ import type {
   SwapManagerIntegrity,
   TraceBackend,
 } from "./types.js";
+import type {
+  LiveChainStateForManifest,
+  LiveExecutionGraphCall,
+  ManifestComparisonResult,
+  VerifiedTrustManifest,
+} from "./executionTrustManifest.js";
 import { errorMessage, fingerprint, sameAddress } from "./inputNormalization.js";
 import {
   decodeAddressFromStorageWord,
@@ -126,6 +132,8 @@ export async function certifyPiteasExecutionLayer(
     candidateQuoteBlock: string | null;
     referenceAfterBlock: string | null;
     approvedTrustRecords: ExecutionTrustRecord[];
+    signedExecutionTrustManifest?: unknown;
+    routerCodeHash?: string | null;
   },
 ): Promise<ExecutionLayerCertification> {
   const sourceEvidence = routerSourceEvidence();
@@ -170,13 +178,23 @@ export async function certifyPiteasExecutionLayer(
       })
     : emptyGraphAnalysis(trace.status);
 
-  const failureCodes = failureCodesFor({
+  const baseFailureCodes = failureCodesFor({
     activeSwapManager,
     swapManagerIntegrity,
     binding,
     traceStatus: trace.status,
     graph,
   });
+  const manifestGate = await evaluateTrustManifestGate(config, {
+    signedExecutionTrustManifest: args.signedExecutionTrustManifest,
+    block,
+    router: args.router,
+    routerCodeHash: args.routerCodeHash ?? null,
+    activeSwapManager,
+    swapManagerIntegrity,
+    graph,
+  });
+  const failureCodes = finalFailureCodesFor(baseFailureCodes, manifestGate);
   const validationErrors = failureCodes.map(messageForFailureCode);
   const trustRecordFingerprint = fingerprint({
     router: args.router.toLowerCase(),
@@ -196,13 +214,12 @@ export async function certifyPiteasExecutionLayer(
   const automaticExecutionEligible =
     failureCodes.length === 0 &&
     managerIntegrityStatus === "PASSED" &&
-    swapManagerIntegrity.trusted &&
     trace.status === "PASSED" &&
     trace.backend.stateOverridesUsed === false &&
-    executionGraphStatus === "RESOLVED" &&
-    graph.unresolvedTargets.length === 0 &&
+    manifestGate.executionAuthority === "VALID" &&
+    manifestGate.comparison?.automaticExecutionEligible === true &&
     graph.prohibitedOperations.length === 0 &&
-    graph.executionGraph.every((call) => call.trustStatus === "trusted");
+    !hasStateChangingManifestGap(graph);
 
   return {
     sourceEvidence,
@@ -232,10 +249,252 @@ export async function certifyPiteasExecutionLayer(
     managerChangedSinceQuote: binding.managerChangedSinceQuote,
     trustRecordFingerprint,
     automaticExecutionEligible,
+    trustManifestVerification: manifestGate.verification,
+    trustManifestComparison: manifestGate.comparison,
+    executionAuthority: manifestGate.executionAuthority,
     failureCodes,
     validationErrors,
     warnings: warningsFor(activeSwapManager, swapManagerIntegrity, routeData, trace.status),
   };
+}
+
+interface TrustManifestGate {
+  verification: VerifiedTrustManifest | null;
+  comparison: ManifestComparisonResult | null;
+  executionAuthority: ExecutionLayerCertification["executionAuthority"];
+}
+
+async function evaluateTrustManifestGate(
+  config: AppConfig,
+  args: {
+    signedExecutionTrustManifest?: unknown;
+    block: RpcSnapshot;
+    router: string;
+    routerCodeHash: string | null;
+    activeSwapManager: ActiveSwapManager;
+    swapManagerIntegrity: SwapManagerIntegrity;
+    graph: Awaited<ReturnType<typeof analyzeExecutionTrace>>;
+  },
+): Promise<TrustManifestGate> {
+  if (args.signedExecutionTrustManifest === undefined) {
+    return { verification: null, comparison: null, executionAuthority: "MISSING" };
+  }
+  const {
+    compareLiveExecutionGraphToApprovedManifest,
+    verifySignedTrustManifest,
+  } = await import("./executionTrustManifest.js");
+  const verification = verifySignedTrustManifest(args.signedExecutionTrustManifest, {
+    pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
+    currentBlock: args.block.blockNumber,
+  });
+  if (verification.executionAuthority !== "VALID") {
+    return { verification, comparison: null, executionAuthority: verification.executionAuthority };
+  }
+  const liveGraph = liveGraphCallsForManifest(args.graph);
+  const implementationRelationships = await readManifestImplementationRelationships(
+    config,
+    verification,
+    args.block.blockHex,
+  );
+  const poolStates = await readManifestPoolStates(config, verification, args.block.blockHex);
+  const managerRuntimeHash = firstNonNull(
+    args.swapManagerIntegrity.codeHashesByRpc.map((row) => row.runtimeCodeHash),
+  );
+  const liveChainState: LiveChainStateForManifest = {
+    chainId: PULSECHAIN_CHAIN_ID,
+    router: {
+      address: args.router,
+      runtimeCodeHash: args.routerCodeHash,
+    },
+    swapManager: {
+      address: args.activeSwapManager.address,
+      runtimeCodeHash: managerRuntimeHash,
+      storageSlot: args.activeSwapManager.storageSlot,
+      storageAddress: args.activeSwapManager.address,
+      managerChangeEventBlock: args.activeSwapManager.latestChangeEvent?.blockNumber ?? null,
+    },
+    currentBlock: args.block.blockNumber,
+    currentTime: new Date().toISOString(),
+    targetCodeHashes: targetCodeHashesForManifest(args.graph),
+    implementationRelationships,
+    poolStates,
+  };
+  return {
+    verification,
+    comparison: compareLiveExecutionGraphToApprovedManifest(liveGraph, verification, liveChainState),
+    executionAuthority: verification.executionAuthority,
+  };
+}
+
+function liveGraphCallsForManifest(
+  graph: Awaited<ReturnType<typeof analyzeExecutionTrace>>,
+): LiveExecutionGraphCall[] {
+  return [
+    ...graph.routerCallSequence.map((call) => ({
+      from: call.from,
+      to: call.to,
+      callType: call.callType,
+      selector: call.selector,
+      codeHash: call.codeHash,
+      parentAddress: call.from,
+    })),
+    ...graph.executionGraph.map((call) => ({
+      tracePath: call.depth.toString(),
+      from: call.from,
+      to: call.to,
+      callType: call.callType,
+      selector: call.selector,
+      codeHash: call.codeHash,
+      parentAddress: call.from,
+    })),
+  ];
+}
+
+function targetCodeHashesForManifest(
+  graph: Awaited<ReturnType<typeof analyzeExecutionTrace>>,
+): Record<string, string | null> {
+  const hashes: Record<string, string | null> = {};
+  for (const call of liveGraphCallsForManifest(graph)) {
+    if (call.to) hashes[call.to.toLowerCase()] = call.codeHash ?? call.runtimeCodeHash ?? null;
+  }
+  return hashes;
+}
+
+async function readManifestImplementationRelationships(
+  config: AppConfig,
+  verification: VerifiedTrustManifest,
+  blockHex: string | null,
+): Promise<NonNullable<LiveChainStateForManifest["implementationRelationships"]>> {
+  const manifest = verification.manifest;
+  if (!manifest) return [];
+  const proxyAddresses = uniqueStrings(
+    manifest.records
+      .filter((record) => record.role === "TOKEN_IMPLEMENTATION")
+      .flatMap((record) => record.parentConstraints.map((constraint) => constraint.parentAddress))
+      .filter((value): value is string => typeof value === "string" && isAddressLike(value.toLowerCase()))
+      .map((value) => value.toLowerCase()),
+  );
+  return Promise.all(
+    proxyAddresses.map(async (proxyAddress) => {
+      const implementationAddress = await readProxyImplementationSlot(
+        config,
+        proxyAddress,
+        blockHex,
+        EIP1967_IMPLEMENTATION_SLOT,
+      );
+      const implementationHash = implementationAddress
+        ? await readCodeHashAcrossRpcs(config, implementationAddress, blockHex ?? "latest")
+        : null;
+      return {
+        proxyAddress,
+        implementationAddress,
+        implementationCodeHash: implementationHash?.hash ?? null,
+      };
+    }),
+  );
+}
+
+async function readManifestPoolStates(
+  config: AppConfig,
+  verification: VerifiedTrustManifest,
+  blockHex: string | null,
+): Promise<NonNullable<LiveChainStateForManifest["poolStates"]>> {
+  const manifest = verification.manifest;
+  if (!manifest) return {};
+  const poolRecords = manifest.records.filter((record) => record.factoryConstraints || record.tokenConstraints);
+  const entries = await Promise.all(
+    poolRecords.map(async (record) => [
+      record.address,
+      await readPoolState(config, record.address, blockHex),
+    ] as const),
+  );
+  return Object.fromEntries(entries);
+}
+
+async function readPoolState(
+  config: AppConfig,
+  pool: string,
+  blockHex: string | null,
+): Promise<NonNullable<LiveChainStateForManifest["poolStates"]>[string]> {
+  const [factoryAddress, token0, token1, fee, tickSpacing] = await Promise.all([
+    readAddressFunction(config, pool, "0xc45a0155", blockHex),
+    readAddressFunction(config, pool, "0x0dfe1681", blockHex),
+    readAddressFunction(config, pool, "0xd21220a7", blockHex),
+    readUintFunction(config, pool, "0xddca3f43", blockHex),
+    readUintFunction(config, pool, "0xd0c93a7c", blockHex),
+  ]);
+  return { factoryAddress, token0, token1, fee, tickSpacing };
+}
+
+async function readAddressFunction(
+  config: AppConfig,
+  to: string,
+  selector: string,
+  blockHex: string | null,
+): Promise<string | null> {
+  const value = await readCallAcrossRpcs(config, to, selector, blockHex);
+  return value ? decodePackedAddress(value, 0)?.toLowerCase() ?? null : null;
+}
+
+async function readUintFunction(
+  config: AppConfig,
+  to: string,
+  selector: string,
+  blockHex: string | null,
+): Promise<number | null> {
+  const value = await readCallAcrossRpcs(config, to, selector, blockHex);
+  if (!value || !/^0x[0-9a-fA-F]{64}$/.test(value)) return null;
+  try {
+    const decoded = BigInt(value);
+    return decoded <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(decoded) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readCallAcrossRpcs(
+  config: AppConfig,
+  to: string,
+  data: string,
+  blockHex: string | null,
+): Promise<string | null> {
+  for (const rpcUrl of rpcUrls(config)) {
+    try {
+      const result = await rpcCall<string>(
+        rpcUrl,
+        "eth_call",
+        [{ to, data }, blockHex ?? "latest"],
+        config.httpTimeoutMs,
+      );
+      if (/^0x[0-9a-fA-F]*$/.test(result) && result.length >= 66) return result;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function finalFailureCodesFor(baseFailureCodes: string[], manifestGate: TrustManifestGate): string[] {
+  const codes = manifestGate.comparison?.automaticExecutionEligible === true
+    ? baseFailureCodes.filter((code) => code !== "EXECUTION_GRAPH_UNRESOLVED")
+    : [...baseFailureCodes];
+  if (manifestGate.executionAuthority === "MISSING") codes.push("TRUST_MANIFEST_REQUIRED");
+  if (manifestGate.executionAuthority === "INVALID") codes.push("TRUST_MANIFEST_INVALID");
+  if (manifestGate.executionAuthority === "EXPIRED") codes.push("TRUST_MANIFEST_EXPIRED");
+  if (manifestGate.executionAuthority === "STATE_MISMATCH") codes.push("TRUST_MANIFEST_STATE_MISMATCH");
+  if (
+    manifestGate.executionAuthority === "VALID" &&
+    manifestGate.comparison?.automaticExecutionEligible !== true
+  ) {
+    codes.push("TRUST_MANIFEST_GRAPH_MISMATCH");
+  }
+  return uniqueStrings(codes);
+}
+
+function hasStateChangingManifestGap(
+  graph: Awaited<ReturnType<typeof analyzeExecutionTrace>>,
+): boolean {
+  return graph.executionGraph.length === 0;
 }
 
 export async function discoverActiveSwapManager(
@@ -777,6 +1036,11 @@ function messageForFailureCode(code: string): string {
     EXECUTION_TRACE_FAILED: "Exact prepared transaction trace failed.",
     EXECUTION_GRAPH_UNRESOLVED: "Full state-changing execution graph is not resolved.",
     EXECUTION_GRAPH_FAILED: "Execution graph contains a prohibited operation.",
+    TRUST_MANIFEST_REQUIRED: "Signed execution trust manifest is required for automatic execution eligibility.",
+    TRUST_MANIFEST_INVALID: "Signed execution trust manifest is invalid or was not signed by a pinned operator key.",
+    TRUST_MANIFEST_EXPIRED: "Signed execution trust manifest has expired.",
+    TRUST_MANIFEST_STATE_MISMATCH: "Signed execution trust manifest does not match the required chain, router, manager, graph, or bundle state.",
+    TRUST_MANIFEST_GRAPH_MISMATCH: "Live execution graph does not exactly match the signed trust manifest constraints.",
   };
   return messages[code] ?? code;
 }
@@ -1312,18 +1576,16 @@ function trustRecordsFor(
   implementationCodeHash: string | null | undefined,
   selector: string | null | undefined,
 ): ExecutionTrustRecord[] {
-  if (!address || !runtimeCodeHash) return [];
-  return records.filter((record) => {
-    if (!record.operatorApproved) return false;
-    if (record.chainId !== PULSECHAIN_CHAIN_ID) return false;
-    if (role && record.role !== role) return false;
-    if (!sameAddress(record.address, address)) return false;
-    if (record.runtimeCodeHash.toLowerCase() !== runtimeCodeHash.toLowerCase()) return false;
-    if (record.implementationAddress !== undefined && !sameNullableAddress(record.implementationAddress, implementationAddress)) return false;
-    if (record.implementationCodeHash !== undefined && !sameNullableString(record.implementationCodeHash, implementationCodeHash)) return false;
-    if (selector && record.approvedSelectors.length > 0 && !record.approvedSelectors.map((value) => value.toLowerCase()).includes(selector.toLowerCase())) return false;
-    return true;
-  });
+  void records;
+  void address;
+  void role;
+  void runtimeCodeHash;
+  void implementationAddress;
+  void implementationCodeHash;
+  void selector;
+  // Legacy operatorApproved records are retained as inert evidence only. Execution
+  // authority now derives exclusively from a pinned, signed trust manifest.
+  return [];
 }
 
 function decodeTransferFrom(input: string | undefined): { from: string | null; to: string | null; amount: string | null } {
@@ -1477,16 +1739,6 @@ function lower(value: string | null | undefined): string {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
-}
-
-function sameNullableAddress(a: string | null | undefined, b: string | null | undefined): boolean {
-  if (a === null || a === undefined) return b === null || b === undefined;
-  return sameAddress(a, b);
-}
-
-function sameNullableString(a: string | null | undefined, b: string | null | undefined): boolean {
-  if (a === null || a === undefined) return b === null || b === undefined;
-  return typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 }
 
 function emptySwapManagerIntegrity(address: string | null): SwapManagerIntegrity {

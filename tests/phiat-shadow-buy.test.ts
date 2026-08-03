@@ -1322,6 +1322,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     expect(metas.get("phiat_shadow_buy")?.inputSchema?.shape).toHaveProperty("walletAddress");
     expect(metas.get("phiat_shadow_buy")?.inputSchema?.shape).toHaveProperty("approvedRouterCodeHashes");
+    expect(metas.get("phiat_shadow_buy")?.inputSchema?.shape).toHaveProperty("signedExecutionTrustManifest");
     expect(metas.get("phiat_shadow_buy")?.inputSchema?.shape).toHaveProperty("maximumBatchDurationMs");
     expect(metas.has("resetPiteasRateLimitForTests")).toBe(false);
     const response = await handlers.get("phiat_shadow_buy")!(baseInput());
@@ -2225,7 +2226,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(certificate.activeSwapManager.documentationStatus).toBe("STALE");
   });
 
-  it("certifies a verified direct SwapManager with a structured trust record", async () => {
+  it("certifies direct SwapManager integrity while keeping legacy trust records inert", async () => {
     stubExecutionRpc({ manager: MANAGER });
     const managerHash = keccak256(DIRECT_MANAGER_CODE);
 
@@ -2241,8 +2242,8 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(integrity.sourceVerificationStatus).toBe("verified");
     expect(integrity.abiFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
     expect(integrity.sourceFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
-    expect(integrity.trusted).toBe(true);
-    expect(integrity.operatorApprovalRequired).toBe(false);
+    expect(integrity.trusted).toBe(false);
+    expect(integrity.operatorApprovalRequired).toBe(true);
   });
 
   it("does not classify delegatecall-capable manager bytecode as a proxy without proxy evidence", async () => {
@@ -2327,7 +2328,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(eip1967.proxyType).toBe("eip1967");
     expect(eip1967.implementationAddress?.toLowerCase()).toBe(implementation.toLowerCase());
     expect(eip1967.implementationCodeHashesByRpc.every((row) => row.runtimeCodeHash === implementationHash)).toBe(true);
-    expect(eip1967.trusted).toBe(true);
+    expect(eip1967.trusted).toBe(false);
 
     const beacon = "0x8888888888888888888888888888888888888888";
     stubExecutionRpc({ beaconAddress: beacon, implementationAddress: implementation, implementationCode });
@@ -2382,14 +2383,14 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(changedHashCertificate.routeData.decoderMatchesManagerHash).toBe(false);
   });
 
-  it("traces the exact prepared call and resolves the router sequence and manager graph", async () => {
+  it("traces the exact prepared call and leaves execution authority to a signed manifest", async () => {
     stubExecutionRpc({ traceRoot: successfulTrace() });
 
     const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
 
     expect(certificate.managerIntegrityStatus).toBe("PASSED");
     expect(certificate.executionTraceStatus).toBe("PASSED");
-    expect(certificate.executionGraphStatus).toBe("RESOLVED");
+    expect(certificate.executionGraphStatus).toBe("PARTIALLY_RESOLVED");
     expect(certificate.traceBackend).toMatchObject({
       method: "debug_traceCall",
       stateOverridesUsed: false,
@@ -2406,9 +2407,13 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       to: PROTOCOL,
       selector: "0xabcdef01",
       protocolClassification: "state_changing_selector_unknown",
-      trustStatus: "trusted",
+      trustStatus: "unresolved",
     });
-    expect(certificate.automaticExecutionEligible).toBe(true);
+    expect(certificate.unresolvedTargets).toContain("swap_manager_not_operator_approved");
+    expect(certificate.failureCodes).toContain("TRUST_MANIFEST_REQUIRED");
+    expect(certificate.failureCodes).toContain("EXECUTION_GRAPH_UNRESOLVED");
+    expect(certificate.executionAuthority).toBe("MISSING");
+    expect(certificate.automaticExecutionEligible).toBe(false);
   });
 
   it("reports unsupported and state-insufficient trace infrastructure honestly", async () => {
@@ -2453,6 +2458,60 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.executionTraceStatus).toBe("PASSED");
     expect(result.traceBackend.stateOverridesUsed).toBe(true);
     expect(result.automaticExecutionEligible).toBe(false);
+  });
+
+  it("requires a signed trust manifest before the shadow certificate can report execution eligibility", async () => {
+    const missing = await buildPhiatShadowBuy(baseConfig, baseInput(), deps());
+    expect(missing.automaticExecutionEligible).toBe(false);
+
+    const signedExecutionTrustManifest = { manifest: { id: "mock-signed" } };
+    const certified = resolvedExecutionLayer({
+      executionAuthority: "VALID",
+      trustManifestVerification: {
+        manifest: null,
+        manifestFingerprint: `0x${"12".repeat(32)}`,
+        signatureAlgorithm: "Ed25519",
+        operatorPublicKeyId: "test-operator",
+        signature: "test-signature",
+        signatureValid: true,
+        expired: false,
+        blockRemaining: "10",
+        millisecondsRemaining: 60_000,
+        chainRouterManagerConsistent: true,
+        approvedRecordCount: 2,
+        invalidRecordCount: 0,
+        validationErrors: [],
+        executionAuthority: "VALID",
+      },
+      trustManifestComparison: {
+        status: "PASSED",
+        automaticExecutionEligible: true,
+        failureCodes: [],
+        validationErrors: [],
+      },
+      automaticExecutionEligible: true,
+      failureCodes: [],
+      validationErrors: [],
+    });
+    const certifyExecutionLayer = vi.fn(async () => certified) as never;
+    const eligible = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ signedExecutionTrustManifest }),
+      deps({ certifyExecutionLayer }),
+    );
+
+    expect(certifyExecutionLayer).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        approvedTrustRecords: [],
+        signedExecutionTrustManifest,
+      }),
+    );
+    expect(eligible.automaticExecutionEligible).toBe(true);
+    expect(eligible.transactionSigned).toBe(false);
+    expect(eligible.transactionSubmitted).toBe(false);
+    expect(eligible.transactionBroadcast).toBe(false);
+    expect(eligible.transactionExecuted).toBe(false);
   });
 
   it("rejects manager, router, and manager-code changes between quote and simulation", async () => {
@@ -2546,7 +2605,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(certificate.automaticExecutionEligible).toBe(false);
   });
 
-  it("distinguishes wallet unlimited approvals from trusted manager-internal approvals", async () => {
+  it("distinguishes wallet unlimited approvals from inert manager-internal approval evidence", async () => {
     const max = ((1n << 256n) - 1n).toString();
     stubExecutionRpc({
       traceRoot: successfulTrace({
@@ -2582,7 +2641,7 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       ownerContext: "swap_manager",
       walletApproval: false,
       managerInternalApproval: true,
-      approvedByPolicy: true,
+      approvedByPolicy: false,
     });
 
     stubExecutionRpc({

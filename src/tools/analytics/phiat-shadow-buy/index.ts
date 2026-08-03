@@ -5,5 +5,6 @@ export * from "./tool.js";
 export * from "./calldataDecode.js";
 export * from "./executionCertification.js";
 export * from "./executionTrustRegistry.js";
+export * from "./executionTrustManifest.js";
 export * from "./minimumOutput.js";
 export * from "./storageLayout.js";

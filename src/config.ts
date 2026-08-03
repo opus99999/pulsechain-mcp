@@ -45,6 +45,12 @@ const envSchema = z.object({
   HTTP_TRANSPORT_PORT: z.string().optional(),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional(),
   HTTP_TIMEOUT_MS: z.string().optional(),
+  /**
+   * Comma/newline-separated public-key pins:
+   *   key-id=base64-spki-der
+   * Public keys only. Private operator signing keys must never be configured here.
+   */
+  PHIAT_TRUST_OPERATOR_PUBLIC_KEYS: z.string().optional(),
 });
 
 function parseBool(value: string | undefined): boolean {
@@ -115,6 +121,37 @@ export function assertMasterKeyConfigured(masterKey: string): void {
 function emptyToUndefined(value: string | undefined): string | undefined {
   if (value === undefined || value === "") return undefined;
   return value;
+}
+
+function parsePublicKeyPins(raw: string | undefined): Record<string, string> | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const out: Record<string, string> = {};
+  const parts = raw
+    .split(/[,\n\r]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    if (eq <= 0 || eq === part.length - 1) {
+      throw new ConfigError(
+        "PHIAT_TRUST_OPERATOR_PUBLIC_KEYS entries must be key-id=base64-spki-der",
+      );
+    }
+    const keyId = part.slice(0, eq).trim();
+    const publicKey = part.slice(eq + 1).trim();
+    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(keyId)) {
+      throw new ConfigError(
+        `Invalid PHIAT trust operator public key id "${keyId}".`,
+      );
+    }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(publicKey)) {
+      throw new ConfigError(
+        `Invalid base64 public key for PHIAT trust operator key id "${keyId}".`,
+      );
+    }
+    out[keyId] = publicKey;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -370,5 +407,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     httpTransportPort,
     logLevel: (e.LOG_LEVEL ?? DEFAULT_LOG_LEVEL) as LogLevel,
     httpTimeoutMs,
+    phiatTrustOperatorPublicKeys: parsePublicKeyPins(e.PHIAT_TRUST_OPERATOR_PUBLIC_KEYS),
   };
 }

@@ -19,6 +19,7 @@ import { registerFreeTierAnalyticsTools } from "./freeTier.js";
 import { registerPhiatDashboardTool } from "./phiatDashboard.js";
 import { registerPhiatShadowBuyTool } from "./phiatShadowBuy.js";
 import { registerPhiatExecutionTrustReportTool } from "./phiat-shadow-buy/executionTrustRegistry.js";
+import { registerPhiatTrustManifestTools } from "./phiat-shadow-buy/executionTrustManifest.js";
 import { registerPiteasAccumulationPlanTool } from "./piteasAccumulationPlan.js";
 import { registerTierATools } from "./tierA.js";
 import { registerTierBTools } from "./tierB.js";
@@ -34,6 +35,7 @@ export { registerDexScreenerTools } from "./dexscreener.js";
 export { registerPhiatDashboardTool, buildPhiatDashboard } from "./phiatDashboard.js";
 export { registerPhiatShadowBuyTool, buildPhiatShadowBuy } from "./phiatShadowBuy.js";
 export { registerPhiatExecutionTrustReportTool } from "./phiat-shadow-buy/executionTrustRegistry.js";
+export { registerPhiatTrustManifestTools } from "./phiat-shadow-buy/executionTrustManifest.js";
 export {
   registerPiteasAccumulationPlanTool,
   buildPiteasAccumulationPlan,
@@ -79,6 +81,8 @@ export function registerAnalyticsTools(
   registerPhiatShadowBuyTool(server, config);
   // Historical Piteas execution-target trust candidate report, read-only
   registerPhiatExecutionTrustReportTool(server, config);
+  // Signed Piteas execution trust manifest candidate/verification, read-only
+  registerPhiatTrustManifestTools(server, config);
   // Research-only Piteas eUSDC -> PHIAT quote-curve planner
   registerPiteasAccumulationPlanTool(server, config);
   // Tier A: BlockScout enrichment + DefiLlama + PulseSwap quotes

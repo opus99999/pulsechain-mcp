@@ -613,7 +613,7 @@ describe("Switch tool registration", () => {
     expect(meta.find((m) => m.name === "switch_prepare_swap")?.description).toMatch(
       /piteas|SWITCH_API_KEY|request-api-key/i,
     );
-    // Existing inventory plus phiat_shadow_buy.
-    expect(meta.length).toBe(98);
+    // Existing inventory plus phiat_shadow_buy and signed trust manifest tools.
+    expect(meta.length).toBe(100);
   });
 });

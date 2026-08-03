@@ -469,6 +469,18 @@ describe("Piteas execution trust registry", () => {
         ? { ...call, selector: "0xdeadbeef" }
         : call,
     );
+    const exactPreview = compareLiveTraceAgainstTrustBundle({
+      bundle,
+      calls,
+      routerAddress: PITEAS_ROUTER,
+      routerCodeHash: ROUTER_HASH,
+      swapManagerAddress: MANAGER,
+      swapManagerCodeHash: MANAGER_HASH,
+      requireOperatorApproval: false,
+    });
+    expect(exactPreview.failureCodes).toContain("SIGNED_TRUST_MANIFEST_REQUIRED");
+    expect(exactPreview.automaticExecutionEligible).toBe(false);
+
     expect(
       compareLiveTraceAgainstTrustBundle({
         bundle,
