@@ -25,8 +25,6 @@ import {
   PITEAS_ROUTER_VERIFIED_SOURCE_FINGERPRINT,
   PITEAS_SWAP_MANAGER_INTERFACE_SOURCE_HASH,
   PITEAS_SWAP_MANAGER_SELECTOR,
-  PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
-  PITEAS_SWAP_MANAGER_STORAGE_SLOT,
   piteasRouterSwapAbi,
 } from "./constants.js";
 import type {
@@ -44,6 +42,10 @@ import type {
   TraceBackend,
 } from "./types.js";
 import { errorMessage, fingerprint, sameAddress } from "./inputNormalization.js";
+import {
+  decodeAddressFromStorageWord,
+  deriveSwapManagerStorageLayout,
+} from "./storageLayout.js";
 
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" as const;
@@ -187,6 +189,8 @@ export async function certifyPiteasExecutionLayer(
       ? "UNAVAILABLE"
       : swapManagerIntegrity.codeHashAgreement === "disagrees"
         ? "FAILED"
+        : swapManagerIntegrity.codeHashesByRpc.every((row) => row.runtimeCodeHash === null)
+          ? "UNAVAILABLE"
         : "PASSED";
   const executionGraphStatus = graph.executionGraphStatus;
   const automaticExecutionEligible =
@@ -230,7 +234,7 @@ export async function certifyPiteasExecutionLayer(
     automaticExecutionEligible,
     failureCodes,
     validationErrors,
-    warnings: warningsFor(swapManagerIntegrity, routeData, trace.status),
+    warnings: warningsFor(activeSwapManager, swapManagerIntegrity, routeData, trace.status),
   };
 }
 
@@ -239,13 +243,15 @@ export async function discoverActiveSwapManager(
   blockHex: string | null,
 ): Promise<ActiveSwapManager> {
   const urls = rpcUrls(config);
+  const layout = deriveSwapManagerStorageLayout();
   const storageEvidence = await Promise.all(
-    urls.map(async (rpcUrl) => readManagerStorageAt(rpcUrl, blockHex, config.httpTimeoutMs)),
+    urls.map(async (rpcUrl) => readManagerStorageAt(rpcUrl, blockHex, config.httpTimeoutMs, layout)),
   );
   const decoded = storageEvidence
-    .filter((row) => row.ok && row.decodedAddress)
+    .filter((row) => row.ok && row.decodedAddress && row.zeroAddress !== true && row.decodeError === null)
     .map((row) => row.decodedAddress!);
   const storageAddress = agreedAddress(decoded);
+  const storageAgreement = storageAgreementFor(storageEvidence);
   const latestChangeEvent = await latestSwapManagerEvent(config, blockHex);
   const storageEventAgreement =
     storageAddress === null
@@ -255,14 +261,12 @@ export async function discoverActiveSwapManager(
           ? "agrees"
           : "disagrees"
         : "event_unavailable";
-  const storageAgreement =
-    decoded.length === 0
-      ? "unavailable"
-      : new Set(decoded.map((value) => value.toLowerCase())).size === 1
-        ? decoded.length > 1
-          ? "agrees"
-          : "single_rpc"
-        : "disagrees";
+  const documentationStatus =
+    storageAddress === null
+      ? "UNAVAILABLE"
+      : sameAddress(storageAddress, PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER)
+        ? "MATCHES_CHAIN"
+        : "STALE";
   const confidence =
     storageAddress === null
       ? "unavailable"
@@ -274,15 +278,19 @@ export async function discoverActiveSwapManager(
   return {
     address: storageAddress,
     blockNumber: firstNonNull(storageEvidence.map((row) => row.blockNumber)),
-    storageSlot: PITEAS_SWAP_MANAGER_STORAGE_SLOT,
-    storageOffsetBytes: PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
+    storageSlot: layout.slot,
+    storageOffsetBytes: layout.offsetBytes,
+    storageWidthBytes: layout.widthBytes,
+    swapManagerStorageLayout: layout,
     storageEvidenceByRpc: storageEvidence,
     latestChangeEvent,
+    storageAgreement,
     storageEventAgreement,
     officialDocumentationMatch:
       storageAddress === null
         ? null
         : sameAddress(storageAddress, PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER),
+    documentationStatus,
     confidence,
   };
 }
@@ -315,6 +323,8 @@ export async function readSwapManagerIntegrity(
     codeHashesByRpc,
     codeHashAgreement,
     proxyType: proxy.proxyType,
+    proxyDetection: proxy.proxyDetection,
+    executionOpcodeObservations: opcodeObservations(firstNonNull(codeHashesByRpc.map((row) => row.bytecode))),
     implementationAddress: proxy.implementationAddress,
     implementationCodeHashesByRpc: proxy.implementationCodeHashesByRpc,
     sourceVerificationStatus: source.status,
@@ -706,15 +716,23 @@ function failureCodesFor(args: {
 }): string[] {
   const codes: string[] = [];
   const decodedStorageRows = args.activeSwapManager.storageEvidenceByRpc.filter(
-    (row) => row.ok && row.decodedAddress,
+    (row) => row.ok && row.decodedAddress && row.zeroAddress !== true && row.decodeError === null,
   );
-  const storageAgreementCount =
-    new Set(decodedStorageRows.map((row) => row.decodedAddress!.toLowerCase())).size === 1
-      ? decodedStorageRows.length
-      : 0;
+  if (args.activeSwapManager.swapManagerStorageLayout.status !== "DERIVED") {
+    codes.push("SWAP_MANAGER_LAYOUT_UNAVAILABLE");
+  }
+  if (args.activeSwapManager.storageEvidenceByRpc.some((row) => row.decodeError !== null)) {
+    codes.push("SWAP_MANAGER_ADDRESS_INVALID");
+  }
+  if (args.activeSwapManager.storageEvidenceByRpc.some((row) => row.zeroAddress === true)) {
+    codes.push("SWAP_MANAGER_ZERO_ADDRESS");
+  }
   if (args.activeSwapManager.address === null) codes.push("SWAP_MANAGER_UNAVAILABLE");
-  if (args.activeSwapManager.address !== null && storageAgreementCount < 2) {
-    codes.push("SWAP_MANAGER_STORAGE_RPC_AGREEMENT_UNAVAILABLE");
+  if (
+    args.activeSwapManager.address !== null &&
+    (args.activeSwapManager.storageAgreement !== "agrees" || decodedStorageRows.length < 2)
+  ) {
+    codes.push("SWAP_MANAGER_STORAGE_DISAGREEMENT");
   }
   if (args.activeSwapManager.storageEventAgreement === "event_unavailable") {
     codes.push("SWAP_MANAGER_EVENT_UNAVAILABLE");
@@ -742,8 +760,11 @@ function failureCodesFor(args: {
 
 function messageForFailureCode(code: string): string {
   const messages: Record<string, string> = {
+    SWAP_MANAGER_LAYOUT_UNAVAILABLE: "Verified SwapManager storage layout was unavailable.",
+    SWAP_MANAGER_ADDRESS_INVALID: "SwapManager address could not be decoded from the verified storage byte range.",
+    SWAP_MANAGER_ZERO_ADDRESS: "SwapManager storage decoded to the zero address.",
     SWAP_MANAGER_UNAVAILABLE: "Active Piteas SwapManager could not be proven from router storage.",
-    SWAP_MANAGER_STORAGE_RPC_AGREEMENT_UNAVAILABLE: "Active SwapManager storage was not confirmed by at least two RPCs.",
+    SWAP_MANAGER_STORAGE_DISAGREEMENT: "Active SwapManager storage was not confirmed by at least two matching RPC reads.",
     SWAP_MANAGER_EVENT_UNAVAILABLE: "ChangedSwapManager event evidence was unavailable for independent manager confirmation.",
     SWAP_MANAGER_EVENT_MISMATCH: "Latest ChangedSwapManager event does not match router storage.",
     SWAP_MANAGER_CHANGED: "Active SwapManager changed between quote certification and simulation.",
@@ -761,11 +782,15 @@ function messageForFailureCode(code: string): string {
 }
 
 function warningsFor(
+  activeSwapManager: ActiveSwapManager,
   manager: SwapManagerIntegrity,
   routeData: RouteDataCertification,
   traceStatus: ExecutionTraceStatus,
 ): string[] {
   const warnings: string[] = [];
+  if (activeSwapManager.documentationStatus === "STALE") {
+    warnings.push("Official Piteas documentation lists a stale SwapManager address; current router storage and event evidence are authoritative.");
+  }
   if (manager.operatorApprovalRequired) {
     warnings.push("Active SwapManager code hash requires structured operator approval before automation.");
   }
@@ -817,21 +842,30 @@ async function readManagerStorageAt(
   rpcUrl: string,
   blockHex: string | null,
   timeoutMs: number,
+  layout = deriveSwapManagerStorageLayout(),
 ): Promise<ActiveSwapManager["storageEvidenceByRpc"][number]> {
   try {
     const block = blockHex ?? "latest";
     const storageWord = await rpcCall<string>(
       rpcUrl,
       "eth_getStorageAt",
-      [PITEAS_ROUTER, PITEAS_SWAP_MANAGER_STORAGE_SLOT, block],
+      [PITEAS_ROUTER, layout.slot, block],
       timeoutMs,
     );
+    const decoded = decodeAddressFromStorageWord({
+      storageWord,
+      slot: layout.slot,
+      offsetBytes: layout.offsetBytes,
+      widthBytes: layout.widthBytes,
+    });
     return {
       rpcUrl,
       ok: true,
       blockNumber: hexBlockToString(blockHex),
       storageWord,
-      decodedAddress: decodePackedAddress(storageWord, PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES),
+      decodedAddress: decoded.normalizedAddress,
+      zeroAddress: decoded.zeroAddress,
+      decodeError: decoded.error,
       error: null,
     };
   } catch (err) {
@@ -841,9 +875,22 @@ async function readManagerStorageAt(
       blockNumber: hexBlockToString(blockHex),
       storageWord: null,
       decodedAddress: null,
+      zeroAddress: null,
+      decodeError: null,
       error: errorMessage(err),
     };
   }
+}
+
+function storageAgreementFor(
+  rows: ActiveSwapManager["storageEvidenceByRpc"],
+): ActiveSwapManager["storageAgreement"] {
+  const decoded = rows
+    .filter((row) => row.ok && row.decodedAddress && row.zeroAddress !== true && row.decodeError === null)
+    .map((row) => row.decodedAddress!.toLowerCase());
+  if (decoded.length === 0) return "unavailable";
+  if (new Set(decoded).size !== 1) return "disagrees";
+  return decoded.length > 1 ? "agrees" : "single_rpc";
 }
 
 async function latestSwapManagerEvent(
@@ -924,7 +971,7 @@ async function detectProxy(
   manager: string,
   blockHex: string | null,
   managerCode: SwapManagerIntegrity["codeHashesByRpc"],
-): Promise<Pick<SwapManagerIntegrity, "proxyType" | "implementationAddress" | "implementationCodeHashesByRpc">> {
+): Promise<Pick<SwapManagerIntegrity, "proxyType" | "proxyDetection" | "implementationAddress" | "implementationCodeHashesByRpc">> {
   const bytecode = firstNonNull(managerCode.map((row) => row.bytecode));
   const minimal = bytecode ? implementationFromMinimalProxy(bytecode) : null;
   const eip1967 = await readProxyImplementationSlot(config, manager, blockHex, EIP1967_IMPLEMENTATION_SLOT);
@@ -940,9 +987,28 @@ async function detectProxy(
         ? "eip1967_beacon"
         : minimal
           ? "eip1167"
-          : bytecode && bytecode.toLowerCase().includes("f4")
-            ? "unknown"
-            : "none";
+          : "none";
+  const proxyDetection = {
+    proxyType:
+      proxyType === "eip1967"
+        ? "EIP1967_IMPLEMENTATION"
+        : proxyType === "eip1967_beacon"
+          ? "EIP1967_BEACON"
+          : proxyType === "eip1167"
+            ? "EIP1167_MINIMAL"
+            : "NONE_DETECTED",
+    implementationAddress,
+    beaconAddress: beacon,
+    evidence: {
+      eip1967ImplementationSlot: EIP1967_IMPLEMENTATION_SLOT,
+      eip1967ImplementationAddress: eip1967,
+      eip1967BeaconSlot: EIP1967_BEACON_SLOT,
+      eip1967BeaconAddress: beacon,
+      beaconImplementationAddress: beaconImplementation,
+      minimalProxyImplementationAddress: minimal,
+      bytecodeLength: bytecode === null ? null : bytecode === "0x" ? 0 : (bytecode.length - 2) / 2,
+    },
+  } as const;
   const implementationCodeHashesByRpc = implementationAddress
     ? await Promise.all(
         rpcUrls(config).map(async (rpcUrl) => {
@@ -958,7 +1024,27 @@ async function detectProxy(
         }),
       )
     : [];
-  return { proxyType, implementationAddress, implementationCodeHashesByRpc };
+  return { proxyType, proxyDetection, implementationAddress, implementationCodeHashesByRpc };
+}
+
+function opcodeObservations(bytecode: string | null): SwapManagerIntegrity["executionOpcodeObservations"] {
+  if (bytecode === null || !/^0x[0-9a-fA-F]*$/.test(bytecode)) {
+    return {
+      containsDelegatecallOpcode: null,
+      containsCallcodeOpcode: null,
+      containsCreateOpcode: null,
+      containsCreate2Opcode: null,
+      containsSelfdestructOpcode: null,
+    };
+  }
+  const bytes = new Set(bytecode.slice(2).toLowerCase().match(/.{2}/g) ?? []);
+  return {
+    containsDelegatecallOpcode: bytes.has("f4"),
+    containsCallcodeOpcode: bytes.has("f2"),
+    containsCreateOpcode: bytes.has("f0"),
+    containsCreate2Opcode: bytes.has("f5"),
+    containsSelfdestructOpcode: bytes.has("ff"),
+  };
 }
 
 async function readProxyImplementationSlot(
@@ -1409,6 +1495,19 @@ function emptySwapManagerIntegrity(address: string | null): SwapManagerIntegrity
     codeHashesByRpc: [],
     codeHashAgreement: "unavailable",
     proxyType: "unavailable",
+    proxyDetection: {
+      proxyType: "UNKNOWN_PATTERN",
+      implementationAddress: null,
+      beaconAddress: null,
+      evidence: { reason: "SwapManager integrity was not evaluated." },
+    },
+    executionOpcodeObservations: {
+      containsDelegatecallOpcode: null,
+      containsCallcodeOpcode: null,
+      containsCreateOpcode: null,
+      containsCreate2Opcode: null,
+      containsSelfdestructOpcode: null,
+    },
     implementationAddress: null,
     implementationCodeHashesByRpc: [],
     sourceVerificationStatus: "unavailable",

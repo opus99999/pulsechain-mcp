@@ -2,8 +2,9 @@ import { PULSECHAIN_CHAIN_ID } from "../../../constants.js";
 import { type PiteasPrepareResult, type PiteasQuoteData } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PITEAS_ROUTER, PITEAS_SWAP_CANONICAL_SIGNATURE } from "./constants.js";
 import type { DecodedIntent, PolicyCheck, ShadowBuyReason } from "./types.js";
-import { passCheck, requireCheck } from "./policyEvaluation.js";
+import { failCheck, passCheck, requireCheck } from "./policyEvaluation.js";
 import { fingerprint, isPositiveIntegerString, parseTimestampMs, safeWei, sameAddress, stringToBigInt } from "./inputNormalization.js";
+import { evaluateMinimumOutputValidation } from "./minimumOutput.js";
 
 export function validatePreparedAndDecodedIntent(args: {
   policyChecks: Record<string, PolicyCheck>;
@@ -191,20 +192,29 @@ export function validatePreparedAndDecodedIntent(args: {
     },
     { code: "DECODED_AMOUNT_IN_MISMATCH", stage: "policy" },
   );
-  const decodedMin = stringToBigInt(decodedIntent.minimumOutputRaw ?? decodedIntent.minimumAmountOutRaw);
-  const quoteMin = stringToBigInt(quote.amountOutMin);
-  requireCheck(
-    policyChecks,
-    reasons,
-    "decoded_minimum_output",
-    decodedMin !== null && quoteMin !== null && decodedMin === quoteMin,
-    "Decoded minimum output does not exactly match retained candidate quote minimum",
-    {
-      decodedMinimumOutputRaw: decodedIntent.minimumOutputRaw ?? decodedIntent.minimumAmountOutRaw,
-      candidateQuoteMinimumOutputRaw: quote.amountOutMin ?? null,
-    },
-    { code: "DECODED_MINIMUM_OUTPUT_MISMATCH", stage: "policy" },
-  );
+  const minimumOutputValidation = evaluateMinimumOutputValidation({ quote, decodedIntent });
+  decodedIntent.minimumOutputValidation = minimumOutputValidation;
+  if (minimumOutputValidation.validationStatus === "PASSED") {
+    passCheck(policyChecks, "decoded_minimum_output", minimumOutputValidation as unknown as Record<string, unknown>);
+    if (minimumOutputValidation.relationship === "CALLDATA_STRICTER") {
+      policyChecks.decoded_minimum_output_stricter = {
+        status: "warning",
+        reason: "Decoded calldata minimum output is stricter than the retained quote minimum.",
+        details: minimumOutputValidation as unknown as Record<string, unknown>,
+      };
+    }
+  } else {
+    failCheck(
+      policyChecks,
+      reasons,
+      "decoded_minimum_output",
+      minimumOutputValidation.relationship === "CALLDATA_WEAKER"
+        ? "Decoded minimum output is weaker than retained candidate quote minimum"
+        : "Decoded minimum-output semantics are unresolved",
+      minimumOutputValidation as unknown as Record<string, unknown>,
+      { code: "DECODED_MINIMUM_OUTPUT_MISMATCH", stage: "policy" },
+    );
+  }
   const expectedOut = stringToBigInt(decodedIntent.routeExpectedOutputRaw);
   const quoteOut = stringToBigInt(quote.amountOut);
   requireCheck(

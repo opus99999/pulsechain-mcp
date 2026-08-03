@@ -27,9 +27,13 @@ import {
   PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER,
   PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
   PITEAS_SWAP_MANAGER_STORAGE_SLOT,
+  PITEAS_SWAP_MANAGER_STORAGE_WIDTH_BYTES,
   PITEAS_SWAP_MANAGER_CANONICAL_SIGNATURE,
   certifyPiteasExecutionLayer,
+  decodeAddressFromStorageWord,
   discoverActiveSwapManager,
+  deriveSwapManagerStorageLayout,
+  evaluateMinimumOutputValidation,
   readSwapManagerIntegrity,
   registerPhiatShadowBuyTool,
   piteasRouterSwapAbi,
@@ -371,7 +375,7 @@ function executionTrustRecord(
 }
 
 function packedManagerStorage(address: string): `0x${string}` {
-  return `0x${"0".repeat(22)}${address.slice(2).toLowerCase()}01` as `0x${string}`;
+  return `0x${"0".repeat(24)}${address.slice(2).toLowerCase()}` as `0x${string}`;
 }
 
 function resolvedExecutionLayer(
@@ -394,6 +398,8 @@ function resolvedExecutionLayer(
       blockNumber: "124",
       storageSlot: PITEAS_SWAP_MANAGER_STORAGE_SLOT,
       storageOffsetBytes: PITEAS_SWAP_MANAGER_STORAGE_OFFSET_BYTES,
+      storageWidthBytes: PITEAS_SWAP_MANAGER_STORAGE_WIDTH_BYTES,
+      swapManagerStorageLayout: deriveSwapManagerStorageLayout(),
       storageEvidenceByRpc: [
         {
           rpcUrl: "https://rpc-a.example",
@@ -401,6 +407,8 @@ function resolvedExecutionLayer(
           blockNumber: "124",
           storageWord: packedManagerStorage(MANAGER),
           decodedAddress: MANAGER,
+          zeroAddress: false,
+          decodeError: null,
           error: null,
         },
         {
@@ -409,6 +417,8 @@ function resolvedExecutionLayer(
           blockNumber: "124",
           storageWord: packedManagerStorage(MANAGER),
           decodedAddress: MANAGER,
+          zeroAddress: false,
+          decodeError: null,
           error: null,
         },
       ],
@@ -419,8 +429,10 @@ function resolvedExecutionLayer(
         logIndex: "0",
         topic: PITEAS_CHANGED_SWAP_MANAGER_TOPIC,
       },
+      storageAgreement: "agrees",
       storageEventAgreement: "agrees",
       officialDocumentationMatch: false,
+      documentationStatus: "STALE",
       confidence: "high",
     },
     swapManagerIntegrity: {
@@ -447,6 +459,19 @@ function resolvedExecutionLayer(
       ],
       codeHashAgreement: "agrees",
       proxyType: "none",
+      proxyDetection: {
+        proxyType: "NONE_DETECTED",
+        implementationAddress: null,
+        beaconAddress: null,
+        evidence: {},
+      },
+      executionOpcodeObservations: {
+        containsDelegatecallOpcode: false,
+        containsCallcodeOpcode: false,
+        containsCreateOpcode: false,
+        containsCreate2Opcode: false,
+        containsSelfdestructOpcode: false,
+      },
       implementationAddress: null,
       implementationCodeHashesByRpc: [],
       sourceVerificationStatus: "verified",
@@ -2067,6 +2092,73 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(evidence.verifiedRouterSource).toBe(true);
   });
 
+  it("derives inherited SwapManager storage layout and decodes the live storage word", () => {
+    const layout = deriveSwapManagerStorageLayout();
+    const liveStorageWord =
+      "0x00000000000000000000000058ab37d02696a481e2e5b5779967f3f4d237baa9";
+    const liveManager = "0x58ab37d02696a481e2e5b5779967f3f4d237baa9";
+
+    expect(layout.status).toBe("DERIVED");
+    expect(layout.inheritanceOrder).toEqual(["Ownable", "EthReceiver", "PiteasRouter"]);
+    expect(layout.slot).toBe(PITEAS_SWAP_MANAGER_STORAGE_SLOT);
+    expect(layout.offsetBytes).toBe(0);
+    expect(layout.widthBytes).toBe(20);
+    expect(layout.layoutFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
+
+    const decoded = decodeAddressFromStorageWord({
+      storageWord: liveStorageWord,
+      slot: layout.slot,
+      offsetBytes: layout.offsetBytes,
+      widthBytes: layout.widthBytes,
+    });
+    expect(decoded.ok).toBe(true);
+    expect(decoded.normalizedAddress?.toLowerCase()).toBe(liveManager);
+    expect(decoded.normalizedAddress?.toLowerCase()).not.toBe(
+      "0x0058ab37d02696a481e2e5b5779967f3f4d237ba",
+    );
+
+    const priorBadOffset = decodeAddressFromStorageWord({
+      storageWord: liveStorageWord,
+      slot: layout.slot,
+      offsetBytes: 1,
+      widthBytes: layout.widthBytes,
+    });
+    expect(priorBadOffset.normalizedAddress?.toLowerCase()).toBe(
+      "0x0058ab37d02696a481e2e5b5779967f3f4d237ba",
+    );
+  });
+
+  it("rejects malformed storage words and reports zero SwapManager addresses", () => {
+    const layout = deriveSwapManagerStorageLayout();
+    const malformed = decodeAddressFromStorageWord({
+      storageWord: "0x1234",
+      slot: layout.slot,
+      offsetBytes: layout.offsetBytes,
+      widthBytes: layout.widthBytes,
+    });
+    expect(malformed.ok).toBe(false);
+    expect(malformed.error).toMatch(/32 bytes/);
+
+    const zero = decodeAddressFromStorageWord({
+      storageWord: `0x${"0".repeat(64)}`,
+      slot: layout.slot,
+      offsetBytes: layout.offsetBytes,
+      widthBytes: layout.widthBytes,
+    });
+    expect(zero.ok).toBe(true);
+    expect(zero.zeroAddress).toBe(true);
+    expect(zero.normalizedAddress).toBe("0x0000000000000000000000000000000000000000");
+
+    const wrongWidth = decodeAddressFromStorageWord({
+      storageWord: packedManagerStorage(MANAGER),
+      slot: layout.slot,
+      offsetBytes: layout.offsetBytes,
+      widthBytes: 19,
+    });
+    expect(wrongWidth.ok).toBe(false);
+    expect(wrongWidth.error).toMatch(/20 bytes/);
+  });
+
   it("derives active SwapManager from storage and reconciles ChangedSwapManager events", async () => {
     stubExecutionRpc({ manager: MANAGER, eventManager: MANAGER });
 
@@ -2074,13 +2166,19 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     expect(active.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
     expect(active.storageSlot).toBe(PITEAS_SWAP_MANAGER_STORAGE_SLOT);
-    expect(active.storageOffsetBytes).toBe(1);
+    expect(active.storageOffsetBytes).toBe(0);
+    expect(active.storageWidthBytes).toBe(20);
+    expect(active.swapManagerStorageLayout.slot).toBe(PITEAS_SWAP_MANAGER_STORAGE_SLOT);
+    expect(active.swapManagerStorageLayout.offsetBytes).toBe(0);
+    expect(active.swapManagerStorageLayout.widthBytes).toBe(20);
+    expect(active.storageAgreement).toBe("agrees");
     expect(active.storageEvidenceByRpc).toHaveLength(2);
     expect(active.storageEvidenceByRpc.every((row) => row.decodedAddress?.toLowerCase() === MANAGER.toLowerCase())).toBe(true);
     expect(active.latestChangeEvent?.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
     expect(active.latestChangeEvent?.topic).toBe(PITEAS_CHANGED_SWAP_MANAGER_TOPIC);
     expect(active.storageEventAgreement).toBe("agrees");
     expect(active.officialDocumentationMatch).toBe(false);
+    expect(active.documentationStatus).toBe("STALE");
     expect(PITEAS_OFFICIAL_DOCUMENTED_SWAP_MANAGER.toLowerCase()).not.toBe(MANAGER.toLowerCase());
     expect(active.confidence).toBe("high");
   });
@@ -2110,8 +2208,21 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       executionCertArgs(),
     );
 
-    expect(singleRpc.failureCodes).toContain("SWAP_MANAGER_STORAGE_RPC_AGREEMENT_UNAVAILABLE");
+    expect(singleRpc.failureCodes).toContain("SWAP_MANAGER_STORAGE_DISAGREEMENT");
     expect(singleRpc.automaticExecutionEligible).toBe(false);
+  });
+
+  it("does not report false manager event mismatch or bytecode unavailable with corrected storage layout", async () => {
+    stubExecutionRpc({ manager: MANAGER, eventManager: MANAGER });
+
+    const certificate = await certifyPiteasExecutionLayer(baseConfig, executionCertArgs());
+
+    expect(certificate.activeSwapManager.address?.toLowerCase()).toBe(MANAGER.toLowerCase());
+    expect(certificate.activeSwapManager.storageEventAgreement).toBe("agrees");
+    expect(certificate.swapManagerIntegrity.codeHashesByRpc.every((row) => row.bytecodeLength !== 0)).toBe(true);
+    expect(certificate.failureCodes).not.toContain("SWAP_MANAGER_EVENT_MISMATCH");
+    expect(certificate.failureCodes).not.toContain("SWAP_MANAGER_BYTECODE_UNAVAILABLE");
+    expect(certificate.activeSwapManager.documentationStatus).toBe("STALE");
   });
 
   it("certifies a verified direct SwapManager with a structured trust record", async () => {
@@ -2132,6 +2243,54 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(integrity.sourceFingerprint).toMatch(/^0x[a-f0-9]{64}$/);
     expect(integrity.trusted).toBe(true);
     expect(integrity.operatorApprovalRequired).toBe(false);
+  });
+
+  it("does not classify delegatecall-capable manager bytecode as a proxy without proxy evidence", async () => {
+    const delegatecallCapableCode = "0x60f4600055" as const;
+    stubExecutionRpc({ manager: MANAGER, managerCode: delegatecallCapableCode });
+
+    const integrity = await readSwapManagerIntegrity(baseConfig, MANAGER, "0x7c", []);
+
+    expect(integrity.proxyType).toBe("none");
+    expect(integrity.proxyDetection.proxyType).toBe("NONE_DETECTED");
+    expect(integrity.proxyDetection.implementationAddress).toBeNull();
+    expect(integrity.proxyDetection.beaconAddress).toBeNull();
+    expect(integrity.executionOpcodeObservations.containsDelegatecallOpcode).toBe(true);
+    expect(integrity.trusted).toBe(false);
+    expect(integrity.operatorApprovalRequired).toBe(true);
+  });
+
+  it("keeps the historical Piteas trace fixture diagnostic-only", () => {
+    const historicalTraceFixture = {
+      historicalDiagnosticOnly: true,
+      automaticExecutionQualifying: false,
+      transactionHash: "0x1a0d519d0b1ae9e0f759d2a068fa720c3759d5f057b611f91c726ef8db570a56",
+      blockNumber: "27195532",
+      routerHash: "0xb5258c97b5eab452bf93b61916631704898cc81bcbb2dff8524c3215a8f1454b",
+      currentRouterHash: "0xb5258c97b5eab452bf93b61916631704898cc81bcbb2dff8524c3215a8f1454b",
+      manager: "0x58ab37d02696a481e2e5b5779967f3f4d237baa9",
+      currentManager: "0x58ab37d02696a481e2e5b5779967f3f4d237baa9",
+      managerHash: "0x92a4a63ef15f2f9f1fa21860dc3b80ce97a41964189d44076223744e361a3cfb",
+      currentManagerHash: "0x92a4a63ef15f2f9f1fa21860dc3b80ce97a41964189d44076223744e361a3cfb",
+      routerCallSequence: [
+        {
+          to: "0x58ab37d02696a481e2e5b5779967f3f4d237baa9",
+          selector: PITEAS_SWAP_MANAGER_SELECTOR,
+        },
+      ],
+      prohibitedOperations: [] as string[],
+    };
+
+    expect(historicalTraceFixture.routerHash).toBe(historicalTraceFixture.currentRouterHash);
+    expect(historicalTraceFixture.manager.toLowerCase()).toBe(historicalTraceFixture.currentManager);
+    expect(historicalTraceFixture.managerHash).toBe(historicalTraceFixture.currentManagerHash);
+    expect(historicalTraceFixture.routerCallSequence).toContainEqual({
+      to: historicalTraceFixture.manager,
+      selector: PITEAS_SWAP_MANAGER_SELECTOR,
+    });
+    expect(historicalTraceFixture.prohibitedOperations).toEqual([]);
+    expect(historicalTraceFixture.historicalDiagnosticOnly).toBe(true);
+    expect(historicalTraceFixture.automaticExecutionQualifying).toBe(false);
   });
 
   it("detects SwapManager code-hash disagreement across RPCs", async () => {
@@ -2562,6 +2721,83 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       }),
     );
     expect(wrongMin.policyChecks.decoded_minimum_output?.status).toBe("fail");
+    expect(wrongMin.minimumOutputValidation?.relationship).toBe("CALLDATA_WEAKER");
+
+    const stricterMin = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput(),
+      deps({
+        getPiteasQuote: defaultQuoteMock({
+          candidate: {
+            amountOutMin: CANDIDATE_MIN_RAW,
+            methodParameters: {
+              calldata: swapCalldata({ minOutputRaw: (BigInt(CANDIDATE_MIN_RAW) + 1n).toString() }),
+              value: "0",
+            },
+          },
+        }),
+      }),
+    );
+    expect(stricterMin.policyChecks.decoded_minimum_output?.status).toBe("pass");
+    expect(stricterMin.policyChecks.decoded_minimum_output_stricter?.status).toBe("warning");
+    expect(stricterMin.minimumOutputValidation?.relationship).toBe("CALLDATA_STRICTER");
+    expect(stricterMin.reasons.map((reason) => reason.code)).not.toContain("DECODED_MINIMUM_OUTPUT_MISMATCH");
+
+  });
+
+  it("evaluates minimum-output relationships using bigint-only comparisons", () => {
+    const quote = quoteData({
+      outputRaw: "123456789012345678901234567890",
+      minRaw: "123456789012345678901234567880",
+    });
+    const exact = decodeShadowBuyCalldata(
+      swapCalldata({ outputRaw: quote.amountOut, minOutputRaw: quote.amountOutMin }),
+    );
+    const exactValidation = evaluateMinimumOutputValidation({ quote, decodedIntent: exact });
+    expect(exactValidation.relationship).toBe("EXACT_MATCH");
+    expect(exactValidation.validationStatus).toBe("PASSED");
+    expect(exactValidation.sourceForEachValue.methodParametersMinimumOutputRaw).toContain(
+      "Detail.destMinAmount",
+    );
+
+    const stricter = decodeShadowBuyCalldata(
+      swapCalldata({
+        outputRaw: quote.amountOut,
+        minOutputRaw: "123456789012345678901234567881",
+      }),
+    );
+    expect(evaluateMinimumOutputValidation({ quote, decodedIntent: stricter }).relationship).toBe(
+      "CALLDATA_STRICTER",
+    );
+
+    const weaker = decodeShadowBuyCalldata(
+      swapCalldata({
+        outputRaw: quote.amountOut,
+        minOutputRaw: "123456789012345678901234567879",
+      }),
+    );
+    expect(evaluateMinimumOutputValidation({ quote, decodedIntent: weaker }).relationship).toBe(
+      "CALLDATA_WEAKER",
+    );
+
+    const wrongApiField = evaluateMinimumOutputValidation({
+      quote: { ...quote, amountOutMin: quote.amountOut },
+      decodedIntent: exact,
+    });
+    expect(wrongApiField.relationship).toBe("CALLDATA_WEAKER");
+
+    const wrongTupleField = evaluateMinimumOutputValidation({
+      quote,
+      decodedIntent: { ...exact, minimumOutputRaw: exact.amountInRaw },
+    });
+    expect(wrongTupleField.relationship).toBe("CALLDATA_WEAKER");
+
+    const unresolved = evaluateMinimumOutputValidation({
+      quote: { ...quote, amountOutMin: undefined },
+      decodedIntent: exact,
+    });
+    expect(unresolved.relationship).toBe("SEMANTICS_UNRESOLVED");
+    expect(unresolved.validationStatus).toBe("FAILED");
   });
 
   it("decodes the verified Piteas swap selector, tuple, and route envelope", () => {

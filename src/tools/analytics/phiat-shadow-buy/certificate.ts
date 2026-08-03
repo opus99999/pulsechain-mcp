@@ -1,4 +1,4 @@
-import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, DecisionClass, FailedCheck, ManagerIntegrityStatus, ExecutionTraceStatus, ExecutionGraphStatus, ExecutionLayerCertification } from "./types.js";
+import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence, DecisionClass, FailedCheck, ManagerIntegrityStatus, ExecutionTraceStatus, ExecutionGraphStatus, ExecutionLayerCertification, MinimumOutputValidation } from "./types.js";
 import type { PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
@@ -40,6 +40,7 @@ export function buildCertificate(args: {
   executionLayer?: ExecutionLayerCertification | null;
   preparedIntent?: PreparedIntent | null;
   decodedIntent?: DecodedIntent | null;
+  minimumOutputValidation?: MinimumOutputValidation | null;
   simulation: SimulationResult;
   gasPolicy: GasPolicy;
   policyChecks: Record<string, PolicyCheck>;
@@ -119,6 +120,10 @@ export function buildCertificate(args: {
     trustRecordFingerprint: (args.executionLayer ?? emptyExecutionLayer()).trustRecordFingerprint,
     preparedIntent: args.preparedIntent ?? null,
     decodedIntent: args.decodedIntent ?? null,
+    minimumOutputValidation:
+      args.minimumOutputValidation ??
+      args.decodedIntent?.minimumOutputValidation ??
+      null,
     simulation: args.simulation,
     gasPolicy: args.gasPolicy,
     policyChecks: args.policyChecks,
@@ -250,7 +255,7 @@ function passedCodeFor(name: string): string {
     decoded_token_out: "DECODED_TOKEN_OUT_MATCH",
     decoded_recipient: "DECODED_RECIPIENT_MATCH",
     decoded_amount_in: "DECODED_AMOUNT_IN_MATCH",
-    decoded_minimum_output: "DECODED_MINIMUM_OUTPUT_MATCH",
+    decoded_minimum_output: "DECODED_MINIMUM_OUTPUT_PROTECTS_QUOTE",
     native_value: "NATIVE_VALUE_MATCH",
     calldata_fingerprint_binding: "CALLDATA_FINGERPRINT_MATCH",
     method_parameter_fingerprint_binding: "METHOD_PARAMETER_FINGERPRINT_MATCH",
@@ -399,10 +404,31 @@ export function emptyExecutionLayer(): ExecutionLayerCertification {
       blockNumber: null,
       storageSlot: "",
       storageOffsetBytes: 0,
+      storageWidthBytes: 0,
+      swapManagerStorageLayout: {
+        status: "UNAVAILABLE",
+        source: {
+          repository: "",
+          commit: "",
+          routerSourceHash: "",
+          verifiedSourceFingerprint: "",
+        },
+        compilerVersion: "",
+        contractName: "",
+        inheritanceOrder: [],
+        slot: "",
+        offsetBytes: 0,
+        widthBytes: 0,
+        derivationEvidence: [],
+        layoutFingerprint: "",
+        unavailableReason: "Execution layer was not evaluated.",
+      },
       storageEvidenceByRpc: [],
       latestChangeEvent: null,
+      storageAgreement: "unavailable",
       storageEventAgreement: "storage_unavailable",
       officialDocumentationMatch: null,
+      documentationStatus: "UNAVAILABLE",
       confidence: "unavailable",
     },
     swapManagerIntegrity: {
@@ -410,6 +436,19 @@ export function emptyExecutionLayer(): ExecutionLayerCertification {
       codeHashesByRpc: [],
       codeHashAgreement: "unavailable",
       proxyType: "unavailable",
+      proxyDetection: {
+        proxyType: "UNKNOWN_PATTERN",
+        implementationAddress: null,
+        beaconAddress: null,
+        evidence: { reason: "Execution layer was not evaluated." },
+      },
+      executionOpcodeObservations: {
+        containsDelegatecallOpcode: null,
+        containsCallcodeOpcode: null,
+        containsCreateOpcode: null,
+        containsCreate2Opcode: null,
+        containsSelfdestructOpcode: null,
+      },
       implementationAddress: null,
       implementationCodeHashesByRpc: [],
       sourceVerificationStatus: "unavailable",

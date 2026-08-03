@@ -220,6 +220,7 @@ export interface DecodedIntent {
   unlimitedApproval?: boolean;
   decodedExpectedOutputRaw?: string | null;
   routeExpectedOutputRaw?: string | null;
+  minimumOutputValidation?: MinimumOutputValidation | null;
   nestedTargets: string[];
   unresolvedTargets: string[];
   errors: string[];
@@ -396,17 +397,51 @@ export interface SourceEvidence {
   };
 }
 
+export interface SwapManagerStorageLayout {
+  status: "DERIVED" | "UNAVAILABLE";
+  source: {
+    repository: string;
+    commit: string;
+    routerSourceHash: string;
+    verifiedSourceFingerprint: string;
+  };
+  compilerVersion: string;
+  contractName: string;
+  inheritanceOrder: string[];
+  slot: string;
+  offsetBytes: number;
+  widthBytes: number;
+  derivationEvidence: string[];
+  layoutFingerprint: string;
+  unavailableReason?: string;
+}
+
+export interface SwapManagerAddressDecode {
+  ok: boolean;
+  address: string | null;
+  normalizedAddress: string | null;
+  zeroAddress: boolean;
+  slot: string;
+  offsetBytes: number;
+  widthBytes: number;
+  error: string | null;
+}
+
 export interface ActiveSwapManager {
   address: string | null;
   blockNumber: string | null;
   storageSlot: string;
   storageOffsetBytes: number;
+  storageWidthBytes: number;
+  swapManagerStorageLayout: SwapManagerStorageLayout;
   storageEvidenceByRpc: Array<{
     rpcUrl: string;
     ok: boolean;
     blockNumber: string | null;
     storageWord: string | null;
     decodedAddress: string | null;
+    zeroAddress: boolean | null;
+    decodeError: string | null;
     error: string | null;
   }>;
   latestChangeEvent: {
@@ -416,9 +451,32 @@ export interface ActiveSwapManager {
     logIndex: string | null;
     topic: string;
   } | null;
+  storageAgreement: "agrees" | "disagrees" | "single_rpc" | "unavailable";
   storageEventAgreement: "agrees" | "disagrees" | "event_unavailable" | "storage_unavailable";
   officialDocumentationMatch: boolean | null;
+  documentationStatus: "MATCHES_CHAIN" | "STALE" | "UNAVAILABLE";
   confidence: "high" | "medium" | "low" | "unavailable";
+}
+
+export interface ProxyDetectionEvidence {
+  proxyType:
+    | "NONE_DETECTED"
+    | "EIP1967_IMPLEMENTATION"
+    | "EIP1967_BEACON"
+    | "EIP1167_MINIMAL"
+    | "RECOGNIZED_OTHER"
+    | "UNKNOWN_PATTERN";
+  implementationAddress: string | null;
+  beaconAddress: string | null;
+  evidence: Record<string, unknown>;
+}
+
+export interface ExecutionOpcodeObservations {
+  containsDelegatecallOpcode: boolean | null;
+  containsCallcodeOpcode: boolean | null;
+  containsCreateOpcode: boolean | null;
+  containsCreate2Opcode: boolean | null;
+  containsSelfdestructOpcode: boolean | null;
 }
 
 export interface SwapManagerIntegrity {
@@ -434,6 +492,8 @@ export interface SwapManagerIntegrity {
   }>;
   codeHashAgreement: RouterIntegrity["codeHashAgreement"];
   proxyType: "none" | "eip1967" | "eip1967_beacon" | "eip1167" | "unknown" | "unavailable";
+  proxyDetection: ProxyDetectionEvidence;
+  executionOpcodeObservations: ExecutionOpcodeObservations;
   implementationAddress: string | null;
   implementationCodeHashesByRpc: Array<{
     rpcUrl: string;
@@ -625,6 +685,26 @@ export interface GasPolicy {
   nativeBalanceCoversSafetyAdjustedGas: boolean | null;
 }
 
+export interface MinimumOutputValidation {
+  apiExpectedOutputRaw: string | null;
+  apiMinimumOutputRaw: string | null;
+  quoteRouteMinimumOutputRaw: string | null;
+  methodParametersMinimumOutputRaw: string | null;
+  decodedDestMinAmountRaw: string | null;
+  decodedReturnConstraintRaw: string | null;
+  allowedSlippagePercent: number | null;
+  sourceForEachValue: Record<string, string>;
+  relationship:
+    | "EXACT_MATCH"
+    | "CALLDATA_STRICTER"
+    | "CALLDATA_WEAKER"
+    | "SEMANTICS_UNRESOLVED";
+  authoritativeQuoteField: string | null;
+  validationStatus: "PASSED" | "FAILED";
+  explanation: string;
+  evidenceFingerprint: string | null;
+}
+
 export interface PhiatShadowBuyCertificate {
   decision: Decision;
   decisionClass: DecisionClass;
@@ -685,6 +765,7 @@ export interface PhiatShadowBuyCertificate {
   trustRecordFingerprint: string | null;
   preparedIntent: PreparedIntent | null;
   decodedIntent: DecodedIntent | null;
+  minimumOutputValidation: MinimumOutputValidation | null;
   simulation: SimulationResult;
   gasPolicy: GasPolicy;
   policyChecks: Record<string, PolicyCheck>;
