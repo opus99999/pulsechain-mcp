@@ -539,7 +539,22 @@ describe("signed PHIAT execution trust manifests", () => {
       currentBlock: "27195533",
     });
     expect(valid.signatureValid).toBe(true);
-    expect(valid.executionAuthority).toBe("VALID");
+    expect(valid.verificationScope).toBe("MANIFEST_AUTHORIZATION");
+    expect(valid.manifestAuthorizationStatus).toBe("VALID");
+    expect(valid.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(valid.graphAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(valid.executionAuthority).toBe("NOT_EVALUATED");
+    expect(valid.automaticExecutionEligible).toBe(false);
+    expect(valid.authorizationLayers.signedManifest).toMatchObject({
+      status: "VALID",
+      signatureValid: true,
+      schemaValid: true,
+      temporalValid: true,
+    });
+    expect(valid.authorizationLayers.execution).toMatchObject({
+      status: "NOT_EVALUATED",
+      automaticExecutionEligible: false,
+    });
 
     const fingerprintMismatch = verifySignedTrustManifest({
       ...signed,
@@ -579,6 +594,179 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(wrongPublicKey.executionAuthority).toBe("INVALID");
   });
 
+  it("separates manifest authorization from exact live execution authority", () => {
+    const key = keyMaterial();
+    const signed = signManifest(trustManifest(), key);
+    const publicKeys = { [key.publicKeyId]: key.publicKeySpkiDerBase64 };
+    const clearRevocations = { manifests: [], keys: [] };
+    const baseVerification = {
+      pinnedPublicKeys: publicKeys,
+      nowMs: NOW,
+      currentBlock: "27195533",
+      currentChainId: 369,
+    };
+
+    const defaultScope = verifySignedTrustManifest(signed, baseVerification);
+    expect(defaultScope.verificationScope).toBe("MANIFEST_AUTHORIZATION");
+    expect(defaultScope.manifestAuthorizationStatus).toBe("VALID");
+    expect(defaultScope.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(defaultScope.executionAuthority).toBe("NOT_EVALUATED");
+    expect(defaultScope.automaticExecutionEligible).toBe(false);
+
+    const signatureOnly = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "SIGNATURE_ONLY",
+    });
+    expect(signatureOnly.verificationScope).toBe("SIGNATURE_ONLY");
+    expect(signatureOnly.signatureValid).toBe(true);
+    expect(signatureOnly.manifestAuthorizationStatus).toBe("VALID");
+    expect(signatureOnly.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(signatureOnly.executionAuthority).toBe("NOT_EVALUATED");
+
+    const chainState = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "CHAIN_STATE",
+      revocations: clearRevocations,
+    });
+    expect(chainState.verificationScope).toBe("CHAIN_STATE");
+    expect(chainState.chainStateStatus).toBe("PASSED");
+    expect(chainState.manifestAuthorizationStatus).toBe("VALID");
+    expect(chainState.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(chainState.executionAuthority).toBe("NOT_EVALUATED");
+
+    const graphNotEvaluated = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      revocations: clearRevocations,
+    });
+    expect(graphNotEvaluated.manifestAuthorizationStatus).toBe("VALID");
+    expect(graphNotEvaluated.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(graphNotEvaluated.executionAuthority).toBe("NOT_EVALUATED");
+    expect(graphNotEvaluated.automaticExecutionEligible).toBe(false);
+
+    const revocationUnavailable = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      liveGraph: [liveCall()],
+      liveChainState: liveState(),
+      traceStatus: "PASSED",
+    });
+    expect(revocationUnavailable.manifestAuthorizationStatus).toBe("VALID");
+    expect(revocationUnavailable.revocationStatus).toBe("UNCONFIGURED");
+    expect(revocationUnavailable.liveExecutionAuthorityStatus).toBe("REVOCATION_UNAVAILABLE");
+    expect(revocationUnavailable.executionAuthority).toBe("REVOCATION_UNAVAILABLE");
+    expect(revocationUnavailable.validationErrors).toContain("REVOCATION_REGISTRY_REQUIRED");
+    expect(revocationUnavailable.automaticExecutionEligible).toBe(false);
+
+    const exactLive = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      revocations: clearRevocations,
+      liveGraph: [liveCall()],
+      liveChainState: liveState(),
+      traceStatus: "PASSED",
+    });
+    expect(exactLive.manifestAuthorizationStatus).toBe("VALID");
+    expect(exactLive.liveExecutionAuthorityStatus).toBe("VALID");
+    expect(exactLive.graphAuthorityStatus).toBe("PASSED");
+    expect(exactLive.executionAuthority).toBe("VALID");
+    expect(exactLive.automaticExecutionEligible).toBe(true);
+    expect(exactLive.authorizationLayers).toMatchObject({
+      signedManifest: {
+        status: "VALID",
+        fingerprint: signed.manifestFingerprint,
+        keyId: key.publicKeyId,
+        signatureValid: true,
+        schemaValid: true,
+        temporalValid: true,
+      },
+      revocation: { status: "PASSED", configured: true, clear: true },
+      chainState: { status: "PASSED", routerMatched: true, managerMatched: true },
+      liveGraph: { status: "VALID", evaluated: true, graphMatched: true },
+      execution: { status: "VALID", automaticExecutionEligible: true },
+    });
+
+    const traceUnavailable = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      revocations: clearRevocations,
+      traceStatus: "UNSUPPORTED",
+    });
+    expect(traceUnavailable.manifestAuthorizationStatus).toBe("VALID");
+    expect(traceUnavailable.liveExecutionAuthorityStatus).toBe("TRACE_UNAVAILABLE");
+    expect(traceUnavailable.executionAuthority).toBe("TRACE_UNAVAILABLE");
+    expect(traceUnavailable.automaticExecutionEligible).toBe(false);
+
+    const graphMismatch = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      revocations: clearRevocations,
+      liveGraph: [
+        liveCall({ to: OTHER }),
+        liveCall({ selector: "0xdeadbeef" }),
+        liveCall({ from: OTHER }),
+      ],
+      liveChainState: liveState({ targetCodeHashes: { [TARGET]: TARGET_HASH, [OTHER]: TARGET_HASH } }),
+      traceStatus: "PASSED",
+    });
+    expect(graphMismatch.liveExecutionAuthorityStatus).toBe("GRAPH_MISMATCH");
+    expect(graphMismatch.graphAuthorityStatus).toBe("FAILED");
+    expect(graphMismatch.executionAuthority).toBe("GRAPH_MISMATCH");
+    expect(graphMismatch.authorizationLayers.liveGraph.unexpectedTargets).toContain(OTHER);
+    expect(graphMismatch.authorizationLayers.liveGraph.unexpectedSelectors).toContain("0xdeadbeef");
+    expect(graphMismatch.authorizationLayers.liveGraph.unexpectedEdges.length).toBeGreaterThan(0);
+    expect(graphMismatch.automaticExecutionEligible).toBe(false);
+
+    const stateMismatch = verifySignedTrustManifest(signManifest(trustManifest({ routerHash: OTHER_HASH }), key), {
+      ...baseVerification,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      revocations: clearRevocations,
+      liveGraph: [liveCall()],
+      liveChainState: liveState(),
+      traceStatus: "PASSED",
+    });
+    expect(stateMismatch.manifestAuthorizationStatus).toBe("STATE_MISMATCH");
+    expect(stateMismatch.liveExecutionAuthorityStatus).toBe("STATE_MISMATCH");
+    expect(stateMismatch.executionAuthority).toBe("STATE_MISMATCH");
+    expect(stateMismatch.automaticExecutionEligible).toBe(false);
+
+    const invalidSignature = verifySignedTrustManifest({ ...signed, signature: "AA==" }, baseVerification);
+    expect(invalidSignature.manifestAuthorizationStatus).toBe("INVALID");
+    expect(invalidSignature.liveExecutionAuthorityStatus).toBe("INVALID");
+    expect(invalidSignature.executionAuthority).toBe("INVALID");
+    expect(invalidSignature.automaticExecutionEligible).toBe(false);
+
+    const expired = verifySignedTrustManifest(signManifest(trustManifest({
+      approvedAt: "2026-08-01T00:00:00.000Z",
+      expiresAt: "2026-08-02T00:00:00.000Z",
+      expiresAtBlock: null,
+    }), key), baseVerification);
+    expect(expired.manifestAuthorizationStatus).toBe("EXPIRED");
+    expect(expired.liveExecutionAuthorityStatus).toBe("INVALID");
+    expect(expired.executionAuthority).toBe("EXPIRED");
+    expect(expired.automaticExecutionEligible).toBe(false);
+
+    const revokedManifest = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      revocations: {
+        manifests: [{ manifestFingerprint: signed.manifestFingerprint, revokedAt: "2026-08-03T00:00:00.000Z", reason: "test" }],
+      },
+    });
+    expect(revokedManifest.manifestAuthorizationStatus).toBe("REVOKED");
+    expect(revokedManifest.liveExecutionAuthorityStatus).toBe("INVALID");
+    expect(revokedManifest.executionAuthority).toBe("INVALID");
+
+    const revokedKey = verifySignedTrustManifest(signed, {
+      ...baseVerification,
+      revocations: {
+        keys: [{ keyId: key.publicKeyId, revokedAt: "2026-08-03T00:00:00.000Z", reason: "test" }],
+      },
+    });
+    expect(revokedKey.manifestAuthorizationStatus).toBe("REVOKED");
+    expect(revokedKey.liveExecutionAuthorityStatus).toBe("INVALID");
+    expect(revokedKey.executionAuthority).toBe("INVALID");
+  });
+
   it("uses an explicit binary signature frame and rejects downgrade, truncation, and wrapper tampering", () => {
     const key = keyMaterial();
     const manifest = trustManifest();
@@ -596,7 +784,7 @@ describe("signed PHIAT execution trust manifests", () => {
       pinnedPublicKeys: { [key.publicKeyId]: key.publicKeySpkiDerBase64 },
       nowMs: NOW,
       currentBlock: "27195533",
-    }).executionAuthority).toBe("VALID");
+    }).executionAuthority).toBe("NOT_EVALUATED");
 
     const oldAmbiguousPayload = Buffer.concat([
       Buffer.from(TRUST_MANIFEST_DOMAIN_SEPARATOR, "utf8"),
@@ -773,7 +961,10 @@ describe("signed PHIAT execution trust manifests", () => {
       ...extra,
     });
 
-    expect(verifyWithEntry(keyRegistryEntry(key)).executionAuthority).toBe("VALID");
+    const activeKey = verifyWithEntry(keyRegistryEntry(key));
+    expect(activeKey.manifestAuthorizationStatus).toBe("VALID");
+    expect(activeKey.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(activeKey.executionAuthority).toBe("NOT_EVALUATED");
     expect(verifyWithEntry(keyRegistryEntry(key, { status: "REVOKED" })).keyStatus).toBe("REVOKED");
     expect(verifyWithEntry(keyRegistryEntry(key, { status: "DISABLED" })).keyStatus).toBe("DISABLED");
     expect(verifyWithEntry(keyRegistryEntry(key, { validFrom: "2026-08-04T00:00:00.000Z" })).validationErrors).toContain("OPERATOR_PUBLIC_KEY_NOT_YET_VALID");

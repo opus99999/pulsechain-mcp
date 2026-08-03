@@ -1375,6 +1375,7 @@ export async function buildPhiatShadowBuy(
     executionLayer.managerIntegrityStatus === "PASSED" &&
     executionLayer.executionTraceStatus === "PASSED" &&
     executionLayer.traceBackend.stateOverridesUsed === false &&
+    executionLayer.liveExecutionAuthorityStatus === "VALID" &&
     executionLayer.executionAuthority === "VALID" &&
     executionLayer.trustManifestComparison?.automaticExecutionEligible === true &&
     executionLayer.prohibitedOperations.length === 0 &&
@@ -1667,35 +1668,53 @@ function validateExecutionLayerCertification(
   reasons: ShadowBuyReason[],
   certification: ExecutionLayerCertification,
 ): void {
-  if (certification.failureCodes.length === 0) {
+  const blockingFailureCodes = certification.failureCodes.filter((code) => !isTrustManifestAutomationCode(code));
+  if (blockingFailureCodes.length === 0) {
     passCheck(checks, "execution_layer_certified", {
       managerIntegrityStatus: certification.managerIntegrityStatus,
       executionTraceStatus: certification.executionTraceStatus,
       executionGraphStatus: certification.executionGraphStatus,
       activeSwapManager: certification.activeSwapManager.address,
+      manifestAuthorizationStatus: certification.manifestAuthorizationStatus,
+      liveExecutionAuthorityStatus: certification.liveExecutionAuthorityStatus,
+      automaticExecutionEligible: certification.automaticExecutionEligible,
     });
-  } else {
-    for (const [index, code] of certification.failureCodes.entries()) {
-      failCheck(
+  }
+  for (const [index, code] of certification.failureCodes.entries()) {
+    const evidence = {
+      activeSwapManager: certification.activeSwapManager,
+      swapManagerIntegrity: certification.swapManagerIntegrity,
+      routerManagerBinding: certification.routerManagerBinding,
+      traceBackend: certification.traceBackend,
+      executionGraphStatus: certification.executionGraphStatus,
+      unresolvedTargets: certification.unresolvedTargets,
+      prohibitedOperations: certification.prohibitedOperations,
+      trustManifestVerification: certification.trustManifestVerification,
+      trustManifestComparison: certification.trustManifestComparison,
+      manifestAuthorizationStatus: certification.manifestAuthorizationStatus,
+      liveExecutionAuthorityStatus: certification.liveExecutionAuthorityStatus,
+      executionAuthority: certification.executionAuthority,
+    };
+    if (isTrustManifestAutomationCode(code)) {
+      warnCheck(
         checks,
-        reasons,
         executionLayerCheckName(code),
         certification.validationErrors[index] ?? executionLayerMessage(code),
         {
-          activeSwapManager: certification.activeSwapManager,
-          swapManagerIntegrity: certification.swapManagerIntegrity,
-          routerManagerBinding: certification.routerManagerBinding,
-          traceBackend: certification.traceBackend,
-          executionGraphStatus: certification.executionGraphStatus,
-          unresolvedTargets: certification.unresolvedTargets,
-          prohibitedOperations: certification.prohibitedOperations,
-          trustManifestVerification: certification.trustManifestVerification,
-          trustManifestComparison: certification.trustManifestComparison,
-          executionAuthority: certification.executionAuthority,
+          ...evidence,
+          automaticExecutionEligible: false,
         },
-        { code, stage: "execution_graph" },
       );
+      continue;
     }
+    failCheck(
+      checks,
+      reasons,
+      executionLayerCheckName(code),
+      certification.validationErrors[index] ?? executionLayerMessage(code),
+      evidence,
+      { code, stage: "execution_graph" },
+    );
   }
   if (certification.swapManagerIntegrity.operatorApprovalRequired) {
     warnCheck(
@@ -1708,6 +1727,10 @@ function validateExecutionLayerCertification(
       },
     );
   }
+}
+
+function isTrustManifestAutomationCode(code: string): boolean {
+  return code.startsWith("TRUST_MANIFEST_");
 }
 
 function executionLayerCheckName(code: string): string {

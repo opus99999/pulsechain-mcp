@@ -60,7 +60,34 @@ export type ManifestExecutionAuthority =
   | "VALID"
   | "INVALID"
   | "EXPIRED"
+  | "STATE_MISMATCH"
+  | "NOT_EVALUATED"
+  | "GRAPH_MISMATCH"
+  | "REVOCATION_UNAVAILABLE"
+  | "TRACE_UNAVAILABLE";
+
+export type ManifestAuthorizationStatus =
+  | "VALID"
+  | "INVALID"
+  | "EXPIRED"
+  | "REVOKED"
+  | "KEY_INVALID"
   | "STATE_MISMATCH";
+
+export type LiveExecutionAuthorityStatus =
+  | "VALID"
+  | "INVALID"
+  | "NOT_EVALUATED"
+  | "GRAPH_MISMATCH"
+  | "STATE_MISMATCH"
+  | "REVOCATION_UNAVAILABLE"
+  | "TRACE_UNAVAILABLE";
+
+export type TrustManifestVerificationScope =
+  | "SIGNATURE_ONLY"
+  | "MANIFEST_AUTHORIZATION"
+  | "CHAIN_STATE"
+  | "EXACT_LIVE_GRAPH";
 
 export type ManifestComparisonFailureCode =
   | "UNEXPECTED_TARGET"
@@ -250,7 +277,45 @@ export interface VerifiedTrustManifest {
   chainStateStatus: TrustManifestVerifierStatus;
   graphAuthorityStatus: TrustManifestVerifierStatus;
   temporalAuthority: TrustManifestTemporalAuthority | null;
+  verificationScope: TrustManifestVerificationScope;
+  manifestAuthorizationStatus: ManifestAuthorizationStatus;
+  liveExecutionAuthorityStatus: LiveExecutionAuthorityStatus;
+  automaticExecutionEligible: boolean;
+  authorizationLayers: TrustManifestAuthorizationLayers;
   executionAuthority: ManifestExecutionAuthority;
+}
+
+export interface TrustManifestAuthorizationLayers {
+  signedManifest: {
+    status: ManifestAuthorizationStatus;
+    fingerprint: string | null;
+    keyId: string | null;
+    signatureValid: boolean;
+    schemaValid: boolean;
+    temporalValid: boolean;
+  };
+  revocation: {
+    status: TrustManifestVerifierStatus;
+    configured: boolean;
+    clear: boolean;
+  };
+  chainState: {
+    status: TrustManifestVerifierStatus;
+    routerMatched: boolean;
+    managerMatched: boolean;
+  };
+  liveGraph: {
+    status: LiveExecutionAuthorityStatus;
+    evaluated: boolean;
+    graphMatched: boolean;
+    unexpectedTargets: string[];
+    unexpectedSelectors: string[];
+    unexpectedEdges: string[];
+  };
+  execution: {
+    status: LiveExecutionAuthorityStatus;
+    automaticExecutionEligible: boolean;
+  };
 }
 
 export interface LiveExecutionGraphCall {
@@ -306,6 +371,9 @@ export interface ManifestComparisonResult {
   automaticExecutionEligible: boolean;
   failureCodes: ManifestComparisonFailureCode[];
   validationErrors: string[];
+  unexpectedTargets: string[];
+  unexpectedSelectors: string[];
+  unexpectedEdges: string[];
 }
 
 interface BuildTrustManifestCandidateArgs {
@@ -1044,17 +1112,23 @@ export function verifySignedTrustManifest(
     keyRegistry?: PhiatTrustOperatorPublicKeyRegistryEntry[];
     revocations?: PhiatTrustRevocationRegistry;
     expectedOperatorPublicKeyId?: string;
+    verificationScope?: TrustManifestVerificationScope;
+    liveGraph?: LiveExecutionGraphCall[] | { calls?: LiveExecutionGraphCall[] };
+    liveChainState?: LiveChainStateForManifest;
+    traceStatus?: "PASSED" | "UNSUPPORTED" | "STATE_INSUFFICIENT" | "FAILED" | "NOT_RUN";
     nowMs?: number;
     currentBlock?: string | null;
     currentChainId?: number;
   },
 ): VerifiedTrustManifest {
+  const verificationScope = args.verificationScope ?? "MANIFEST_AUTHORIZATION";
   const validationErrors: string[] = [];
   const parsed = parseSignedManifest(signedManifestInput);
   if (!parsed.ok) {
     return invalidVerification([parsed.error], {
       schemaStatus: parsed.error.startsWith("STRICT_JSON_") ? "FAILED" : "FAILED",
       canonicalizationStatus: parsed.error.startsWith("STRICT_JSON_") ? "FAILED" : "NOT_EVALUATED",
+      verificationScope,
     });
   }
   const signedManifest = parsed.value;
@@ -1071,6 +1145,7 @@ export function verifySignedTrustManifest(
       signature: signedManifest.signature,
       schemaStatus: "FAILED",
       invalidRecordCount,
+      verificationScope,
     });
   }
 
@@ -1095,6 +1170,7 @@ export function verifySignedTrustManifest(
       schemaStatus: "PASSED",
       canonicalizationStatus: "FAILED",
       invalidRecordCount,
+      verificationScope,
     });
   }
   if (signedManifest.manifestFingerprint !== canonicalFingerprint) {
@@ -1158,22 +1234,60 @@ export function verifySignedTrustManifest(
       : "FAILED";
   const temporalStatus: TrustManifestVerifierStatus = expiration.status;
   const chainStateStatus: TrustManifestVerifierStatus = chainRouterManagerConsistent ? "PASSED" : "STATE_MISMATCH";
-  const invalidAuthority =
+  const invalidSignedManifest =
     schemaStatus !== "PASSED" ||
     canonicalizationStatus !== "PASSED" ||
     cryptographicStatus !== "PASSED" ||
     keyEvaluation.status !== "PASSED" ||
-    revocation.status === "REVOKED" ||
     temporalStatus === "FAILED" ||
     invalidRecordCount > 0 ||
     validationErrors.some((error) => !consistencyErrors.includes(error) && !expiration.errors.includes(error));
-  const executionAuthority: ManifestExecutionAuthority = invalidAuthority
-    ? "INVALID"
-    : expiration.expired
-      ? "EXPIRED"
-      : chainRouterManagerConsistent
-        ? "VALID"
-        : "STATE_MISMATCH";
+  const manifestAuthorizationStatus = manifestAuthorizationStatusFor({
+    invalidSignedManifest,
+    keyStatus: keyEvaluation.status,
+    temporalStatus,
+    expired: expiration.expired,
+    revocationStatus: revocation.status,
+    chainStateStatus,
+  });
+  let comparison: ManifestComparisonResult | null = null;
+  let liveExecutionAuthorityStatus = liveExecutionAuthorityStatusFor({
+    verificationScope,
+    manifestAuthorizationStatus,
+    revocationStatus: revocation.status,
+    traceStatus: args.traceStatus,
+    hasLiveEvidence: Boolean(args.liveGraph && args.liveChainState),
+  });
+  if (
+    verificationScope === "EXACT_LIVE_GRAPH" &&
+    liveExecutionAuthorityStatus === "VALID" &&
+    args.liveGraph &&
+    args.liveChainState
+  ) {
+    comparison = compareLiveExecutionGraphToApprovedManifest(
+      args.liveGraph,
+      verifiedManifestForComparison(manifest, manifestAuthorizationStatus),
+      args.liveChainState,
+    );
+    liveExecutionAuthorityStatus = liveExecutionAuthorityStatusFromComparison(comparison);
+  }
+  if (liveExecutionAuthorityStatus === "REVOCATION_UNAVAILABLE") {
+    validationErrors.push("REVOCATION_REGISTRY_REQUIRED");
+  }
+  const executionAuthority = executionAuthorityForLiveStatus(liveExecutionAuthorityStatus, manifestAuthorizationStatus);
+  const authorizationLayers = authorizationLayersFor({
+    manifestAuthorizationStatus,
+    liveExecutionAuthorityStatus,
+    manifestFingerprint: canonicalFingerprint,
+    operatorPublicKeyId: signedManifest.operatorPublicKeyId,
+    signatureValid,
+    schemaStatus,
+    temporalStatus,
+    revocationStatus: revocation.status,
+    chainStateStatus,
+    consistencyErrors,
+    comparison,
+  });
   return {
     manifest,
     manifestFingerprint: canonicalFingerprint,
@@ -1196,10 +1310,146 @@ export function verifySignedTrustManifest(
     temporalStatus,
     revocationStatus: revocation.status,
     chainStateStatus,
-    graphAuthorityStatus: "NOT_EVALUATED",
+    graphAuthorityStatus: graphAuthorityStatusFor(verificationScope, comparison),
     temporalAuthority: expiration.temporalAuthority,
+    verificationScope,
+    manifestAuthorizationStatus,
+    liveExecutionAuthorityStatus,
+    automaticExecutionEligible: liveExecutionAuthorityStatus === "VALID",
+    authorizationLayers,
     executionAuthority,
   };
+}
+
+function manifestAuthorizationStatusFor(args: {
+  invalidSignedManifest: boolean;
+  keyStatus: TrustManifestVerifierStatus;
+  temporalStatus: TrustManifestVerifierStatus;
+  expired: boolean;
+  revocationStatus: TrustManifestVerifierStatus;
+  chainStateStatus: TrustManifestVerifierStatus;
+}): ManifestAuthorizationStatus {
+  if (args.revocationStatus === "REVOKED" || args.keyStatus === "REVOKED") return "REVOKED";
+  if (args.expired || args.temporalStatus === "EXPIRED") return "EXPIRED";
+  if (args.keyStatus !== "PASSED") return "KEY_INVALID";
+  if (args.invalidSignedManifest || args.temporalStatus !== "PASSED") return "INVALID";
+  if (args.chainStateStatus === "STATE_MISMATCH") return "STATE_MISMATCH";
+  return "VALID";
+}
+
+function liveExecutionAuthorityStatusFor(args: {
+  verificationScope: TrustManifestVerificationScope;
+  manifestAuthorizationStatus: ManifestAuthorizationStatus;
+  revocationStatus: TrustManifestVerifierStatus;
+  traceStatus?: "PASSED" | "UNSUPPORTED" | "STATE_INSUFFICIENT" | "FAILED" | "NOT_RUN";
+  hasLiveEvidence: boolean;
+}): LiveExecutionAuthorityStatus {
+  if (args.manifestAuthorizationStatus === "STATE_MISMATCH") return "STATE_MISMATCH";
+  if (args.manifestAuthorizationStatus !== "VALID") return "INVALID";
+  if (args.verificationScope !== "EXACT_LIVE_GRAPH") return "NOT_EVALUATED";
+  if (args.revocationStatus === "UNCONFIGURED") return "REVOCATION_UNAVAILABLE";
+  if (args.revocationStatus !== "PASSED") return "INVALID";
+  if (args.traceStatus && args.traceStatus !== "PASSED") return "TRACE_UNAVAILABLE";
+  if (!args.hasLiveEvidence) return "NOT_EVALUATED";
+  return "VALID";
+}
+
+function liveExecutionAuthorityStatusFromComparison(
+  comparison: ManifestComparisonResult,
+): LiveExecutionAuthorityStatus {
+  if (comparison.status === "PASSED") return "VALID";
+  if (
+    comparison.failureCodes.includes("ROUTER_CHANGED") ||
+    comparison.failureCodes.includes("SWAP_MANAGER_CHANGED") ||
+    comparison.validationErrors.some((error) => error.includes("state_mismatch"))
+  ) {
+    return "STATE_MISMATCH";
+  }
+  return "GRAPH_MISMATCH";
+}
+
+function executionAuthorityForLiveStatus(
+  liveStatus: LiveExecutionAuthorityStatus,
+  manifestStatus: ManifestAuthorizationStatus,
+): ManifestExecutionAuthority {
+  if (liveStatus === "VALID") return "VALID";
+  if (liveStatus === "NOT_EVALUATED") return "NOT_EVALUATED";
+  if (liveStatus === "GRAPH_MISMATCH") return "GRAPH_MISMATCH";
+  if (liveStatus === "STATE_MISMATCH") return "STATE_MISMATCH";
+  if (liveStatus === "REVOCATION_UNAVAILABLE") return "REVOCATION_UNAVAILABLE";
+  if (liveStatus === "TRACE_UNAVAILABLE") return "TRACE_UNAVAILABLE";
+  if (manifestStatus === "EXPIRED") return "EXPIRED";
+  if (manifestStatus === "STATE_MISMATCH") return "STATE_MISMATCH";
+  return "INVALID";
+}
+
+function graphAuthorityStatusFor(
+  verificationScope: TrustManifestVerificationScope,
+  comparison: ManifestComparisonResult | null,
+): TrustManifestVerifierStatus {
+  if (verificationScope !== "EXACT_LIVE_GRAPH" || !comparison) return "NOT_EVALUATED";
+  return comparison.status === "PASSED" ? "PASSED" : "FAILED";
+}
+
+function authorizationLayersFor(args: {
+  manifestAuthorizationStatus: ManifestAuthorizationStatus;
+  liveExecutionAuthorityStatus: LiveExecutionAuthorityStatus;
+  manifestFingerprint: string | null;
+  operatorPublicKeyId: string | null;
+  signatureValid: boolean;
+  schemaStatus: TrustManifestVerifierStatus;
+  temporalStatus: TrustManifestVerifierStatus;
+  revocationStatus: TrustManifestVerifierStatus;
+  chainStateStatus: TrustManifestVerifierStatus;
+  consistencyErrors: string[];
+  comparison: ManifestComparisonResult | null;
+}): TrustManifestAuthorizationLayers {
+  return {
+    signedManifest: {
+      status: args.manifestAuthorizationStatus,
+      fingerprint: args.manifestFingerprint,
+      keyId: args.operatorPublicKeyId,
+      signatureValid: args.signatureValid,
+      schemaValid: args.schemaStatus === "PASSED",
+      temporalValid: args.temporalStatus === "PASSED",
+    },
+    revocation: {
+      status: args.revocationStatus,
+      configured: args.revocationStatus !== "UNCONFIGURED" && args.revocationStatus !== "NOT_EVALUATED",
+      clear: args.revocationStatus === "PASSED",
+    },
+    chainState: {
+      status: args.chainStateStatus,
+      routerMatched: !args.consistencyErrors.some((error) => error.startsWith("ROUTER_")),
+      managerMatched: !args.consistencyErrors.some((error) => error.startsWith("MANAGER_")),
+    },
+    liveGraph: {
+      status: args.liveExecutionAuthorityStatus,
+      evaluated: args.comparison !== null,
+      graphMatched: args.comparison?.status === "PASSED",
+      unexpectedTargets: args.comparison?.unexpectedTargets ?? [],
+      unexpectedSelectors: args.comparison?.unexpectedSelectors ?? [],
+      unexpectedEdges: args.comparison?.unexpectedEdges ?? [],
+    },
+    execution: {
+      status: args.liveExecutionAuthorityStatus,
+      automaticExecutionEligible: args.liveExecutionAuthorityStatus === "VALID",
+    },
+  };
+}
+
+function verifiedManifestForComparison(
+  manifest: TrustManifest,
+  manifestAuthorizationStatus: ManifestAuthorizationStatus,
+): VerifiedTrustManifest {
+  return {
+    manifest,
+    manifestAuthorizationStatus,
+    executionAuthority: executionAuthorityForLiveStatus(
+      manifestAuthorizationStatus === "VALID" ? "NOT_EVALUATED" : "INVALID",
+      manifestAuthorizationStatus,
+    ),
+  } as VerifiedTrustManifest;
 }
 
 export function compareLiveExecutionGraphToApprovedManifest(
@@ -1210,10 +1460,10 @@ export function compareLiveExecutionGraphToApprovedManifest(
   const manifest = verifiedManifest.manifest;
   const failureCodes: ManifestComparisonFailureCode[] = [];
   const validationErrors: string[] = [];
-  if (!manifest || verifiedManifest.executionAuthority !== "VALID") {
-    if (verifiedManifest.executionAuthority === "EXPIRED") failureCodes.push("MANIFEST_EXPIRED");
+  if (!manifest || verifiedManifest.manifestAuthorizationStatus !== "VALID") {
+    if (verifiedManifest.manifestAuthorizationStatus === "EXPIRED") failureCodes.push("MANIFEST_EXPIRED");
     else failureCodes.push("UNEXPECTED_TARGET");
-    validationErrors.push(`manifest_authority_${verifiedManifest.executionAuthority.toLowerCase()}`);
+    validationErrors.push(`manifest_authorization_${verifiedManifest.manifestAuthorizationStatus.toLowerCase()}`);
     return comparisonResult(failureCodes, validationErrors);
   }
   if (liveChainState.chainId !== manifest.chainId) failureCodes.push("ROUTER_CHANGED");
@@ -1249,6 +1499,9 @@ export function compareLiveExecutionGraphToApprovedManifest(
       .map(edgeKey),
   );
   const observedStateChangingEdges = new Set<string>();
+  const unexpectedTargets: string[] = [];
+  const unexpectedSelectors: string[] = [];
+  const unexpectedEdges: string[] = [];
   for (const call of calls) {
     const callType = call.callType.toUpperCase();
     if (manifest.prohibitedOperations.includes(callType as never)) {
@@ -1260,6 +1513,7 @@ export function compareLiveExecutionGraphToApprovedManifest(
     const record = recordByAddress.get(to);
     if (!record) {
       failureCodes.push("UNEXPECTED_TARGET");
+      unexpectedTargets.push(to);
       continue;
     }
     if (!record.allowedCallTypes.map((value) => value.toUpperCase()).includes(callType)) {
@@ -1267,12 +1521,15 @@ export function compareLiveExecutionGraphToApprovedManifest(
     }
     if (call.selector && !record.approvedSelectors.map(lower).includes(call.selector.toLowerCase())) {
       failureCodes.push("UNEXPECTED_SELECTOR");
+      unexpectedSelectors.push(call.selector.toLowerCase());
     }
-    if (!edgeSet.has(edgeKeyForCall(call, record, manifest))) {
+    const liveEdgeKey = edgeKeyForCall(call, record, manifest);
+    if (!edgeSet.has(liveEdgeKey)) {
       failureCodes.push("UNEXPECTED_EDGE");
+      unexpectedEdges.push(liveEdgeKey);
     }
     if (isStateChangingCallType(callType, manifest.prohibitedOperations)) {
-      observedStateChangingEdges.add(edgeKeyForCall(call, record, manifest));
+      observedStateChangingEdges.add(liveEdgeKey);
     }
     const observedHash = lower(
       call.codeHash ?? call.runtimeCodeHash ?? liveChainState.targetCodeHashes?.[to],
@@ -1312,8 +1569,18 @@ export function compareLiveExecutionGraphToApprovedManifest(
   }
   if (!sameSet(expectedStateChangingEdges, observedStateChangingEdges)) {
     failureCodes.push("UNEXPECTED_EDGE");
+    for (const edge of observedStateChangingEdges) {
+      if (!expectedStateChangingEdges.has(edge)) unexpectedEdges.push(edge);
+    }
+    for (const edge of expectedStateChangingEdges) {
+      if (!observedStateChangingEdges.has(edge)) unexpectedEdges.push(`missing:${edge}`);
+    }
   }
-  return comparisonResult(failureCodes, validationErrors);
+  return comparisonResult(failureCodes, validationErrors, {
+    unexpectedTargets,
+    unexpectedSelectors,
+    unexpectedEdges,
+  });
 }
 
 export function registerPhiatTrustManifestTools(server: McpServer, config: AppConfig): void {
@@ -1355,6 +1622,12 @@ export function registerPhiatTrustManifestTools(server: McpServer, config: AppCo
     inputSchema: {
       signedManifest: z.union([z.record(z.string(), z.unknown()), z.string()]),
       expectedOperatorPublicKeyId: z.string().regex(/^0x[a-fA-F0-9]{64}$/).optional(),
+      verificationScope: z.enum([
+        "SIGNATURE_ONLY",
+        "MANIFEST_AUTHORIZATION",
+        "CHAIN_STATE",
+        "EXACT_LIVE_GRAPH",
+      ]).default("MANIFEST_AUTHORIZATION"),
     },
     handler: async (args, cfg) => {
       const currentBlock = await readCurrentBlockForManifestVerifier(cfg);
@@ -1364,6 +1637,7 @@ export function registerPhiatTrustManifestTools(server: McpServer, config: AppCo
           keyRegistry: cfg.phiatTrustOperatorKeyRegistry,
           revocations: cfg.phiatTrustRevocations,
           expectedOperatorPublicKeyId: args.expectedOperatorPublicKeyId as string | undefined,
+          verificationScope: args.verificationScope as TrustManifestVerificationScope | undefined,
           currentBlock,
           currentChainId: PULSECHAIN_CHAIN_ID,
         }),
@@ -2481,8 +2755,23 @@ function invalidVerification(
     schemaStatus?: TrustManifestVerifierStatus;
     canonicalizationStatus?: TrustManifestVerifierStatus;
     invalidRecordCount?: number;
+    verificationScope?: TrustManifestVerificationScope;
   } = {},
 ): VerifiedTrustManifest {
+  const verificationScope = options.verificationScope ?? "MANIFEST_AUTHORIZATION";
+  const authorizationLayers = authorizationLayersFor({
+    manifestAuthorizationStatus: "INVALID",
+    liveExecutionAuthorityStatus: "INVALID",
+    manifestFingerprint: null,
+    operatorPublicKeyId: options.operatorPublicKeyId ?? null,
+    signatureValid: false,
+    schemaStatus: options.schemaStatus ?? "FAILED",
+    temporalStatus: "NOT_EVALUATED",
+    revocationStatus: "NOT_EVALUATED",
+    chainStateStatus: "NOT_EVALUATED",
+    consistencyErrors: ["MANIFEST_INVALID"],
+    comparison: null,
+  });
   return {
     manifest: options.manifest ?? null,
     manifestFingerprint: null,
@@ -2507,6 +2796,11 @@ function invalidVerification(
     chainStateStatus: "NOT_EVALUATED",
     graphAuthorityStatus: "NOT_EVALUATED",
     temporalAuthority: null,
+    verificationScope,
+    manifestAuthorizationStatus: "INVALID",
+    liveExecutionAuthorityStatus: "INVALID",
+    automaticExecutionEligible: false,
+    authorizationLayers,
     executionAuthority: "INVALID",
   };
 }
@@ -2614,6 +2908,11 @@ function tokenConstraintMatches(
 function comparisonResult(
   failureCodes: ManifestComparisonFailureCode[],
   validationErrors: string[],
+  evidence: {
+    unexpectedTargets?: string[];
+    unexpectedSelectors?: string[];
+    unexpectedEdges?: string[];
+  } = {},
 ): ManifestComparisonResult {
   const uniqueFailures = uniqueStrings(failureCodes).sort() as ManifestComparisonFailureCode[];
   return {
@@ -2621,6 +2920,9 @@ function comparisonResult(
     automaticExecutionEligible: uniqueFailures.length === 0,
     failureCodes: uniqueFailures,
     validationErrors: uniqueStrings(validationErrors).sort(),
+    unexpectedTargets: uniqueStrings(evidence.unexpectedTargets ?? []).sort(),
+    unexpectedSelectors: uniqueStrings(evidence.unexpectedSelectors ?? []).sort(),
+    unexpectedEdges: uniqueStrings(evidence.unexpectedEdges ?? []).sort(),
   };
 }
 

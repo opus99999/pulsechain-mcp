@@ -2466,6 +2466,8 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
 
     const signedExecutionTrustManifest = { manifest: { id: "mock-signed" } };
     const certified = resolvedExecutionLayer({
+      manifestAuthorizationStatus: "VALID",
+      liveExecutionAuthorityStatus: "VALID",
       executionAuthority: "VALID",
       trustManifestVerification: {
         manifest: null,
@@ -2481,6 +2483,40 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
         approvedRecordCount: 2,
         invalidRecordCount: 0,
         validationErrors: [],
+        cryptographicStatus: "PASSED",
+        schemaStatus: "PASSED",
+        canonicalizationStatus: "PASSED",
+        keyStatus: "PASSED",
+        temporalStatus: "PASSED",
+        revocationStatus: "PASSED",
+        chainStateStatus: "PASSED",
+        graphAuthorityStatus: "PASSED",
+        temporalAuthority: null,
+        verificationScope: "EXACT_LIVE_GRAPH",
+        manifestAuthorizationStatus: "VALID",
+        liveExecutionAuthorityStatus: "VALID",
+        automaticExecutionEligible: true,
+        authorizationLayers: {
+          signedManifest: {
+            status: "VALID",
+            fingerprint: `0x${"12".repeat(32)}`,
+            keyId: "test-operator",
+            signatureValid: true,
+            schemaValid: true,
+            temporalValid: true,
+          },
+          revocation: { status: "PASSED", configured: true, clear: true },
+          chainState: { status: "PASSED", routerMatched: true, managerMatched: true },
+          liveGraph: {
+            status: "VALID",
+            evaluated: true,
+            graphMatched: true,
+            unexpectedTargets: [],
+            unexpectedSelectors: [],
+            unexpectedEdges: [],
+          },
+          execution: { status: "VALID", automaticExecutionEligible: true },
+        },
         executionAuthority: "VALID",
       },
       trustManifestComparison: {
@@ -2488,6 +2524,9 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
         automaticExecutionEligible: true,
         failureCodes: [],
         validationErrors: [],
+        unexpectedTargets: [],
+        unexpectedSelectors: [],
+        unexpectedEdges: [],
       },
       automaticExecutionEligible: true,
       failureCodes: [],
@@ -2508,10 +2547,88 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
       }),
     );
     expect(eligible.automaticExecutionEligible).toBe(true);
+    expect(eligible.manifestAuthorizationStatus).toBe("VALID");
+    expect(eligible.liveExecutionAuthorityStatus).toBe("VALID");
+    expect(eligible.executionAuthority).toBe("VALID");
     expect(eligible.transactionSigned).toBe(false);
     expect(eligible.transactionSubmitted).toBe(false);
     expect(eligible.transactionBroadcast).toBe(false);
     expect(eligible.transactionExecuted).toBe(false);
+  });
+
+  it("does not reuse a standalone verifier-shaped input as execution authority", async () => {
+    const standaloneVerifierResult = {
+      manifestAuthorizationStatus: "VALID",
+      liveExecutionAuthorityStatus: "VALID",
+      executionAuthority: "VALID",
+      automaticExecutionEligible: true,
+    };
+    const certified = resolvedExecutionLayer({
+      manifestAuthorizationStatus: "VALID",
+      liveExecutionAuthorityStatus: "NOT_EVALUATED",
+      executionAuthority: "NOT_EVALUATED",
+      trustManifestVerification: null,
+      trustManifestComparison: null,
+      automaticExecutionEligible: false,
+      failureCodes: ["TRUST_MANIFEST_GRAPH_NOT_EVALUATED"],
+      validationErrors: ["Live execution graph was not evaluated."],
+    });
+    const certifyExecutionLayer = vi.fn(async () => certified) as never;
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ signedExecutionTrustManifest: standaloneVerifierResult }),
+      deps({ certifyExecutionLayer }),
+    );
+
+    expect(certifyExecutionLayer).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        signedExecutionTrustManifest: standaloneVerifierResult,
+      }),
+    );
+    expect(result.decision).toBe("WOULD_BUY");
+    expect(result.manifestAuthorizationStatus).toBe("VALID");
+    expect(result.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(result.executionAuthority).toBe("NOT_EVALUATED");
+    expect(result.automaticExecutionEligible).toBe(false);
+    expect(result.transactionSigned).toBe(false);
+    expect(result.transactionSubmitted).toBe(false);
+    expect(result.transactionBroadcast).toBe(false);
+    expect(result.transactionExecuted).toBe(false);
+  });
+
+  it("derives top-level automation only from independently valid live authority", async () => {
+    const certified = resolvedExecutionLayer({
+      manifestAuthorizationStatus: "VALID",
+      liveExecutionAuthorityStatus: "NOT_EVALUATED",
+      executionAuthority: "VALID",
+      trustManifestComparison: {
+        status: "PASSED",
+        automaticExecutionEligible: true,
+        failureCodes: [],
+        validationErrors: [],
+        unexpectedTargets: [],
+        unexpectedSelectors: [],
+        unexpectedEdges: [],
+      },
+      automaticExecutionEligible: true,
+      failureCodes: [],
+      validationErrors: [],
+    });
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ signedExecutionTrustManifest: { manifest: { id: "mock-signed" } } }),
+      deps({ certifyExecutionLayer: vi.fn(async () => certified) as never }),
+    );
+
+    expect(result.decision).toBe("WOULD_BUY");
+    expect(result.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(result.executionAuthority).toBe("VALID");
+    expect(result.automaticExecutionEligible).toBe(false);
+    expect(result.transactionSigned).toBe(false);
+    expect(result.transactionSubmitted).toBe(false);
+    expect(result.transactionBroadcast).toBe(false);
+    expect(result.transactionExecuted).toBe(false);
   });
 
   it("rejects manager, router, and manager-code changes between quote and simulation", async () => {

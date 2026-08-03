@@ -2,7 +2,12 @@ import type { AppConfig } from "../../../types.js";
 import type { PiteasQuoteData, PiteasRateLimitLeaseStatus, PiteasRateLimitReservation } from "../../../data/index.js";
 import type { buildPhiatDashboard } from "../phiatDashboard.js";
 import type { getPiteasQuote, preparePiteasSwap, ethCall, estimateGas, getFeeData, reservePiteasRateLimitSlots, markPiteasRateLimitSlotAttempted, markPiteasRateLimitSlotCompleted, releaseUnusedPiteasRateLimitSlots } from "../../../data/index.js";
-import type { ManifestComparisonResult, VerifiedTrustManifest } from "./executionTrustManifest.js";
+import type {
+  LiveExecutionAuthorityStatus,
+  ManifestAuthorizationStatus,
+  ManifestComparisonResult,
+  VerifiedTrustManifest,
+} from "./executionTrustManifest.js";
 
 export interface PhiatShadowBuyInput {
   walletAddress: string;
@@ -607,7 +612,18 @@ export interface ExecutionLayerCertification {
   automaticExecutionEligible: boolean;
   trustManifestVerification: VerifiedTrustManifest | null;
   trustManifestComparison: ManifestComparisonResult | null;
-  executionAuthority: "VALID" | "INVALID" | "EXPIRED" | "STATE_MISMATCH" | "MISSING";
+  manifestAuthorizationStatus: ManifestAuthorizationStatus | "MISSING";
+  liveExecutionAuthorityStatus: LiveExecutionAuthorityStatus | "MISSING";
+  executionAuthority:
+    | "VALID"
+    | "INVALID"
+    | "EXPIRED"
+    | "STATE_MISMATCH"
+    | "NOT_EVALUATED"
+    | "GRAPH_MISMATCH"
+    | "REVOCATION_UNAVAILABLE"
+    | "TRACE_UNAVAILABLE"
+    | "MISSING";
   failureCodes: string[];
   validationErrors: string[];
   warnings: string[];
@@ -774,6 +790,9 @@ export interface PhiatShadowBuyCertificate {
   simulation: SimulationResult;
   gasPolicy: GasPolicy;
   policyChecks: Record<string, PolicyCheck>;
+  manifestAuthorizationStatus: ExecutionLayerCertification["manifestAuthorizationStatus"];
+  liveExecutionAuthorityStatus: ExecutionLayerCertification["liveExecutionAuthorityStatus"];
+  executionAuthority: ExecutionLayerCertification["executionAuthority"];
   automaticExecutionEligible: boolean;
   swapEvidenceInvalidAfterApproval: boolean;
   transactionPrepared: boolean;

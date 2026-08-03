@@ -161,12 +161,17 @@ describe("offline PHIAT trust-manifest signing ceremony", () => {
     });
 
     expect(assembled.verification.signatureValid).toBe(true);
-    expect(assembled.verification.executionAuthority).toBe("VALID");
-    expect(verifySignedTrustManifest(assembled.wrapper, {
+    expect(assembled.verification.manifestAuthorizationStatus).toBe("VALID");
+    expect(assembled.verification.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(assembled.verification.executionAuthority).toBe("NOT_EVALUATED");
+    const independent = verifySignedTrustManifest(assembled.wrapper, {
       pinnedPublicKeys: { [key.keyId]: Buffer.from(key.publicSpkiDer).toString("base64") },
       nowMs: NOW,
       currentBlock: null,
-    }).executionAuthority).toBe("VALID");
+    });
+    expect(independent.manifestAuthorizationStatus).toBe("VALID");
+    expect(independent.liveExecutionAuthorityStatus).toBe("NOT_EVALUATED");
+    expect(independent.executionAuthority).toBe("NOT_EVALUATED");
   });
 
   it("rejects modified frame, manifest, signature, key, key ID, and signature length changes", () => {
@@ -257,7 +262,9 @@ describe("offline PHIAT trust-manifest signing ceremony", () => {
     const unsigned = inspectOfflineTrustManifest({ inputText, nowMs: NOW });
     expect(unsigned.kind).toBe("UNSIGNED");
     expect(unsigned.report).toContain("signatureRequired=true");
-    expect(unsigned.report).toContain("executionAuthority=INVALID");
+    expect(unsigned.report).toContain("manifestAuthorizationStatus=INVALID");
+    expect(unsigned.report).toContain("liveExecutionAuthorityStatus=NOT_EVALUATED");
+    expect(unsigned.report).toContain("executionAuthority=NOT_EVALUATED");
 
     const signed = assembleOfflineSignedWrapper({
       manifestText: inputText,
@@ -273,7 +280,10 @@ describe("offline PHIAT trust-manifest signing ceremony", () => {
     });
     expect(signedInspection.kind).toBe("SIGNED");
     expect(signedInspection.report).toContain("cryptographicStatus=PASSED");
-    expect(signedInspection.report).toContain("executionAuthority=VALID");
+    expect(signedInspection.report).toContain("manifestAuthorizationStatus=VALID");
+    expect(signedInspection.report).toContain("liveExecutionAuthorityStatus=NOT_EVALUATED");
+    expect(signedInspection.report).toContain("executionAuthority=NOT_EVALUATED");
+    expect(signedInspection.report).toContain("graphAuthorityStatus=NOT_EVALUATED");
     expect(signedInspection.report).toContain("automaticExecutionEligible=false");
   });
 

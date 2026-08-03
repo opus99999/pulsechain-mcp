@@ -15,6 +15,8 @@ The signer may:
 - Request an Ed25519 signature over the versioned binary signature frame from an
   external key provider.
 - Write a signed-manifest wrapper.
+- Report signed-manifest authorization separately from live transaction
+  execution authority.
 
 The signer must not:
 
@@ -26,6 +28,8 @@ The signer must not:
 - Access any wallet signing key.
 - Sign blockchain transactions.
 - Submit, broadcast, or execute blockchain transactions.
+- Report live execution authority as valid without a fresh exact current
+  transaction trace and configured clear revocation state.
 
 Future signing providers should prefer OS-protected key storage,
 hardware-backed keys, or offline removable media. Tests may use temporary

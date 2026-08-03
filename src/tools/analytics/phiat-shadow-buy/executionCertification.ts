@@ -43,7 +43,9 @@ import type {
 } from "./types.js";
 import type {
   LiveChainStateForManifest,
+  LiveExecutionAuthorityStatus,
   LiveExecutionGraphCall,
+  ManifestAuthorizationStatus,
   ManifestComparisonResult,
   VerifiedTrustManifest,
 } from "./executionTrustManifest.js";
@@ -187,6 +189,7 @@ export async function certifyPiteasExecutionLayer(
   });
   const manifestGate = await evaluateTrustManifestGate(config, {
     signedExecutionTrustManifest: args.signedExecutionTrustManifest,
+    traceStatus: trace.status,
     block,
     router: args.router,
     routerCodeHash: args.routerCodeHash ?? null,
@@ -251,6 +254,8 @@ export async function certifyPiteasExecutionLayer(
     automaticExecutionEligible,
     trustManifestVerification: manifestGate.verification,
     trustManifestComparison: manifestGate.comparison,
+    manifestAuthorizationStatus: manifestGate.manifestAuthorizationStatus,
+    liveExecutionAuthorityStatus: manifestGate.liveExecutionAuthorityStatus,
     executionAuthority: manifestGate.executionAuthority,
     failureCodes,
     validationErrors,
@@ -261,6 +266,8 @@ export async function certifyPiteasExecutionLayer(
 interface TrustManifestGate {
   verification: VerifiedTrustManifest | null;
   comparison: ManifestComparisonResult | null;
+  manifestAuthorizationStatus: ManifestAuthorizationStatus | "MISSING";
+  liveExecutionAuthorityStatus: LiveExecutionAuthorityStatus | "MISSING";
   executionAuthority: ExecutionLayerCertification["executionAuthority"];
 }
 
@@ -268,6 +275,7 @@ async function evaluateTrustManifestGate(
   config: AppConfig,
   args: {
     signedExecutionTrustManifest?: unknown;
+    traceStatus: ExecutionTraceStatus;
     block: RpcSnapshot;
     router: string;
     routerCodeHash: string | null;
@@ -277,7 +285,13 @@ async function evaluateTrustManifestGate(
   },
 ): Promise<TrustManifestGate> {
   if (args.signedExecutionTrustManifest === undefined) {
-    return { verification: null, comparison: null, executionAuthority: "MISSING" };
+    return {
+      verification: null,
+      comparison: null,
+      manifestAuthorizationStatus: "MISSING",
+      liveExecutionAuthorityStatus: "MISSING",
+      executionAuthority: "MISSING",
+    };
   }
   const {
     compareLiveExecutionGraphToApprovedManifest,
@@ -287,11 +301,54 @@ async function evaluateTrustManifestGate(
     pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
     keyRegistry: config.phiatTrustOperatorKeyRegistry,
     revocations: config.phiatTrustRevocations,
+    verificationScope: "MANIFEST_AUTHORIZATION",
     currentBlock: args.block.blockNumber,
     currentChainId: PULSECHAIN_CHAIN_ID,
   });
-  if (verification.executionAuthority !== "VALID") {
-    return { verification, comparison: null, executionAuthority: verification.executionAuthority };
+  if (verification.manifestAuthorizationStatus !== "VALID") {
+    return {
+      verification,
+      comparison: null,
+      manifestAuthorizationStatus: verification.manifestAuthorizationStatus,
+      liveExecutionAuthorityStatus: verification.liveExecutionAuthorityStatus,
+      executionAuthority: verification.executionAuthority,
+    };
+  }
+  if (verification.revocationStatus === "UNCONFIGURED") {
+    const exactVerification = verifySignedTrustManifest(args.signedExecutionTrustManifest, {
+      pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
+      keyRegistry: config.phiatTrustOperatorKeyRegistry,
+      revocations: config.phiatTrustRevocations,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      traceStatus: args.traceStatus === "PASSED" ? "PASSED" : traceStatusForManifest(args.traceStatus),
+      currentBlock: args.block.blockNumber,
+      currentChainId: PULSECHAIN_CHAIN_ID,
+    });
+    return {
+      verification: exactVerification,
+      comparison: null,
+      manifestAuthorizationStatus: exactVerification.manifestAuthorizationStatus,
+      liveExecutionAuthorityStatus: exactVerification.liveExecutionAuthorityStatus,
+      executionAuthority: exactVerification.executionAuthority,
+    };
+  }
+  if (args.traceStatus !== "PASSED") {
+    const traceUnavailableVerification = verifySignedTrustManifest(args.signedExecutionTrustManifest, {
+      pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
+      keyRegistry: config.phiatTrustOperatorKeyRegistry,
+      revocations: config.phiatTrustRevocations,
+      verificationScope: "EXACT_LIVE_GRAPH",
+      traceStatus: traceStatusForManifest(args.traceStatus),
+      currentBlock: args.block.blockNumber,
+      currentChainId: PULSECHAIN_CHAIN_ID,
+    });
+    return {
+      verification: traceUnavailableVerification,
+      comparison: null,
+      manifestAuthorizationStatus: traceUnavailableVerification.manifestAuthorizationStatus,
+      liveExecutionAuthorityStatus: traceUnavailableVerification.liveExecutionAuthorityStatus,
+      executionAuthority: traceUnavailableVerification.executionAuthority,
+    };
   }
   const liveGraph = liveGraphCallsForManifest(args.graph);
   const implementationRelationships = await readManifestImplementationRelationships(
@@ -322,11 +379,30 @@ async function evaluateTrustManifestGate(
     implementationRelationships,
     poolStates,
   };
+  const exactVerification = verifySignedTrustManifest(args.signedExecutionTrustManifest, {
+    pinnedPublicKeys: config.phiatTrustOperatorPublicKeys ?? {},
+    keyRegistry: config.phiatTrustOperatorKeyRegistry,
+    revocations: config.phiatTrustRevocations,
+    verificationScope: "EXACT_LIVE_GRAPH",
+    liveGraph,
+    liveChainState,
+    traceStatus: "PASSED",
+    currentBlock: args.block.blockNumber,
+    currentChainId: PULSECHAIN_CHAIN_ID,
+  });
   return {
-    verification,
-    comparison: compareLiveExecutionGraphToApprovedManifest(liveGraph, verification, liveChainState),
-    executionAuthority: verification.executionAuthority,
+    verification: exactVerification,
+    comparison: compareLiveExecutionGraphToApprovedManifest(liveGraph, exactVerification, liveChainState),
+    manifestAuthorizationStatus: exactVerification.manifestAuthorizationStatus,
+    liveExecutionAuthorityStatus: exactVerification.liveExecutionAuthorityStatus,
+    executionAuthority: exactVerification.executionAuthority,
   };
+}
+
+function traceStatusForManifest(
+  status: ExecutionTraceStatus,
+): "PASSED" | "UNSUPPORTED" | "STATE_INSUFFICIENT" | "FAILED" | "NOT_RUN" {
+  return status;
 }
 
 function liveGraphCallsForManifest(
@@ -485,6 +561,10 @@ function finalFailureCodesFor(baseFailureCodes: string[], manifestGate: TrustMan
   if (manifestGate.executionAuthority === "INVALID") codes.push("TRUST_MANIFEST_INVALID");
   if (manifestGate.executionAuthority === "EXPIRED") codes.push("TRUST_MANIFEST_EXPIRED");
   if (manifestGate.executionAuthority === "STATE_MISMATCH") codes.push("TRUST_MANIFEST_STATE_MISMATCH");
+  if (manifestGate.executionAuthority === "NOT_EVALUATED") codes.push("TRUST_MANIFEST_GRAPH_NOT_EVALUATED");
+  if (manifestGate.executionAuthority === "GRAPH_MISMATCH") codes.push("TRUST_MANIFEST_GRAPH_MISMATCH");
+  if (manifestGate.executionAuthority === "REVOCATION_UNAVAILABLE") codes.push("TRUST_MANIFEST_REVOCATION_REQUIRED");
+  if (manifestGate.executionAuthority === "TRACE_UNAVAILABLE") codes.push("TRUST_MANIFEST_TRACE_UNAVAILABLE");
   if (
     manifestGate.executionAuthority === "VALID" &&
     manifestGate.comparison?.automaticExecutionEligible !== true
@@ -1043,7 +1123,10 @@ function messageForFailureCode(code: string): string {
     TRUST_MANIFEST_INVALID: "Signed execution trust manifest is invalid or was not signed by a pinned operator key.",
     TRUST_MANIFEST_EXPIRED: "Signed execution trust manifest has expired.",
     TRUST_MANIFEST_STATE_MISMATCH: "Signed execution trust manifest does not match the required chain, router, manager, graph, or bundle state.",
+    TRUST_MANIFEST_GRAPH_NOT_EVALUATED: "Signed execution trust manifest authorization passed, but no exact live execution graph was evaluated.",
     TRUST_MANIFEST_GRAPH_MISMATCH: "Live execution graph does not exactly match the signed trust manifest constraints.",
+    TRUST_MANIFEST_REVOCATION_REQUIRED: "Execution authority requires a configured revocation registry; unconfigured revocation state fails closed.",
+    TRUST_MANIFEST_TRACE_UNAVAILABLE: "Signed execution trust manifest authorization passed, but the exact prepared transaction trace is unavailable.",
   };
   return messages[code] ?? code;
 }

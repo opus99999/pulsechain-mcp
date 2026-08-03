@@ -43,7 +43,7 @@ const postWrite = inspectOfflineTrustManifest({
   nowMs,
   currentBlock: args["current-block"] ?? null,
 });
-if (!postWrite.verification?.signatureValid || postWrite.verification.executionAuthority !== "VALID") {
+if (!postWrite.verification?.signatureValid || postWrite.verification.manifestAuthorizationStatus !== "VALID") {
   throw new Error(`POST_WRITE_VERIFICATION_FAILED:${postWrite.verification?.validationErrors.join(",") ?? "unknown"}`);
 }
 
@@ -53,6 +53,8 @@ process.stdout.write(JSON.stringify({
   manifestFingerprint: result.wrapper.manifestFingerprint,
   operatorPublicKeyId: result.wrapper.operatorPublicKeyId,
   signatureValid: result.verification.signatureValid,
+  manifestAuthorizationStatus: result.verification.manifestAuthorizationStatus,
+  liveExecutionAuthorityStatus: result.verification.liveExecutionAuthorityStatus,
   executionAuthority: result.verification.executionAuthority,
 }, null, 2) + "\n");
 

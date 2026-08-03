@@ -6,7 +6,7 @@ an agent wallet directory.
 
 ## Threat Model
 
-The trust manifest is an approval artifact for a narrow execution graph. A
+The trust manifest is an approval artifact for a narrow historical execution graph. A
 compromised MCP process, modified manifest, reordered authority set, replayed
 manifest, altered signature frame, stale router, stale manager, or changed pool
 state must not gain authority. The offline signer limits the online MCP process
@@ -91,6 +91,68 @@ with the reviewed public-key ID before exporting a frame.
 The candidate is not an approval. It has no execution authority without a valid
 operator signature and a matching live execution graph.
 
+## Authority Model
+
+External signature proves only operator approval of the manifest bytes. It does
+not prove that any particular current swap still matches that manifest.
+
+The verifier reports separate layers:
+
+- `manifestAuthorizationStatus`: validity of the signed manifest itself
+  (`VALID`, `INVALID`, `EXPIRED`, `REVOKED`, `KEY_INVALID`, or
+  `STATE_MISMATCH`).
+- `liveExecutionAuthorityStatus`: authority for one exact current unsigned
+  transaction and live call graph (`VALID`, `INVALID`, `NOT_EVALUATED`,
+  `GRAPH_MISMATCH`, `STATE_MISMATCH`, `REVOCATION_UNAVAILABLE`, or
+  `TRACE_UNAVAILABLE`).
+- `executionAuthority`: a compatibility field derived from
+  `liveExecutionAuthorityStatus`, not from signature validity alone.
+
+The offline inspector has no exact current transaction graph. Its normal result
+for a valid signed wrapper is:
+
+- `verificationScope=MANIFEST_AUTHORIZATION`
+- `manifestAuthorizationStatus=VALID`
+- `liveExecutionAuthorityStatus=NOT_EVALUATED`
+- `executionAuthority=NOT_EVALUATED`
+- `automaticExecutionEligible=false`
+
+Only `phiat_shadow_buy` may produce `liveExecutionAuthorityStatus=VALID`, and
+only after it independently reverifies the signed manifest, confirms configured
+clear revocation state, confirms current chain/router/manager state, obtains a
+fresh exact transaction trace, and compares the exact live graph to the
+manifest. Even then, this layer remains read-only and cannot sign or broadcast.
+
+Revocation data is mandatory for live execution authority. If no revocation
+registry is configured, the manifest may still report
+`manifestAuthorizationStatus=VALID`, but live authority fails closed with
+`liveExecutionAuthorityStatus=REVOCATION_UNAVAILABLE`,
+`REVOCATION_REGISTRY_REQUIRED`, and `automaticExecutionEligible=false`.
+
+Verification scopes:
+
+- `SIGNATURE_ONLY`: parse, canonicalize, and verify the detached signature and
+  key binding.
+- `MANIFEST_AUTHORIZATION`: default offline scope for signed-manifest
+  authorization.
+- `CHAIN_STATE`: signed-manifest authorization plus chain/router/manager
+  binding checks where available.
+- `EXACT_LIVE_GRAPH`: one current unsigned transaction trace compared to the
+  signed manifest; this is the only scope that can produce live execution
+  authority.
+
+Status matrix:
+
+| Case | Expected result |
+| --- | --- |
+| Signature valid, revocation configured and clear, chain state matches, graph not evaluated | `manifestAuthorizationStatus=VALID`, `liveExecutionAuthorityStatus=NOT_EVALUATED`, `executionAuthority=NOT_EVALUATED`, `automaticExecutionEligible=false` |
+| Signature valid, revocation unconfigured, chain state matches, graph matches | `manifestAuthorizationStatus=VALID`, `liveExecutionAuthorityStatus=REVOCATION_UNAVAILABLE`, `executionAuthority` not `VALID`, `automaticExecutionEligible=false` |
+| Signature valid, revocation clear, chain state matches, graph matches exactly | `manifestAuthorizationStatus=VALID`, `liveExecutionAuthorityStatus=VALID`, `executionAuthority=VALID`; automatic execution may be true only if all other shadow-buy gates pass |
+| Signature invalid | `manifestAuthorizationStatus=INVALID`, `liveExecutionAuthorityStatus=INVALID`, `automaticExecutionEligible=false` |
+| Manifest expired or revoked | `manifestAuthorizationStatus=EXPIRED` or `REVOKED`, `liveExecutionAuthorityStatus=INVALID`, `automaticExecutionEligible=false` |
+| Router or manager changed | authorization or chain-state status reports `STATE_MISMATCH`, `liveExecutionAuthorityStatus=STATE_MISMATCH`, `automaticExecutionEligible=false` |
+| Unexpected live graph target, selector, or edge | `liveExecutionAuthorityStatus=GRAPH_MISMATCH`, `automaticExecutionEligible=false` |
+
 ## Review Procedure
 
 Before signing, review:
@@ -173,12 +235,13 @@ the wrapper only if verification passes, and verifies the written wrapper again.
 ## MCP Verification
 
 The MCP verifier independently recomputes canonical bytes, manifest ID,
-fingerprint, key ID, and signature frame. It does not trust the assembler result
-or any raw approval boolean.
+fingerprint, key ID, and signature frame. It does not trust the assembler result,
+a previous verifier result, or any raw approval boolean.
 
-`phiat_shadow_buy` remains read-only. A valid signed manifest only allows the
-shadow certificate to mark the exact live graph eligible for a later separate
-execution layer when all live graph checks pass.
+`phiat_shadow_buy` remains read-only. It treats signed-manifest authorization and
+live transaction authority as separate statuses. A valid signed manifest alone
+never grants live execution authority; a fresh exact live graph comparison is
+required.
 
 ## Revocation
 

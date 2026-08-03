@@ -108,6 +108,7 @@ export function assembleOfflineSignedWrapper(args: {
   };
   const verification = verifySignedTrustManifest(wrapper, {
     pinnedPublicKeys: { [operatorPublicKeyId]: spkiDerBase64 },
+    verificationScope: "MANIFEST_AUTHORIZATION",
     nowMs: args.nowMs,
     currentBlock: args.currentBlock ?? null,
   });
@@ -118,7 +119,7 @@ export function assembleOfflineSignedWrapper(args: {
     verification.canonicalizationStatus !== "PASSED" ||
     verification.keyStatus !== "PASSED" ||
     verification.temporalStatus === "FAILED" ||
-    verification.executionAuthority !== "VALID"
+    verification.manifestAuthorizationStatus !== "VALID"
   ) {
     throw new Error(`SIGNED_WRAPPER_VERIFICATION_FAILED:${verification.validationErrors.join(",")}`);
   }
@@ -148,7 +149,9 @@ export function inspectOfflineTrustManifest(args: {
         `manifestFingerprint=${prepared.manifestFingerprint}`,
         `operatorPublicKeyId=${prepared.manifest.operatorPublicKeyId}`,
         `signatureRequired=true`,
-        `executionAuthority=INVALID`,
+        `manifestAuthorizationStatus=INVALID`,
+        `liveExecutionAuthorityStatus=NOT_EVALUATED`,
+        `executionAuthority=NOT_EVALUATED`,
         `automaticExecutionEligible=false`,
       ].join("\n"),
     };
@@ -157,6 +160,7 @@ export function inspectOfflineTrustManifest(args: {
   const keyId = publicDer ? publicKeyIdFromSpkiDer(publicDer) : "public-key-required";
   const verification = verifySignedTrustManifest(parsed, {
     pinnedPublicKeys: publicDer ? { [keyId]: publicDer.toString("base64") } : {},
+    verificationScope: "MANIFEST_AUTHORIZATION",
     nowMs: args.nowMs,
     currentBlock: args.currentBlock ?? null,
   });
@@ -166,6 +170,9 @@ export function inspectOfflineTrustManifest(args: {
     report: [
       `kind=SIGNED`,
       `manifestFingerprint=${verification.manifestFingerprint ?? "unknown"}`,
+      `verificationScope=${verification.verificationScope}`,
+      `manifestAuthorizationStatus=${verification.manifestAuthorizationStatus}`,
+      `liveExecutionAuthorityStatus=${verification.liveExecutionAuthorityStatus}`,
       `cryptographicStatus=${verification.cryptographicStatus}`,
       `schemaStatus=${verification.schemaStatus}`,
       `canonicalizationStatus=${verification.canonicalizationStatus}`,
