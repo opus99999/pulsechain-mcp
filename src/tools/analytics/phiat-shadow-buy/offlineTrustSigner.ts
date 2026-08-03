@@ -284,7 +284,7 @@ function renderOfflineAuthorityReview(manifest: TrustManifest, manifestFingerpri
       `- Caller constraints: ${JSON.stringify(record.callerConstraints)}`,
       `- Factory constraints: ${record.factoryConstraints ? JSON.stringify(record.factoryConstraints) : "none"}`,
       `- Token constraints: ${record.tokenConstraints ? JSON.stringify(record.tokenConstraints) : "none"}`,
-      `- Delegatecall context: ${record.delegatecallContext ? JSON.stringify(record.delegatecallContext) : "none"}`,
+      `- Delegatecall contexts: ${record.delegatecallContexts.length > 0 ? JSON.stringify(record.delegatecallContexts) : "none"}`,
       `- Manager hash constraint: ${record.managerHashConstraint ?? "none"}`,
       `- Router hash constraint: ${record.routerHashConstraint ?? "none"}`,
       `- First approved block: ${record.firstApprovedBlock}`,

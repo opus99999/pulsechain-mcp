@@ -59,7 +59,7 @@ function record(): TrustManifestRecord {
     tokenConstraints: null,
     managerHashConstraint: MANAGER_HASH,
     routerHashConstraint: ROUTER_HASH,
-    delegatecallContext: null,
+    delegatecallContexts: [],
     firstApprovedBlock: HISTORICAL_BLOCK,
     expiresAtBlock: null,
     residualRisks: [],
@@ -319,6 +319,7 @@ describe("offline PHIAT trust-manifest signing ceremony", () => {
       "scripts/phiat-trust-inspect-manifest.mjs",
       "scripts/phiat-trust-public-key-info.mjs",
       "scripts/phiat-trust-revocation-entry.mjs",
+      "src/tools/analytics/phiat-shadow-buy/executionTrustManifest.ts",
       "src/tools/analytics/phiat-shadow-buy/offlineTrustSigner.ts",
     ];
     const forbidden = [

@@ -110,8 +110,12 @@ export interface TrustManifestTokenConstraint {
 
 export interface TrustManifestDelegatecallContext {
   parentAddress: string;
+  parentCodeHash: string | null;
   callerAddress: string;
-  allowedSelectors: string[];
+  callType: string;
+  targetAddress: string;
+  targetCodeHash: string | null;
+  selectors: string[];
 }
 
 export interface TrustManifestRecord {
@@ -128,7 +132,7 @@ export interface TrustManifestRecord {
   tokenConstraints: TrustManifestTokenConstraint | null;
   managerHashConstraint: string | null;
   routerHashConstraint: string | null;
-  delegatecallContext: TrustManifestDelegatecallContext | null;
+  delegatecallContexts: TrustManifestDelegatecallContext[];
   firstApprovedBlock: string;
   expiresAtBlock: string | null;
   residualRisks: string[];
@@ -313,13 +317,15 @@ interface BuildTrustManifestCandidateArgs {
   operatorPublicKeyId?: string;
 }
 
-interface TrustManifestCandidateResult {
+interface TrustManifestCandidateSuccess {
+  candidateGenerationStatus: "PASSED";
   manifest: TrustManifest;
   manifestFingerprint: string;
   unresolvedRecords: TrustManifestRecord[];
   residualRisks: string[];
   operatorSignatureRequired: true;
   automaticExecutionEligible: false;
+  validationErrors: [];
   canonicalization: typeof TRUST_MANIFEST_CANONICALIZATION;
   canonicalizationProfile: TrustManifestCanonicalizationProfile;
   signaturePayload: {
@@ -331,13 +337,30 @@ interface TrustManifestCandidateResult {
   reviewReport: string;
 }
 
+interface TrustManifestCandidateFailure {
+  candidateGenerationStatus: "FAILED";
+  manifest: null;
+  manifestFingerprint: null;
+  unresolvedRecords: [];
+  residualRisks: string[];
+  operatorSignatureRequired: true;
+  automaticExecutionEligible: false;
+  validationErrors: string[];
+  invalidField: string | null;
+  canonicalization: typeof TRUST_MANIFEST_CANONICALIZATION;
+  canonicalizationProfile: TrustManifestCanonicalizationProfile;
+  signaturePayload: null;
+  reviewReport: string;
+}
+
+type TrustManifestCandidateResult = TrustManifestCandidateSuccess | TrustManifestCandidateFailure;
+
 interface ClosedRecordOverride {
   role: ExecutionTargetClassification;
   approvedSelectors: string[];
   allowedCallTypes?: string[];
   factoryConstraints?: TrustManifestFactoryConstraint | null;
   tokenConstraints?: TrustManifestTokenConstraint | null;
-  delegatecallContext?: TrustManifestDelegatecallContext | null;
   residualRisks?: string[];
 }
 
@@ -346,11 +369,6 @@ const CLOSED_RECORD_OVERRIDES: Record<string, ClosedRecordOverride> = {
     role: "PROTOCOL_LIBRARY",
     approvedSelectors: ["0x4e6c8ed8", "0x8bdb1925"],
     allowedCallTypes: ["DELEGATECALL"],
-    delegatecallContext: {
-      parentAddress: SMART_ROUTER,
-      callerAddress: SMART_ROUTER,
-      allowedSelectors: ["0x4e6c8ed8", "0x8bdb1925"],
-    },
     residualRisks: [
       "Approval is valid only as a SmartRouter delegatecall library, never as a global address approval.",
     ],
@@ -638,35 +656,196 @@ export function extractUnsignedTrustManifest(input: unknown): {
 
 export function normalizeTrustManifestSemanticSets(manifest: TrustManifest): TrustManifest {
   const normalized = structuredClone(manifest) as TrustManifest;
-  normalized.records = normalized.records
-    .map((record) => ({
-      ...record,
-      approvedSelectors: [...record.approvedSelectors].sort(lexCompare),
-      allowedCallTypes: [...record.allowedCallTypes].sort(lexCompare),
-      parentConstraints: [...record.parentConstraints].sort((a, b) =>
-        lexCompare(parentConstraintKey(a), parentConstraintKey(b)),
-      ),
-      callerConstraints: [...record.callerConstraints].sort((a, b) =>
-        lexCompare(callerConstraintKey(a), callerConstraintKey(b)),
-      ),
-      tokenConstraints: record.tokenConstraints
-        ? { ...record.tokenConstraints, assets: [...record.tokenConstraints.assets].sort(lexCompare) }
-        : null,
-      delegatecallContext: record.delegatecallContext
-        ? {
-            ...record.delegatecallContext,
-            allowedSelectors: [...record.delegatecallContext.allowedSelectors].sort(lexCompare),
-          }
-        : null,
-      residualRisks: [...record.residualRisks].sort(lexCompare),
-    }))
+  normalized.records = mergeGeneratedRecords(normalized.records.map(normalizeGeneratedRecord))
     .sort((a, b) => lexCompare(recordSortKey(a), recordSortKey(b)));
-  normalized.allowedEdges = [...normalized.allowedEdges].sort((a, b) => lexCompare(edgeKey(a), edgeKey(b)));
+  normalized.allowedEdges = uniqueBy(
+    normalized.allowedEdges.map(normalizeGeneratedEdge),
+    edgeKey,
+  ).sort((a, b) => lexCompare(edgeKey(a), edgeKey(b)));
   normalized.prohibitedOperations = [...normalized.prohibitedOperations].sort((a, b) =>
     lexCompare(prohibitedOperationSortKey(a), prohibitedOperationSortKey(b)),
   ) as TrustManifest["prohibitedOperations"];
   normalized.manifestId = manifestIdFor(normalized);
   return normalized;
+}
+
+function normalizeGeneratedRecord(record: TrustManifestRecord): TrustManifestRecord {
+  return {
+    ...record,
+    address: record.address.toLowerCase(),
+    runtimeCodeHash: lower(record.runtimeCodeHash),
+    implementationAddress: lower(record.implementationAddress),
+    implementationCodeHash: lower(record.implementationCodeHash),
+    approvedSelectors: uniqueSorted(record.approvedSelectors.map((value) => value.toLowerCase())),
+    allowedCallTypes: uniqueSorted(record.allowedCallTypes.map((value) => value.toUpperCase())),
+    parentConstraints: uniqueBy(
+      record.parentConstraints.map((constraint) => ({
+        parentAddress: lower(constraint.parentAddress),
+        parentRole: constraint.parentRole,
+      })),
+      parentConstraintKey,
+    ).sort((a, b) => lexCompare(parentConstraintKey(a), parentConstraintKey(b))),
+    callerConstraints: uniqueBy(
+      record.callerConstraints.map((constraint) => ({
+        caller: lower(constraint.caller),
+        selector: lower(constraint.selector),
+        callType: constraint.callType.toUpperCase(),
+      })),
+      callerConstraintKey,
+    ).sort((a, b) => lexCompare(callerConstraintKey(a), callerConstraintKey(b))),
+    factoryConstraints: normalizeFactoryConstraint(record.factoryConstraints),
+    tokenConstraints: normalizeTokenConstraint(record.tokenConstraints),
+    managerHashConstraint: lower(record.managerHashConstraint),
+    routerHashConstraint: lower(record.routerHashConstraint),
+    delegatecallContexts: mergeDelegatecallContexts(record.delegatecallContexts),
+    residualRisks: uniqueSorted(record.residualRisks),
+  };
+}
+
+function normalizeGeneratedEdge(edge: TrustManifestEdge): TrustManifestEdge {
+  return {
+    ...edge,
+    fromAddress: lower(edge.fromAddress),
+    toAddress: edge.toAddress.toLowerCase(),
+    callType: edge.callType.toUpperCase(),
+    selector: lower(edge.selector),
+  };
+}
+
+function mergeGeneratedRecords(records: TrustManifestRecord[]): TrustManifestRecord[] {
+  const byAddress = new Map<string, TrustManifestRecord>();
+  for (const record of records) {
+    const existing = byAddress.get(record.address);
+    if (!existing) {
+      byAddress.set(record.address, structuredClone(record) as TrustManifestRecord);
+      continue;
+    }
+    const conflicts = recordMergeConflicts(existing, record);
+    if (conflicts.length > 0) {
+      throw new Error(conflicts.join(","));
+    }
+    existing.approvedSelectors = uniqueSorted([...existing.approvedSelectors, ...record.approvedSelectors]);
+    existing.allowedCallTypes = uniqueSorted([...existing.allowedCallTypes, ...record.allowedCallTypes]);
+    existing.parentConstraints = uniqueBy(
+      [...existing.parentConstraints, ...record.parentConstraints],
+      parentConstraintKey,
+    ).sort((a, b) => lexCompare(parentConstraintKey(a), parentConstraintKey(b)));
+    existing.callerConstraints = uniqueBy(
+      [...existing.callerConstraints, ...record.callerConstraints],
+      callerConstraintKey,
+    ).sort((a, b) => lexCompare(callerConstraintKey(a), callerConstraintKey(b)));
+    existing.delegatecallContexts = mergeDelegatecallContexts([
+      ...existing.delegatecallContexts,
+      ...record.delegatecallContexts,
+    ]);
+    existing.residualRisks = uniqueSorted([...existing.residualRisks, ...record.residualRisks]);
+  }
+  return [...byAddress.values()];
+}
+
+function recordMergeConflicts(a: TrustManifestRecord, b: TrustManifestRecord): string[] {
+  const errors: string[] = [];
+  if (a.role !== b.role) errors.push(`RECORD_CONFLICT_ROLE:${a.address}`);
+  if (a.runtimeCodeHash !== b.runtimeCodeHash) errors.push(`RECORD_CONFLICT_RUNTIME_CODE_HASH:${a.address}`);
+  if (a.implementationAddress !== b.implementationAddress) {
+    errors.push(`RECORD_CONFLICT_IMPLEMENTATION_ADDRESS:${a.address}`);
+  }
+  if (a.implementationCodeHash !== b.implementationCodeHash) {
+    errors.push(`RECORD_CONFLICT_IMPLEMENTATION_CODE_HASH:${a.address}`);
+  }
+  if (JSON.stringify(a.factoryConstraints) !== JSON.stringify(b.factoryConstraints)) {
+    errors.push(`RECORD_CONFLICT_FACTORY_CONSTRAINTS:${a.address}`);
+  }
+  if (JSON.stringify(a.tokenConstraints) !== JSON.stringify(b.tokenConstraints)) {
+    errors.push(`RECORD_CONFLICT_TOKEN_CONSTRAINTS:${a.address}`);
+  }
+  if (a.managerHashConstraint !== b.managerHashConstraint) {
+    errors.push(`RECORD_CONFLICT_MANAGER_HASH_CONSTRAINT:${a.address}`);
+  }
+  if (a.routerHashConstraint !== b.routerHashConstraint) {
+    errors.push(`RECORD_CONFLICT_ROUTER_HASH_CONSTRAINT:${a.address}`);
+  }
+  if (a.firstApprovedBlock !== b.firstApprovedBlock) {
+    errors.push(`RECORD_CONFLICT_FIRST_APPROVED_BLOCK:${a.address}`);
+  }
+  if (a.expiresAtBlock !== b.expiresAtBlock) {
+    errors.push(`RECORD_CONFLICT_EXPIRES_AT_BLOCK:${a.address}`);
+  }
+  return errors;
+}
+
+function normalizeFactoryConstraint(
+  constraint: TrustManifestFactoryConstraint | null,
+): TrustManifestFactoryConstraint | null {
+  if (!constraint) return null;
+  const normalized: TrustManifestFactoryConstraint = {
+    factoryAddress: lower(constraint.factoryAddress),
+    factoryCodeHash: lower(constraint.factoryCodeHash),
+    protocol: constraint.protocol,
+  };
+  if (constraint.poolAddress !== undefined) {
+    normalized.poolAddress = lower(constraint.poolAddress);
+  }
+  if (constraint.fee !== undefined) {
+    normalized.fee = constraint.fee;
+  }
+  if (constraint.tickSpacing !== undefined) {
+    normalized.tickSpacing = constraint.tickSpacing;
+  }
+  return normalized;
+}
+
+function normalizeTokenConstraint(
+  constraint: TrustManifestTokenConstraint | null,
+): TrustManifestTokenConstraint | null {
+  if (!constraint) return null;
+  return {
+    ...constraint,
+    token0: lower(constraint.token0),
+    token1: lower(constraint.token1),
+    assets: uniqueSorted(constraint.assets.map((value) => value.toLowerCase())),
+  };
+}
+
+function mergeDelegatecallContexts(
+  contexts: TrustManifestDelegatecallContext[],
+): TrustManifestDelegatecallContext[] {
+  const byKey = new Map<string, TrustManifestDelegatecallContext>();
+  for (const context of contexts) {
+    const normalized: TrustManifestDelegatecallContext = {
+      parentAddress: context.parentAddress.toLowerCase(),
+      parentCodeHash: lower(context.parentCodeHash),
+      callerAddress: context.callerAddress.toLowerCase(),
+      callType: context.callType.toUpperCase(),
+      targetAddress: context.targetAddress.toLowerCase(),
+      targetCodeHash: lower(context.targetCodeHash),
+      selectors: uniqueSorted(context.selectors.map((selector) => selector.toLowerCase())),
+    };
+    const key = delegatecallContextKey(normalized);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, normalized);
+    } else {
+      existing.selectors = uniqueSorted([...existing.selectors, ...normalized.selectors]);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => lexCompare(delegatecallContextKey(a), delegatecallContextKey(b)));
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return uniqueStrings(values).sort(lexCompare);
+}
+
+function uniqueBy<T>(values: T[], keyFn: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const value of values) {
+    const key = keyFn(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
 }
 
 export function prepareCanonicalTrustManifest(input: unknown): {
@@ -681,12 +860,7 @@ export function prepareCanonicalTrustManifest(input: unknown): {
 } {
   const extracted = extractUnsignedTrustManifest(input);
   if (!extracted.ok) return extracted;
-  let manifest: TrustManifest;
-  try {
-    manifest = normalizeTrustManifestSemanticSets(extracted.manifest);
-  } catch {
-    return { ok: false, errors: ["MANIFEST_NORMALIZATION_FAILED"] };
-  }
+  const manifest = extracted.manifest;
   const errors = trustManifestSchemaErrors(manifest);
   if (errors.length > 0) return { ok: false, errors };
   try {
@@ -733,13 +907,12 @@ export function buildTrustManifestCandidateFromReport(
   const expiresAt = args.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const expiresAtBlock = args.expiresAtBlock ?? null;
   const closed = isClosedHistoricalReport(report);
+  const sourceRecordConflicts = candidateRecordConflictErrors(report.candidateRecords);
+  if (sourceRecordConflicts.length > 0) return internalCandidateFailure(sourceRecordConflicts);
   const records = report.candidateRecords
     .filter((record) => record.role !== "EOA" && record.role !== "PRECOMPILE")
-    .map((record) => manifestRecordFromCandidate(report, record.normalizedAddress, closed, expiresAtBlock))
+    .map((record) => manifestRecordFromCandidate(report, record, closed, expiresAtBlock))
     .sort((a, b) => lexCompare(recordSortKey(a), recordSortKey(b)));
-  const unresolvedRecords = records.filter((record) =>
-    closed ? false : record.residualRisks.some((risk) => risk.startsWith("unresolved:")),
-  );
   const layout = deriveSwapManagerStorageLayout();
   const manifestWithoutId: Omit<TrustManifest, "manifestId"> = {
     version: "phiat-execution-trust-v1",
@@ -779,25 +952,88 @@ export function buildTrustManifestCandidateFromReport(
     operatorPublicKeyId: args.operatorPublicKeyId ?? "operator-key-id-required",
   };
   const manifestId = manifestIdFor(manifestWithoutId);
-  const manifest: TrustManifest = { manifestId, ...manifestWithoutId };
-  const fp = manifestFingerprint(manifest);
-  const residualRisks = uniqueStrings(records.flatMap((record) => record.residualRisks));
+  const unvalidatedManifest: TrustManifest = { manifestId, ...manifestWithoutId };
+  let manifest: TrustManifest;
+  try {
+    manifest = normalizeTrustManifestSemanticSets(unvalidatedManifest);
+  } catch (error) {
+    return internalCandidateFailure(
+      error instanceof Error ? error.message.split(",") : ["MANIFEST_NORMALIZATION_FAILED"],
+    );
+  }
+  const prepared = prepareCanonicalTrustManifest(manifest);
+  if (!prepared.ok) return internalCandidateFailure(prepared.errors);
+  const residualRisks = uniqueStrings(prepared.manifest.records.flatMap((record) => record.residualRisks));
   return {
-    manifest,
-    manifestFingerprint: fp,
-    unresolvedRecords,
+    candidateGenerationStatus: "PASSED",
+    manifest: prepared.manifest,
+    manifestFingerprint: prepared.manifestFingerprint,
+    unresolvedRecords: prepared.manifest.records.filter((record) =>
+      closed ? false : record.residualRisks.some((risk) => risk.startsWith("unresolved:")),
+    ),
     residualRisks,
     operatorSignatureRequired: true,
     automaticExecutionEligible: false,
+    validationErrors: [],
     canonicalization: TRUST_MANIFEST_CANONICALIZATION,
     canonicalizationProfile: canonicalizationProfile(),
     signaturePayload: {
       domainSeparator: TRUST_MANIFEST_DOMAIN_SEPARATOR,
-      manifestFingerprint: fp,
+      manifestFingerprint: prepared.manifestFingerprint,
       signatureAlgorithm: TRUST_MANIFEST_SIGNATURE_ALGORITHM,
-      signatureFrame: signatureFrameSpecification(manifest),
+      signatureFrame: signatureFrameSpecification(prepared.manifest),
     },
-    reviewReport: renderTrustManifestReview(manifest, residualRisks),
+    reviewReport: renderTrustManifestReview(prepared.manifest, residualRisks),
+  };
+}
+
+function candidateRecordConflictErrors(
+  records: ExecutionTrustReport["candidateRecords"],
+): string[] {
+  const errors: string[] = [];
+  const byAddress = new Map<string, ExecutionTrustReport["candidateRecords"][number]>();
+  for (const record of records) {
+    const address = record.normalizedAddress.toLowerCase();
+    const existing = byAddress.get(address);
+    if (!existing) {
+      byAddress.set(address, record);
+      continue;
+    }
+    if (existing.role !== record.role) errors.push(`RECORD_CONFLICT_ROLE:${address}`);
+    if (lower(existing.runtimeCodeHash) !== lower(record.runtimeCodeHash)) {
+      errors.push(`RECORD_CONFLICT_RUNTIME_CODE_HASH:${address}`);
+    }
+    if (lower(existing.implementationAddress) !== lower(record.implementationAddress)) {
+      errors.push(`RECORD_CONFLICT_IMPLEMENTATION_ADDRESS:${address}`);
+    }
+    if (lower(existing.implementationCodeHash) !== lower(record.implementationCodeHash)) {
+      errors.push(`RECORD_CONFLICT_IMPLEMENTATION_CODE_HASH:${address}`);
+    }
+  }
+  return uniqueStrings(errors).sort();
+}
+
+function internalCandidateFailure(errors: string[]): TrustManifestCandidateFailure {
+  const validationErrors = uniqueStrings(errors).sort();
+  return {
+    candidateGenerationStatus: "FAILED",
+    manifest: null,
+    manifestFingerprint: null,
+    unresolvedRecords: [],
+    residualRisks: validationErrors,
+    operatorSignatureRequired: true,
+    automaticExecutionEligible: false,
+    validationErrors,
+    invalidField: validationErrors[0] ?? null,
+    canonicalization: TRUST_MANIFEST_CANONICALIZATION,
+    canonicalizationProfile: canonicalizationProfile(),
+    signaturePayload: null,
+    reviewReport: [
+      "PHIAT execution trust manifest candidate generation failed",
+      `automaticExecutionEligible=false`,
+      `operatorSignatureRequired=true`,
+      `validationErrors=${validationErrors.join(",") || "none"}`,
+    ].join("\n"),
   };
 }
 
@@ -1046,7 +1282,9 @@ export function compareLiveExecutionGraphToApprovedManifest(
     }
     if (!parentConstraintMatches(record, call)) failureCodes.push("PARENT_CONSTRAINT_MISMATCH");
     if (!callerConstraintMatches(record, call)) failureCodes.push("CALLER_CONSTRAINT_MISMATCH");
-    if (!delegatecallContextMatches(record, call)) failureCodes.push("DELEGATECALL_CONTEXT_MISMATCH");
+    if (!delegatecallContextMatches(record, call, manifest, liveChainState)) {
+      failureCodes.push("DELEGATECALL_CONTEXT_MISMATCH");
+    }
     if (!implementationRelationshipMatches(record, call, liveChainState)) {
       failureCodes.push("IMPLEMENTATION_MISMATCH");
     }
@@ -1166,12 +1404,11 @@ async function readCurrentBlockForManifestVerifier(config: AppConfig): Promise<s
 
 function manifestRecordFromCandidate(
   report: ExecutionTrustReport,
-  address: string,
+  record: ExecutionTrustReport["candidateRecords"][number],
   closed: boolean,
   expiresAtBlock: string | null,
 ): TrustManifestRecord {
-  const record = report.candidateRecords.find((candidate) => candidate.normalizedAddress === address);
-  if (!record) throw new Error(`Missing trust record ${address}`);
+  const address = record.normalizedAddress.toLowerCase();
   const override = closed ? CLOSED_RECORD_OVERRIDES[address] : undefined;
   const observedSelectors = uniqueStrings(record.observedSelectors.map((value) => value.toLowerCase())).sort();
   const parentConstraints = record.parentConstraints.map((constraint) => ({
@@ -1204,7 +1441,7 @@ function manifestRecordFromCandidate(
     tokenConstraints: override?.tokenConstraints ?? tokenConstraintFromRecord(record),
     managerHashConstraint: record.managerCodeHashConstraint?.toLowerCase() ?? null,
     routerHashConstraint: CURRENT_ROUTER_HASH,
-    delegatecallContext: delegatecallContextFor(address, override, callerConstraints),
+    delegatecallContexts: delegatecallContextsFor(report, address, callerConstraints),
     firstApprovedBlock: report.historicalBlock,
     expiresAtBlock,
     residualRisks: residualRisks(record.unresolvedReasons, override),
@@ -1235,24 +1472,45 @@ function tokenConstraintFromRecord(record: ExecutionTrustReport["candidateRecord
   };
 }
 
-function delegatecallContextFor(
+function delegatecallContextsFor(
+  report: ExecutionTrustReport,
   address: string,
-  override: ClosedRecordOverride | undefined,
   callerConstraints: TrustManifestCallerConstraint[],
-): TrustManifestDelegatecallContext | null {
-  if (override?.delegatecallContext) return override.delegatecallContext;
-  if (!sameAddress(address, TOKEN_IMPLEMENTATION_539A)) return null;
-  const delegatecall = callerConstraints.find((constraint) => constraint.callType === "DELEGATECALL");
-  return delegatecall?.caller
-    ? {
-        parentAddress: delegatecall.caller,
-        callerAddress: delegatecall.caller,
-        allowedSelectors: callerConstraints
-          .filter((constraint) => constraint.callType === "DELEGATECALL" && constraint.selector)
-          .map((constraint) => constraint.selector!.toLowerCase())
-          .sort(),
-      }
-    : null;
+): TrustManifestDelegatecallContext[] {
+  const contexts = report.normalizedCalls
+    .filter((call) =>
+      call.to &&
+      sameAddress(call.to, address) &&
+      call.callType.toUpperCase() === "DELEGATECALL" &&
+      call.from,
+    )
+    .map((call) => {
+      const parentAddress = (call.parentAddress ?? call.from)!.toLowerCase();
+      const parentRecord = report.candidateRecords.find((candidate) =>
+        sameAddress(candidate.normalizedAddress, parentAddress),
+      );
+      return {
+        parentAddress,
+        parentCodeHash: parentRecord?.runtimeCodeHash?.toLowerCase() ?? null,
+        callerAddress: call.from!.toLowerCase(),
+        callType: "DELEGATECALL",
+        targetAddress: address.toLowerCase(),
+        targetCodeHash: call.runtimeCodeHash?.toLowerCase() ?? null,
+        selectors: call.selector ? [call.selector.toLowerCase()] : [],
+      };
+    });
+  if (contexts.length > 0) return mergeDelegatecallContexts(contexts);
+  return mergeDelegatecallContexts(callerConstraints
+    .filter((constraint) => constraint.callType === "DELEGATECALL" && constraint.caller)
+    .map((constraint) => ({
+      parentAddress: constraint.caller!,
+      parentCodeHash: null,
+      callerAddress: constraint.caller!,
+      callType: "DELEGATECALL",
+      targetAddress: address.toLowerCase(),
+      targetCodeHash: null,
+      selectors: constraint.selector ? [constraint.selector.toLowerCase()] : [],
+    })));
 }
 
 function residualRisks(unresolvedReasons: string[], override: ClosedRecordOverride | undefined): string[] {
@@ -1318,6 +1576,9 @@ function renderTrustManifestReview(manifest: TrustManifest, residualRisks: strin
     }
     if (record.callerConstraints.length > 0) {
       lines.push(`  callers=${JSON.stringify(record.callerConstraints)}`);
+    }
+    if (record.delegatecallContexts.length > 0) {
+      lines.push(`  delegatecallContexts=${JSON.stringify(record.delegatecallContexts)}`);
     }
     if (record.factoryConstraints) lines.push(`  factory=${JSON.stringify(record.factoryConstraints)}`);
     if (record.tokenConstraints) lines.push(`  tokens=${JSON.stringify(record.tokenConstraints)}`);
@@ -1968,7 +2229,7 @@ function recordErrors(record: TrustManifestRecord): string[] {
     "tokenConstraints",
     "managerHashConstraint",
     "routerHashConstraint",
-    "delegatecallContext",
+    "delegatecallContexts",
     "firstApprovedBlock",
     "expiresAtBlock",
     "residualRisks",
@@ -1990,32 +2251,40 @@ function recordErrors(record: TrustManifestRecord): string[] {
   if (!Array.isArray(record.allowedCallTypes)) errors.push("BAD_CALL_TYPE_LIST");
   if (!Array.isArray(record.parentConstraints)) errors.push("BAD_PARENT_CONSTRAINTS");
   if (!Array.isArray(record.callerConstraints)) errors.push("BAD_CALLER_CONSTRAINTS");
+  if (!Array.isArray(record.delegatecallContexts)) errors.push("BAD_DELEGATECALL_CONTEXTS");
   if (!Array.isArray(record.residualRisks)) errors.push("BAD_RESIDUAL_RISKS");
   if (errors.length > 0) return errors;
   errors.push(...arrayOrderAndDuplicateErrors("APPROVED_SELECTORS", record.approvedSelectors, (value) => value));
   errors.push(...arrayOrderAndDuplicateErrors("ALLOWED_CALL_TYPES", record.allowedCallTypes, (value) => value));
   errors.push(...arrayOrderAndDuplicateErrors("PARENT_CONSTRAINTS", record.parentConstraints, parentConstraintKey));
   errors.push(...arrayOrderAndDuplicateErrors("CALLER_CONSTRAINTS", record.callerConstraints, callerConstraintKey));
+  errors.push(...arrayOrderAndDuplicateErrors("DELEGATECALL_CONTEXTS", record.delegatecallContexts, delegatecallContextKey));
   errors.push(...arrayOrderAndDuplicateErrors("RESIDUAL_RISKS", record.residualRisks, (value) => value));
   for (const parent of record.parentConstraints) errors.push(...parentConstraintErrors(parent));
   for (const caller of record.callerConstraints) errors.push(...callerConstraintErrors(caller));
+  for (const context of record.delegatecallContexts) errors.push(...delegatecallContextErrors(context));
   if (record.approvedSelectors.some((selector) => !SELECTOR_RE.test(selector))) {
     errors.push("BAD_SELECTOR");
   }
   if (record.allowedCallTypes.some((callType) => !allowedCallType(callType))) errors.push("BAD_CALL_TYPE");
   if (record.factoryConstraints) errors.push(...factoryConstraintErrors(record.factoryConstraints));
   if (record.tokenConstraints) errors.push(...tokenConstraintErrors(record.tokenConstraints));
-  if (record.delegatecallContext) errors.push(...delegatecallContextErrors(record.delegatecallContext));
   if (
     sameAddress(record.address, SMART_ROUTER_HELPER) &&
-    (!record.delegatecallContext ||
-      !sameAddress(record.delegatecallContext.parentAddress, SMART_ROUTER) ||
+    (!record.delegatecallContexts.some((context) =>
+      sameAddress(context.parentAddress, SMART_ROUTER) &&
+      sameAddress(context.callerAddress, SMART_ROUTER) &&
+      sameAddress(context.targetAddress, record.address) &&
+      context.callType === "DELEGATECALL") ||
       record.approvedSelectors.some((selector) => !["0x4e6c8ed8", "0x8bdb1925"].includes(selector)))
   ) {
     errors.push("SMART_ROUTER_HELPER_CONTEXT_INVALID");
   }
   if (sameAddress(record.address, TOKEN_IMPLEMENTATION_539A) && record.parentConstraints.length === 0) {
     errors.push("TOKEN_IMPLEMENTATION_PARENT_REQUIRED");
+  }
+  if (sameAddress(record.address, TOKEN_IMPLEMENTATION_539A) && record.delegatecallContexts.length === 0) {
+    errors.push("TOKEN_IMPLEMENTATION_DELEGATECALL_CONTEXT_REQUIRED");
   }
   return errors;
 }
@@ -2065,6 +2334,17 @@ function callerConstraintKey(constraint: TrustManifestCallerConstraint): string 
     lower(constraint.caller) ?? "null",
     constraint.callType?.toUpperCase?.() ?? "",
     lower(constraint.selector) ?? "null",
+  ].join("|");
+}
+
+function delegatecallContextKey(context: TrustManifestDelegatecallContext): string {
+  return [
+    lower(context.parentAddress) ?? "",
+    lower(context.parentCodeHash) ?? "null",
+    lower(context.callerAddress) ?? "",
+    context.callType?.toUpperCase?.() ?? "",
+    lower(context.targetAddress) ?? "",
+    lower(context.targetCodeHash) ?? "null",
   ].join("|");
 }
 
@@ -2135,15 +2415,27 @@ function delegatecallContextErrors(context: TrustManifestDelegatecallContext): s
   const errors: string[] = [];
   errors.push(...objectUnknownKeyErrors(context, [
     "parentAddress",
+    "parentCodeHash",
     "callerAddress",
-    "allowedSelectors",
+    "callType",
+    "targetAddress",
+    "targetCodeHash",
+    "selectors",
   ], "DELEGATECALL_CONTEXT"));
   if (!ADDRESS_RE.test(context.parentAddress)) errors.push("BAD_DELEGATECALL_PARENT");
+  if (context.parentCodeHash !== null && !HASH_RE.test(context.parentCodeHash)) {
+    errors.push("BAD_DELEGATECALL_PARENT_CODE_HASH");
+  }
   if (!ADDRESS_RE.test(context.callerAddress)) errors.push("BAD_DELEGATECALL_CALLER");
-  if (!Array.isArray(context.allowedSelectors)) errors.push("BAD_DELEGATECALL_SELECTORS");
+  if (context.callType !== "DELEGATECALL") errors.push("BAD_DELEGATECALL_CALL_TYPE");
+  if (!ADDRESS_RE.test(context.targetAddress)) errors.push("BAD_DELEGATECALL_TARGET");
+  if (context.targetCodeHash !== null && !HASH_RE.test(context.targetCodeHash)) {
+    errors.push("BAD_DELEGATECALL_TARGET_CODE_HASH");
+  }
+  if (!Array.isArray(context.selectors)) errors.push("BAD_DELEGATECALL_SELECTORS");
   else {
-    errors.push(...arrayOrderAndDuplicateErrors("DELEGATECALL_SELECTORS", context.allowedSelectors, (value) => value));
-    if (context.allowedSelectors.some((selector) => !SELECTOR_RE.test(selector))) errors.push("BAD_DELEGATECALL_SELECTOR");
+    errors.push(...arrayOrderAndDuplicateErrors("DELEGATECALL_SELECTORS", context.selectors, (value) => value));
+    if (context.selectors.some((selector) => !SELECTOR_RE.test(selector))) errors.push("BAD_DELEGATECALL_SELECTOR");
   }
   return errors;
 }
@@ -2236,13 +2528,33 @@ function callerConstraintMatches(record: TrustManifestRecord, call: LiveExecutio
   );
 }
 
-function delegatecallContextMatches(record: TrustManifestRecord, call: LiveExecutionGraphCall): boolean {
+function delegatecallContextMatches(
+  record: TrustManifestRecord,
+  call: LiveExecutionGraphCall,
+  manifest: TrustManifest,
+  liveChainState: LiveChainStateForManifest,
+): boolean {
   if (call.callType.toUpperCase() !== "DELEGATECALL") return true;
-  if (!record.delegatecallContext) return false;
-  return (
-    sameNullableAddress(record.delegatecallContext.parentAddress, call.parentAddress ?? call.from) &&
-    sameNullableAddress(record.delegatecallContext.callerAddress, call.from) &&
-    (call.selector === null || record.delegatecallContext.allowedSelectors.map(lower).includes(call.selector.toLowerCase()))
+  if (record.delegatecallContexts.length === 0) return false;
+  const parentAddress = call.parentAddress ?? call.from;
+  const callerAddress = call.from;
+  const targetAddress = call.to;
+  if (!parentAddress || !callerAddress || !targetAddress) return false;
+  const parentKey = parentAddress.toLowerCase();
+  const parentCodeHash = lower(
+    liveChainState.targetCodeHashes?.[parentKey] ??
+      manifest.records.find((candidate) => sameAddress(candidate.address, parentAddress))?.runtimeCodeHash,
+  );
+  const targetCodeHash = lower(call.codeHash ?? call.runtimeCodeHash ?? record.runtimeCodeHash);
+  const selector = lower(call.selector);
+  return record.delegatecallContexts.some((context) =>
+    sameAddress(context.parentAddress, parentAddress) &&
+    (context.parentCodeHash === null || parentCodeHash === lower(context.parentCodeHash)) &&
+    sameAddress(context.callerAddress, callerAddress) &&
+    context.callType === "DELEGATECALL" &&
+    sameAddress(context.targetAddress, targetAddress) &&
+    (context.targetCodeHash === null || targetCodeHash === lower(context.targetCodeHash)) &&
+    (selector === null || context.selectors.includes(selector))
   );
 }
 

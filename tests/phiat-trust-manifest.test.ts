@@ -29,6 +29,7 @@ import {
   type TrustManifestEdge,
   type TrustManifestRecord,
 } from "../src/tools/analytics/phiatShadowBuy.js";
+import { exportOfflineSigningMaterials } from "../src/tools/analytics/phiat-shadow-buy/offlineTrustSigner.js";
 import type { ExecutionTrustReport } from "../src/tools/analytics/phiat-shadow-buy/executionTrustRegistry.js";
 import { getRegisteredTools, resetToolRegistry } from "../src/tools/define.js";
 
@@ -50,6 +51,10 @@ const HELPER_HASH = "0x99dbcfd8791473ebe1f2127aa162bea456a0e88db9bf211872f90a0b1
 const TOKEN_PROXY = "0x3333333333333333333333333333333333333333";
 const TOKEN_IMPL = "0x539a69de74e9ed69fbe7f909fa935d05b8caba11";
 const TOKEN_IMPL_HASH = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const EXACT_TOKEN_PROXY_A = "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07";
+const EXACT_TOKEN_PROXY_B = "0x0cb6f5a34ad42ec934882a05265a7d5f59b51a2f";
+const EXACT_TOKEN_IMPL_HASH = "0x57a73a555fee21aa544bcd2feeba6033020677d82977701a78e89b7da0f45b08";
+const TEST_OPERATOR_PUBLIC_KEY_ID = `0x${"77".repeat(32)}`;
 const POOL = "0x4444444444444444444444444444444444444444";
 const POOL_HASH = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const FACTORY = "0x5555555555555555555555555555555555555555";
@@ -128,7 +133,7 @@ function protocolRecord(overrides: Partial<TrustManifestRecord> = {}): TrustMani
     tokenConstraints: null,
     managerHashConstraint: MANAGER_HASH,
     routerHashConstraint: ROUTER_HASH,
-    delegatecallContext: null,
+    delegatecallContexts: [],
     firstApprovedBlock: HISTORICAL_BLOCK,
     expiresAtBlock: "27195600",
     residualRisks: [],
@@ -155,7 +160,7 @@ function contextRecord(
     tokenConstraints: null,
     managerHashConstraint: MANAGER_HASH,
     routerHashConstraint: ROUTER_HASH,
-    delegatecallContext: null,
+    delegatecallContexts: [],
     firstApprovedBlock: HISTORICAL_BLOCK,
     expiresAtBlock: "27195600",
     residualRisks: [],
@@ -253,6 +258,14 @@ function protocolEdge(overrides: Partial<TrustManifestEdge> = {}): TrustManifest
   };
 }
 
+function expectCandidateSuccess(candidate: ReturnType<typeof buildTrustManifestCandidateFromReport>) {
+  if (candidate.candidateGenerationStatus !== "PASSED") {
+    throw new Error(candidate.validationErrors.join(","));
+  }
+  expect(candidate.candidateGenerationStatus).toBe("PASSED");
+  return candidate;
+}
+
 function verified(manifest = trustManifest()) {
   const key = keyMaterial();
   const signed = signManifest(manifest, key);
@@ -292,6 +305,131 @@ function liveState(overrides: Partial<LiveChainStateForManifest> = {}): LiveChai
     implementationRelationships: [],
     poolStates: {},
     ...overrides,
+  };
+}
+
+function sameTestAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function tokenImplCall(parentAddress: string, selector: string, index = 0) {
+  return {
+    tracePath: `0.${index}`,
+    depth: 3,
+    callType: "DELEGATECALL",
+    from: parentAddress.toLowerCase(),
+    to: TOKEN_IMPL,
+    selector,
+    valueWei: "0",
+    inputFingerprint: null,
+    outputFingerprint: null,
+    success: true,
+    gasUsed: "1",
+    parentAddress: parentAddress.toLowerCase(),
+    parentRole: "TOKEN_PROXY" as const,
+    runtimeCodeHash: EXACT_TOKEN_IMPL_HASH,
+    blockNumber: HISTORICAL_BLOCK,
+    classification: "TOKEN_IMPLEMENTATION" as const,
+    unresolvedReasons: [],
+  };
+}
+
+function exactTokenImplementationReport(): ExecutionTrustReport {
+  return tokenImplementationReport([
+    tokenImplCall(EXACT_TOKEN_PROXY_A, "0x23b872dd", 0),
+    tokenImplCall(EXACT_TOKEN_PROXY_A, "0xdd62ed3e", 1),
+    tokenImplCall(EXACT_TOKEN_PROXY_A, "0x23b872dd", 2),
+    tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231", 3),
+    tokenImplCall(EXACT_TOKEN_PROXY_B, "0x70a08231", 4),
+    tokenImplCall(EXACT_TOKEN_PROXY_B, "0xa9059cbb", 5),
+    tokenImplCall(EXACT_TOKEN_PROXY_B, "0x70a08231", 6),
+    tokenImplCall(EXACT_TOKEN_PROXY_B, "0xdd62ed3e", 7),
+    tokenImplCall(EXACT_TOKEN_PROXY_B, "0x23b872dd", 8),
+    tokenImplCall(EXACT_TOKEN_PROXY_A, "0xa9059cbb", 9),
+  ]);
+}
+
+function tokenImplementationReport(calls: ReturnType<typeof tokenImplCall>[]): ExecutionTrustReport {
+  const selectors = [...new Set(calls.map((call) => call.selector.toLowerCase()))].sort();
+  const callerConstraints = [...new Map(calls.map((call) => [
+    `${call.from.toLowerCase()}|${call.selector.toLowerCase()}`,
+    { caller: call.from.toLowerCase(), selector: call.selector, callType: "DELEGATECALL" },
+  ])).values()];
+  const parentConstraints = [...new Map(calls.map((call) => [
+    call.parentAddress.toLowerCase(),
+    { parentAddress: call.parentAddress.toLowerCase(), parentRole: "TOKEN_PROXY" as const },
+  ])).values()];
+  const proxyRecords = [...new Set(calls.map((call) => call.parentAddress.toLowerCase()))].map((address) =>
+    reportRecord({
+      address,
+      role: "TOKEN_PROXY",
+      runtimeCodeHash: OTHER_HASH,
+      observedSelectors: [],
+      parentConstraints: [],
+      callerConstraints: [],
+    }),
+  );
+  const implRecord = reportRecord({
+    address: TOKEN_IMPL,
+    role: "TOKEN_IMPLEMENTATION",
+    runtimeCodeHash: EXACT_TOKEN_IMPL_HASH,
+    implementationAddress: TOKEN_IMPL,
+    implementationCodeHash: EXACT_TOKEN_IMPL_HASH,
+    observedSelectors: selectors,
+    parentConstraints,
+    callerConstraints,
+  });
+  const base = mockTrustReport();
+  return {
+    ...base,
+    normalizedCalls: calls,
+    callCount: calls.length,
+    targetClassifications: Object.fromEntries([
+      ...proxyRecords.map((record) => [record.normalizedAddress, record.role]),
+      [implRecord.normalizedAddress, implRecord.role],
+    ]),
+    candidateRecords: [...proxyRecords, implRecord],
+    routeTrustBundle: {
+      ...base.routeTrustBundle,
+      requiredRecords: [...proxyRecords, implRecord],
+      unresolvedRecords: [],
+    },
+  };
+}
+
+function reportRecord(args: {
+  address: string;
+  role: ExecutionTrustReport["candidateRecords"][number]["role"];
+  runtimeCodeHash: string;
+  implementationAddress?: string | null;
+  implementationCodeHash?: string | null;
+  observedSelectors: string[];
+  parentConstraints: ExecutionTrustReport["candidateRecords"][number]["parentConstraints"];
+  callerConstraints: ExecutionTrustReport["candidateRecords"][number]["callerConstraints"];
+}): ExecutionTrustReport["candidateRecords"][number] {
+  return {
+    chainId: 369,
+    address: args.address,
+    normalizedAddress: args.address.toLowerCase(),
+    role: args.role,
+    runtimeCodeHash: args.runtimeCodeHash,
+    proxyType: args.role === "TOKEN_IMPLEMENTATION" ? "TRACE_BOUND_TOKEN_PROXY" : "NONE_DETECTED",
+    implementationAddress: args.implementationAddress ?? null,
+    implementationCodeHash: args.implementationCodeHash ?? null,
+    approvedSelectors: [],
+    observedSelectors: args.observedSelectors,
+    parentConstraints: args.parentConstraints,
+    callerConstraints: args.callerConstraints,
+    factoryAddress: null,
+    factoryCodeHash: null,
+    tokenConstraints: null,
+    managerCodeHashConstraint: MANAGER_HASH,
+    firstObservedBlock: HISTORICAL_BLOCK,
+    lastObservedBlock: HISTORICAL_BLOCK,
+    evidence: { source: "test-only fixture" },
+    confidence: "high",
+    unresolvedReasons: [],
+    operatorApproved: false,
   };
 }
 
@@ -795,11 +933,15 @@ describe("signed PHIAT execution trust manifests", () => {
         { caller: SMART_ROUTER, selector: "0x4e6c8ed8", callType: "DELEGATECALL" },
         { caller: SMART_ROUTER, selector: "0x8bdb1925", callType: "DELEGATECALL" },
       ],
-      delegatecallContext: {
+      delegatecallContexts: [{
         parentAddress: SMART_ROUTER,
+        parentCodeHash: OTHER_HASH,
         callerAddress: SMART_ROUTER,
-        allowedSelectors: ["0x4e6c8ed8", "0x8bdb1925"],
-      },
+        callType: "DELEGATECALL",
+        targetAddress: SMART_ROUTER_HELPER,
+        targetCodeHash: HELPER_HASH,
+        selectors: ["0x4e6c8ed8", "0x8bdb1925"],
+      }],
     });
     const manifest = trustManifest({
       records: [contextRecord(SMART_ROUTER, "PROTOCOL_ROUTER", OTHER_HASH), helperRecord],
@@ -843,11 +985,15 @@ describe("signed PHIAT execution trust manifests", () => {
       allowedCallTypes: ["DELEGATECALL"],
       parentConstraints: [{ parentAddress: TOKEN_PROXY, parentRole: "TOKEN_PROXY" }],
       callerConstraints: [{ caller: TOKEN_PROXY, selector: "0x70a08231", callType: "DELEGATECALL" }],
-      delegatecallContext: {
+      delegatecallContexts: [{
         parentAddress: TOKEN_PROXY,
+        parentCodeHash: OTHER_HASH,
         callerAddress: TOKEN_PROXY,
-        allowedSelectors: ["0x70a08231"],
-      },
+        callType: "DELEGATECALL",
+        targetAddress: TOKEN_IMPL,
+        targetCodeHash: TOKEN_IMPL_HASH,
+        selectors: ["0x70a08231"],
+      }],
     });
     const manifest = trustManifest({
       records: [contextRecord(TOKEN_PROXY, "TOKEN_PROXY", OTHER_HASH), tokenImplRecord],
@@ -1001,10 +1147,142 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(result.validationErrors).toContain("RECORDS_MISSING");
   });
 
+  it("normalizes the exact affected token implementation without widening delegatecall authority", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(exactTokenImplementationReport(), {
+      expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
+    }));
+    const record = candidate.manifest.records.find((entry) => sameTestAddress(entry.address, TOKEN_IMPL))!;
+
+    expect(record.approvedSelectors).toEqual(["0x23b872dd", "0x70a08231", "0xa9059cbb", "0xdd62ed3e"]);
+    expect(record.delegatecallContexts).toHaveLength(2);
+    for (const context of record.delegatecallContexts) {
+      expect(context.targetAddress).toBe(TOKEN_IMPL);
+      expect(context.targetCodeHash).toBe(EXACT_TOKEN_IMPL_HASH);
+      expect(context.selectors).toEqual([...new Set(context.selectors)].sort());
+    }
+    expect(record.delegatecallContexts.map((context) => context.parentAddress).sort()).toEqual([
+      EXACT_TOKEN_PROXY_B,
+      EXACT_TOKEN_PROXY_A,
+    ].sort());
+    expect(record.callerConstraints).toHaveLength(8);
+    expect(record.delegatecallContexts.flatMap((context) => context.selectors)).toHaveLength(8);
+  });
+
+  it("merges repeated selectors in the same delegatecall context", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+    const record = candidate.manifest.records.find((entry) => sameTestAddress(entry.address, TOKEN_IMPL))!;
+
+    expect(record.delegatecallContexts).toHaveLength(1);
+    expect(record.delegatecallContexts[0]!.selectors).toEqual(["0x70a08231"]);
+  });
+
+  it("preserves the same selector under two distinct delegatecall parents", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+      tokenImplCall(EXACT_TOKEN_PROXY_B, "0x70a08231"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+    const record = candidate.manifest.records.find((entry) => sameTestAddress(entry.address, TOKEN_IMPL))!;
+
+    expect(record.delegatecallContexts).toHaveLength(2);
+    expect(record.delegatecallContexts.every((context) => context.selectors.join(",") === "0x70a08231")).toBe(true);
+  });
+
+  it("does not introduce a parent-selector Cartesian product", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+      tokenImplCall(EXACT_TOKEN_PROXY_B, "0xa9059cbb"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+    const record = candidate.manifest.records.find((entry) => sameTestAddress(entry.address, TOKEN_IMPL))!;
+    const byParent = new Map(record.delegatecallContexts.map((context) => [context.parentAddress, context.selectors]));
+
+    expect(byParent.get(EXACT_TOKEN_PROXY_A)).toEqual(["0x70a08231"]);
+    expect(byParent.get(EXACT_TOKEN_PROXY_B)).toEqual(["0xa9059cbb"]);
+  });
+
+  it("normalizes case-equivalent selectors before fingerprinting", () => {
+    const lower = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0xabcdef01"),
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0xabcdef01"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+    const mixed = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0xABCDEF01"),
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0xabcdef01"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+
+    expect(mixed.manifestFingerprint).toBe(lower.manifestFingerprint);
+    expect(canonicalizeJson(mixed.manifest)).toBe(canonicalizeJson(lower.manifest));
+  });
+
+  it("fails structured candidate generation on conflicting duplicate source records", () => {
+    const report = tokenImplementationReport([tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231")]);
+    report.candidateRecords.push({
+      ...report.candidateRecords.find((record) => sameTestAddress(record.normalizedAddress, TOKEN_IMPL))!,
+      runtimeCodeHash: OTHER_HASH,
+    });
+
+    const candidate = buildTrustManifestCandidateFromReport(report, { expiresAt: "2026-08-04T00:00:00.000Z" });
+    expect(candidate).toMatchObject({
+      candidateGenerationStatus: "FAILED",
+      automaticExecutionEligible: false,
+      operatorSignatureRequired: true,
+    });
+    expect(candidate.validationErrors.join("|")).toContain("RECORD_CONFLICT_RUNTIME_CODE_HASH");
+  });
+
+  it("round-trips generated candidates through the strict production exporter helpers", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(exactTokenImplementationReport(), {
+      expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
+    }));
+    const materials = exportOfflineSigningMaterials(JSON.stringify(candidate.manifest));
+
+    expect(materials.manifestFingerprint).toBe(candidate.manifestFingerprint);
+    expect(candidate.manifest.manifestId).toBe(manifestIdFor(candidate.manifest));
+    expect(materials.canonicalManifestJson).toBe(canonicalizeJson(candidate.manifest));
+    expect(materials.signingFrame.equals(signatureFrameForManifest(candidate.manifest))).toBe(true);
+    expect(materials.signingFrame.length).toBeGreaterThan(0);
+  });
+
+  it("keeps strict external rejection for injected duplicate delegatecall selectors", () => {
+    const candidate = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+    ]), { expiresAt: "2026-08-04T00:00:00.000Z", operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID }));
+    const manifest = structuredClone(candidate.manifest);
+    const record = manifest.records.find((entry) => sameTestAddress(entry.address, TOKEN_IMPL))!;
+    record.delegatecallContexts[0]!.selectors = ["0x70a08231", "0x70a08231"];
+
+    expect(() => exportOfflineSigningMaterials(JSON.stringify(manifest))).toThrow("DELEGATECALL_SELECTORS_DUPLICATE");
+  });
+
+  it("is deterministic across differently ordered historical observations", () => {
+    const calls = [
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x70a08231"),
+      tokenImplCall(EXACT_TOKEN_PROXY_B, "0xa9059cbb"),
+      tokenImplCall(EXACT_TOKEN_PROXY_A, "0x23b872dd"),
+      tokenImplCall(EXACT_TOKEN_PROXY_B, "0xdd62ed3e"),
+    ];
+    const first = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport(calls), {
+      expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
+    }));
+    const second = expectCandidateSuccess(buildTrustManifestCandidateFromReport(tokenImplementationReport([...calls].reverse()), {
+      expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
+    }));
+
+    expect(second.manifestFingerprint).toBe(first.manifestFingerprint);
+    expect(canonicalizeJson(second.manifest)).toBe(canonicalizeJson(first.manifest));
+  });
+
   it("generates unsigned candidates and registers read-only manifest tools", () => {
     const candidate = buildTrustManifestCandidateFromReport(mockTrustReport(), {
       expiresAtBlock: "27195600",
       expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
     });
     expect(candidate.operatorSignatureRequired).toBe(true);
     expect(candidate.automaticExecutionEligible).toBe(false);
