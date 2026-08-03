@@ -441,6 +441,7 @@ describe("Piteas tool registration", () => {
     expect(names).toContain("piteas_prepare_swap");
     expect(names).toContain("piteas_accumulation_plan");
     expect(names).toContain("phiat_shadow_buy");
+    expect(names).toContain("phiat_execution_trust_report");
     const meta = getRegisteredTools();
     for (const n of [
       "piteas_quote",
@@ -455,6 +456,6 @@ describe("Piteas tool registration", () => {
     expect(meta.find((m) => m.name === "piteas_quote")?.description).toMatch(
       /best-price|oracle|Preferred aggregator/i,
     );
-    expect(meta.length).toBe(97);
+    expect(meta.length).toBe(98);
   });
 });

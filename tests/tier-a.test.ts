@@ -792,6 +792,6 @@ describe("Tier A tool registration", () => {
       expect(t?.write).toBe(false);
     }
     // Prior inventory + standalone Piteas accumulation planner
-    expect(meta.length).toBe(97);
+    expect(meta.length).toBe(98);
   });
 });

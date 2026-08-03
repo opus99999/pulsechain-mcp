@@ -38,6 +38,7 @@ export const ERC20_TRANSFER_SELECTOR = "0xa9059cbb" as const;
 export const ERC20_TRANSFER_FROM_SELECTOR = "0x23b872dd" as const;
 export const ERC20_APPROVE_SELECTOR = "0x095ea7b3" as const;
 export const ERC20_BALANCE_OF_SELECTOR = "0x70a08231" as const;
+export const ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e" as const;
 
 export const PHIAT_SHADOW_BUY_TOKEN_OUT =
   "0x96e035ae0905efac8f733f133462f971cfa45db1" as const;
