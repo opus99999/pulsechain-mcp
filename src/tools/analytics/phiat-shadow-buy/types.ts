@@ -233,6 +233,38 @@ export interface ExecutionTargetsReport {
   executionTargetConfidence: "high" | "medium" | "low";
 }
 
+export type ReferenceValidityStatus = "VALID" | "INVALID" | "UNAVAILABLE";
+export type CandidateFreshnessStatus = "FRESH" | "STALE" | "EXPIRED" | "UNAVAILABLE";
+export type SandwichTemporalStatus = "COHERENT" | "TOO_SLOW" | "INCOMPLETE";
+
+export interface ReferenceFreshness {
+  beforeStatus: ReferenceValidityStatus;
+  afterStatus: ReferenceValidityStatus;
+  possibleCacheDetected: boolean;
+  confidence: "high" | "medium" | "low" | "unavailable";
+  warnings: string[];
+}
+
+export interface CandidateFreshness {
+  status: CandidateFreshnessStatus;
+  candidateResponseReceivedAt: string | null;
+  explicitQuoteTimestamp: string | null;
+  explicitExpiry: string | null;
+  ageBeforePreparationMs: number | null;
+  ageBeforeSimulationMs: number | null;
+  ageAfterSimulationMs: number | null;
+  maximumQuoteAgeMs: number;
+  warnings: string[];
+}
+
+export interface SandwichTemporalCoherence {
+  status: SandwichTemporalStatus;
+  quoteBatchStartedAt: string;
+  quoteBatchCompletedAt: string;
+  quoteBatchDurationMs: number;
+  maximumBatchDurationMs: number;
+}
+
 export interface QuoteFreshness {
   referenceBeforeAcceptable: boolean;
   candidateAcceptable: boolean;
@@ -250,6 +282,12 @@ export interface QuoteFreshness {
   batchCompletedAt: string;
   batchDurationMs: number;
   batchDeadlineMs: number;
+  referenceBeforeValidityStatus: ReferenceValidityStatus;
+  referenceAfterValidityStatus: ReferenceValidityStatus;
+  sandwichTemporalStatus: SandwichTemporalStatus;
+  referenceFreshness: ReferenceFreshness;
+  candidateFreshness: CandidateFreshness;
+  sandwichTemporalCoherence: SandwichTemporalCoherence;
   reason: string | null;
 }
 
@@ -284,6 +322,12 @@ export interface PhiatShadowBuyCertificate {
   referenceAfter: Record<string, unknown> | null;
   referenceDriftPercent: number | null;
   candidateDeteriorationPercent: number | null;
+  referenceBeforeValidityStatus: ReferenceValidityStatus;
+  referenceAfterValidityStatus: ReferenceValidityStatus;
+  sandwichTemporalStatus: SandwichTemporalStatus;
+  referenceFreshness: ReferenceFreshness | null;
+  candidateFreshness: CandidateFreshness | null;
+  sandwichTemporalCoherence: SandwichTemporalCoherence | null;
   quoteFreshness: QuoteFreshness | null;
   rateLimitBudget: PiteasRateLimitReservation | null;
   balances: BalanceEvidence;

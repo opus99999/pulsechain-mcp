@@ -1,4 +1,4 @@
-import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus } from "./types.js";
+import type { PhiatShadowBuyCertificate, ShadowQuoteSummary, BalanceEvidence, AllowanceEvidence, ApprovalIntent, RouterIntegrity, ExecutionTargetsReport, SimulationResult, SimulationCall, GasPolicy, Decision, PolicyCheck, PreparedIntent, DecodedIntent, QuoteFreshness, ShadowBuyReason, QuoteBatchStatus, AllowanceStatus, ApprovalStatus, RouterIntegrityStatus, SimulationStatus, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence } from "./types.js";
 import type { PiteasRateLimitReservation } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PITEAS_ROUTER } from "./constants.js";
 import { parseHumanUnitsStrict } from "./inputNormalization.js";
@@ -18,6 +18,9 @@ export function buildCertificate(args: {
   referenceAfter?: ShadowQuoteSummary | null;
   referenceDriftPercent?: number | null;
   candidateDeteriorationPercent?: number | null;
+  referenceFreshness?: ReferenceFreshness | null;
+  candidateFreshness?: CandidateFreshness | null;
+  sandwichTemporalCoherence?: SandwichTemporalCoherence | null;
   quoteFreshness?: QuoteFreshness | null;
   rateLimitBudget: PiteasRateLimitReservation | null;
   balances: BalanceEvidence;
@@ -50,6 +53,12 @@ export function buildCertificate(args: {
     referenceAfter: sanitizeQuote(args.referenceAfter ?? null),
     referenceDriftPercent: args.referenceDriftPercent ?? null,
     candidateDeteriorationPercent: args.candidateDeteriorationPercent ?? null,
+    referenceBeforeValidityStatus: args.referenceFreshness?.beforeStatus ?? "UNAVAILABLE",
+    referenceAfterValidityStatus: args.referenceFreshness?.afterStatus ?? "UNAVAILABLE",
+    sandwichTemporalStatus: args.sandwichTemporalCoherence?.status ?? "INCOMPLETE",
+    referenceFreshness: args.referenceFreshness ?? null,
+    candidateFreshness: args.candidateFreshness ?? null,
+    sandwichTemporalCoherence: args.sandwichTemporalCoherence ?? null,
     quoteFreshness: args.quoteFreshness ?? null,
     rateLimitBudget: args.rateLimitBudget,
     balances: args.balances,

@@ -1,9 +1,9 @@
 import type { AppConfig } from "../../../types.js";
 import type { PiteasQuoteData, PiteasQuoteResult } from "../../../data/index.js";
 import { PHIAT_SHADOW_BUY_TOKEN_IN, PHIAT_SHADOW_BUY_TOKEN_OUT, PHIAT_DECIMALS } from "./constants.js";
-import type { PhiatShadowBuyDeps, ShadowQuoteSummary, QuoteFreshness } from "./types.js";
+import type { PhiatShadowBuyDeps, ShadowQuoteSummary, QuoteFreshness, ReferenceFreshness, CandidateFreshness, SandwichTemporalCoherence } from "./types.js";
 import { averagePriceDecimal } from "./deterioration.js";
-import { fingerprint, formatRawToken, nonEmptyDifferent, parseTimestampMs, quoteFingerprint } from "./inputNormalization.js";
+import { fingerprint, formatRawToken, isPositiveIntegerString, nonEmptyDifferent, parseTimestampMs, quoteFingerprint } from "./inputNormalization.js";
 
 export async function readMarketContext(
   config: AppConfig,
@@ -201,18 +201,24 @@ export function analyzeQuoteFreshness(args: {
   referenceBefore: ShadowQuoteSummary;
   candidateQuote: ShadowQuoteSummary;
   referenceAfter: ShadowQuoteSummary;
+  quoteBatchStatus: string;
   startedMs: number;
   completedMs: number;
   deadlineMs: number;
+  maximumBatchDurationMs: number;
   maximumQuoteAgeMs: number;
+  referenceInputRaw: string;
+  referenceDriftPercent: number | null;
+  maximumReferenceDriftPercent: number;
   candidateAgeBeforePreparationMs?: number | null;
   candidateAgeBeforeSimulationMs?: number | null;
   candidateAgeAfterSimulationMs?: number | null;
 }): QuoteFreshness {
-  const before = quoteFreshnessOk(args.referenceBefore, args.completedMs, args.maximumQuoteAgeMs);
-  const candidate = quoteFreshnessOk(args.candidateQuote, args.completedMs, args.maximumQuoteAgeMs);
-  const after = quoteFreshnessOk(args.referenceAfter, args.completedMs, args.maximumQuoteAgeMs);
+  const before = referenceValidity(args.referenceBefore, args.referenceInputRaw, args.maximumBatchDurationMs);
+  const candidate = candidateFreshnessOk(args.candidateQuote, args.completedMs, args.maximumQuoteAgeMs);
+  const after = referenceValidity(args.referenceAfter, args.referenceInputRaw, args.maximumBatchDurationMs);
   const sandwichComplete = args.referenceBefore.ok && args.candidateQuote.ok && args.referenceAfter.ok;
+  const batchDurationMs = args.completedMs - args.startedMs;
   const referencesByteIdentical =
     sandwichComplete &&
     args.referenceBefore.responseFingerprint !== null &&
@@ -223,28 +229,88 @@ export function analyzeQuoteFreshness(args: {
     nonEmptyDifferent(args.referenceBefore.expiresAt, args.referenceAfter.expiresAt) ||
     nonEmptyDifferent(args.referenceBefore.blockNumber, args.referenceAfter.blockNumber);
   const possibleCacheDetected = sandwichComplete && referencesByteIdentical && !independentEvidence;
-  const confidence: QuoteFreshness["freshnessConfidence"] = possibleCacheDetected
+  const confidence: ReferenceFreshness["confidence"] = possibleCacheDetected
     ? "low"
     : !sandwichComplete
       ? "unavailable"
       : independentEvidence
       ? "high"
       : "medium";
-  const reason = !before.acceptable
+  const driftInvalid =
+    args.referenceDriftPercent === null ||
+    args.referenceDriftPercent > args.maximumReferenceDriftPercent;
+  const temporalStatus: SandwichTemporalCoherence["status"] = !sandwichComplete
+    ? "INCOMPLETE"
+    : batchDurationMs > args.maximumBatchDurationMs
+      ? "TOO_SLOW"
+      : before.status === "VALID" &&
+          candidate.status === "FRESH" &&
+          after.status === "VALID" &&
+          !possibleCacheDetected &&
+          !driftInvalid
+        ? "COHERENT"
+        : "INCOMPLETE";
+  const referenceWarnings = [
+    ...before.warnings,
+    ...after.warnings,
+    ...(possibleCacheDetected
+      ? ["Reference quotes were byte-identical without independent freshness metadata"]
+      : []),
+  ];
+  const candidateFreshness: CandidateFreshness = {
+    status: candidate.status,
+    candidateResponseReceivedAt: args.candidateQuote.ok
+      ? args.candidateQuote.responseReceivedAt
+      : null,
+    explicitQuoteTimestamp: args.candidateQuote.quoteTimestamp ?? null,
+    explicitExpiry: args.candidateQuote.expiresAt ?? null,
+    ageBeforePreparationMs: args.candidateAgeBeforePreparationMs ?? null,
+    ageBeforeSimulationMs: args.candidateAgeBeforeSimulationMs ?? null,
+    ageAfterSimulationMs: args.candidateAgeAfterSimulationMs ?? null,
+    maximumQuoteAgeMs: args.maximumQuoteAgeMs,
+    warnings: candidate.reason ? [candidate.reason] : [],
+  };
+  const referenceFreshness: ReferenceFreshness = {
+    beforeStatus: before.status,
+    afterStatus: after.status,
+    possibleCacheDetected,
+    confidence,
+    warnings: referenceWarnings,
+  };
+  const sandwichTemporalCoherence: SandwichTemporalCoherence = {
+    status: temporalStatus,
+    quoteBatchStartedAt: new Date(args.startedMs).toISOString(),
+    quoteBatchCompletedAt: new Date(args.completedMs).toISOString(),
+    quoteBatchDurationMs: batchDurationMs,
+    maximumBatchDurationMs: args.maximumBatchDurationMs,
+  };
+  const reason = before.status === "INVALID"
     ? before.reason
-    : !candidate.acceptable
-      ? candidate.reason
-      : !after.acceptable
-        ? after.reason
+    : after.status === "INVALID"
+      ? after.reason
+      : candidate.status === "EXPIRED" || candidate.status === "STALE"
+        ? candidate.reason
         : possibleCacheDetected
           ? "Reference quotes were byte-identical without independent freshness metadata"
-          : null;
+          : temporalStatus === "TOO_SLOW"
+            ? "Exact shadow-buy quote sandwich exceeded maximumBatchDurationMs"
+            : temporalStatus === "INCOMPLETE"
+              ? "Quote batch incomplete"
+              : driftInvalid
+                ? "Reference drift is unavailable or exceeds policy"
+                : null;
   const freshnessAcceptable =
-    sandwichComplete && before.acceptable && candidate.acceptable && after.acceptable && !possibleCacheDetected;
+    sandwichComplete &&
+    before.status === "VALID" &&
+    candidate.status === "FRESH" &&
+    after.status === "VALID" &&
+    !possibleCacheDetected &&
+    temporalStatus === "COHERENT" &&
+    !driftInvalid;
   return {
-    referenceBeforeAcceptable: before.acceptable,
-    candidateAcceptable: candidate.acceptable,
-    referenceAfterAcceptable: after.acceptable,
+    referenceBeforeAcceptable: before.status === "VALID",
+    candidateAcceptable: candidate.status === "FRESH",
+    referenceAfterAcceptable: after.status === "VALID",
     freshnessAcceptable,
     referencesByteIdentical,
     possibleCacheDetected,
@@ -256,28 +322,70 @@ export function analyzeQuoteFreshness(args: {
     maximumQuoteAgeMs: args.maximumQuoteAgeMs,
     batchStartedAt: new Date(args.startedMs).toISOString(),
     batchCompletedAt: new Date(args.completedMs).toISOString(),
-    batchDurationMs: args.completedMs - args.startedMs,
+    batchDurationMs,
     batchDeadlineMs: args.deadlineMs,
+    referenceBeforeValidityStatus: before.status,
+    referenceAfterValidityStatus: after.status,
+    sandwichTemporalStatus: temporalStatus,
+    referenceFreshness,
+    candidateFreshness,
+    sandwichTemporalCoherence,
     reason,
   };
 }
 
-function quoteFreshnessOk(
+function referenceValidity(
+  quote: ShadowQuoteSummary,
+  expectedInputRaw: string,
+  maximumTimestampAgeAtReceiptMs: number,
+): { status: ReferenceFreshness["beforeStatus"]; reason: string | null; warnings: string[] } {
+  if (!quote.ok) return { status: "UNAVAILABLE", reason: `${quote.label} failed`, warnings: [] };
+  const warnings: string[] = [];
+  if (quote.inputRaw !== expectedInputRaw) {
+    return {
+      status: "INVALID",
+      reason: `${quote.label} input amount did not match requested reference amount`,
+      warnings,
+    };
+  }
+  if (!isPositiveIntegerString(quote.outputRaw) || !isPositiveIntegerString(quote.minimumOutputRaw)) {
+    return {
+      status: "INVALID",
+      reason: `${quote.label} output or minimum output is unavailable or non-positive`,
+      warnings,
+    };
+  }
+  const responseMs = Date.parse(quote.responseReceivedAt);
+  if (!Number.isFinite(responseMs)) {
+    return { status: "INVALID", reason: `${quote.label} response timestamp is invalid`, warnings };
+  }
+  const quoteTimestampMs = parseTimestampMs(quote.quoteTimestamp);
+  if (quoteTimestampMs !== null && responseMs - quoteTimestampMs > maximumTimestampAgeAtReceiptMs) {
+    return { status: "INVALID", reason: `${quote.label} quote timestamp was stale when received`, warnings };
+  }
+  const expiresAtMs = parseTimestampMs(quote.expiresAt);
+  if (expiresAtMs !== null && expiresAtMs <= responseMs) {
+    return { status: "INVALID", reason: `${quote.label} quote was expired when received`, warnings };
+  }
+  return { status: "VALID", reason: null, warnings };
+}
+
+function candidateFreshnessOk(
   quote: ShadowQuoteSummary,
   nowMs: number,
   maximumQuoteAgeMs: number,
-): { acceptable: boolean; ageMs: number | null; reason: string | null } {
-  if (!quote.ok) return { acceptable: false, ageMs: null, reason: `${quote.label} failed` };
+): { status: CandidateFreshness["status"]; ageMs: number | null; reason: string | null } {
+  if (!quote.ok) return { status: "UNAVAILABLE", ageMs: null, reason: `${quote.label} failed` };
   const expiresAtMs = parseTimestampMs(quote.expiresAt);
   const responseMs = Date.parse(quote.responseReceivedAt);
   const ageMs = Number.isFinite(responseMs) ? nowMs - responseMs : null;
   if (expiresAtMs !== null && expiresAtMs <= nowMs) {
-    return { acceptable: false, ageMs, reason: `${quote.label} quote expired` };
+    return { status: "EXPIRED", ageMs, reason: `${quote.label} quote expired` };
   }
   if (ageMs === null || ageMs < 0 || ageMs > maximumQuoteAgeMs) {
-    return { acceptable: false, ageMs, reason: `${quote.label} quote is stale` };
+    return { status: "STALE", ageMs, reason: `${quote.label} quote is stale` };
   }
-  return { acceptable: true, ageMs, reason: null };
+  return { status: "FRESH", ageMs, reason: null };
 }
 
 function withRealTimeout<T>(

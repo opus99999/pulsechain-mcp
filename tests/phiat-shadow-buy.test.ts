@@ -87,6 +87,7 @@ const baseConfig: AppConfig = {
 beforeEach(() => {
   resetPiteasRateLimitForTests();
   vi.restoreAllMocks();
+  (defaultQuoteMock as unknown as { count?: number }).count = 0;
 });
 
 function swapCalldata(overrides: {
@@ -437,6 +438,211 @@ describe("phiat_shadow_buy exact-amount shadow certificate", () => {
     expect(result.quoteFreshness?.candidateAgeBeforePreparationMs).toBe(11_000);
     expect(result.quoteFreshness?.candidateAgeBeforePreparationMs).toBeLessThan(30_000);
     expect(d.getPiteasQuote).toHaveBeenCalledTimes(3);
+  });
+
+  it("accepts the live timestamp case where reference-before ages past maximumQuoteAgeMs but candidate remains fresh", async () => {
+    const batchStartedMs = Date.parse("2026-08-03T12:59:58.056Z");
+    let currentMs = batchStartedMs;
+    const latencies = [13_079, 14_147, 16_540];
+    const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = quote.mock.calls.length - 1;
+      currentMs += latencies[call] ?? 0;
+      const label = call === 0 ? "reference_before" : call === 1 ? "candidate" : "reference_after";
+      return {
+        ok: true,
+        source: "piteas",
+        advisory: true,
+        data: quoteData({
+          label,
+          amountInRaw: req.amount,
+          outputRaw: req.account ? CANDIDATE_OUTPUT_RAW : REF_OUTPUT_RAW,
+          minRaw: req.account ? CANDIDATE_MIN_RAW : "99000000000000000000",
+          quoteTimestamp: null,
+          expiresAt: null,
+        }),
+      };
+    }) as never;
+    const d = deps({
+      nowMs: () => currentMs,
+      getPiteasQuote: quote,
+      preparePiteasSwap: vi.fn((candidate: PiteasQuoteData) =>
+        preparePiteasSwap(candidate, { account: WALLET }),
+      ) as never,
+    });
+
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ maximumQuoteAgeMs: 30_000, maximumBatchDurationMs: 75_000 }),
+      d,
+    );
+    const referenceBeforeAgeAtCompletion =
+      Date.parse(String(result.exactAmountEvidence.quoteBatchCompletedAt)) -
+      Date.parse(String(result.referenceBefore?.responseReceivedAt));
+
+    expect(result.decision).toBe("WOULD_BUY");
+    expect(result.quoteBatchStatus).toBe("COMPLETE");
+    expect(result.exactAmountEvidence.quoteBatchDurationMs).toBe(43_766);
+    expect(referenceBeforeAgeAtCompletion).toBe(30_687);
+    expect(result.quoteFreshness?.candidateQuoteAgeMs).toBe(16_540);
+    expect(result.referenceBeforeValidityStatus).toBe("VALID");
+    expect(result.referenceAfterValidityStatus).toBe("VALID");
+    expect(result.candidateFreshness?.status).toBe("FRESH");
+    expect(result.sandwichTemporalStatus).toBe("COHERENT");
+    expect(result.referenceFreshness?.beforeStatus).toBe("VALID");
+    expect(result.referenceFreshness?.afterStatus).toBe("VALID");
+    expect(result.sandwichTemporalCoherence?.quoteBatchDurationMs).toBe(43_766);
+    expect(result.preparedIntent).not.toBeNull();
+    expect(result.decodedIntent).not.toBeNull();
+    expect(result.routerIntegrityStatus).toBe("PASSED");
+    expect(result.allowanceStatus).toBe("SUFFICIENT");
+    expect(result.simulationStatus).toBe("PASSED");
+    expect(d.preparePiteasSwap).toHaveBeenCalledTimes(1);
+    expect(d.getRouterIntegrity).toHaveBeenCalledTimes(1);
+    expect(d.getInputBalance).toHaveBeenCalledTimes(1);
+    expect(d.getAllowance).toHaveBeenCalledTimes(1);
+    expect(d.ethCall).toHaveBeenCalledTimes(1);
+    expect(d.estimateGas).toHaveBeenCalledTimes(1);
+    expect(d.getPiteasQuote).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a reference quote that was explicitly expired when received", async () => {
+    const d = deps({
+      getPiteasQuote: defaultQuoteMock({
+        referenceBefore: { expiresAt: new Date(NOW - 1).toISOString() },
+      }),
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.referenceBeforeValidityStatus).toBe("INVALID");
+    expect(result.referenceAfterValidityStatus).toBe("VALID");
+    expect(reasonCodes(result)).toContain("REFERENCE_BEFORE_INVALID");
+    expect(result.preparedIntent).toBeNull();
+  });
+
+  it("rejects a reference quote whose explicit timestamp was already stale when received", async () => {
+    const d = deps({
+      getPiteasQuote: defaultQuoteMock({
+        referenceBefore: { quoteTimestamp: new Date(NOW - 76_000).toISOString() },
+      }),
+    });
+
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ maximumBatchDurationMs: 75_000 }),
+      d,
+    );
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.referenceBeforeValidityStatus).toBe("INVALID");
+    expect(reasonCodes(result)).toContain("REFERENCE_BEFORE_INVALID");
+    expect(result.preparedIntent).toBeNull();
+  });
+
+  it("rejects a candidate that is stale before unsigned preparation", async () => {
+    let currentMs = NOW;
+    const latencies = [0, 0, 21_000];
+    const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = quote.mock.calls.length - 1;
+      currentMs += latencies[call] ?? 0;
+      const label = call === 0 ? "reference_before" : call === 1 ? "candidate" : "reference_after";
+      return {
+        ok: true,
+        source: "piteas",
+        advisory: true,
+        data: quoteData({
+          label,
+          amountInRaw: req.amount,
+          outputRaw: req.account ? CANDIDATE_OUTPUT_RAW : REF_OUTPUT_RAW,
+          minRaw: req.account ? CANDIDATE_MIN_RAW : "99000000000000000000",
+          quoteTimestamp: null,
+          expiresAt: null,
+        }),
+      };
+    }) as never;
+    const d = deps({
+      nowMs: () => currentMs,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ maximumQuoteAgeMs: 20_000 }),
+      d,
+    );
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.candidateFreshness?.status).toBe("STALE");
+    expect(reasonCodes(result)).toContain("CANDIDATE_QUOTE_STALE");
+    expect(result.preparedIntent).toBeNull();
+  });
+
+  it("rejects a slow but complete sandwich with SANDWICH_TOO_SLOW", async () => {
+    let currentMs = NOW;
+    const latencies = [20_000, 20_000, 36_000];
+    const quote = vi.fn(async (_cfg: AppConfig, req: { amount: string; account?: string }) => {
+      const call = quote.mock.calls.length - 1;
+      currentMs += latencies[call] ?? 0;
+      const label = call === 0 ? "reference_before" : call === 1 ? "candidate" : "reference_after";
+      return {
+        ok: true,
+        source: "piteas",
+        advisory: true,
+        data: quoteData({
+          label,
+          amountInRaw: req.amount,
+          outputRaw: req.account ? CANDIDATE_OUTPUT_RAW : REF_OUTPUT_RAW,
+          minRaw: req.account ? CANDIDATE_MIN_RAW : "99000000000000000000",
+          quoteTimestamp: null,
+          expiresAt: null,
+        }),
+      };
+    }) as never;
+    const d = deps({
+      nowMs: () => currentMs,
+      getPiteasQuote: quote,
+    });
+
+    const result = await buildPhiatShadowBuy(
+      baseConfig,
+      baseInput({ maximumBatchDurationMs: 75_000, maximumQuoteAgeMs: 600_000 }),
+      d,
+    );
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.quoteBatchStatus).toBe("COMPLETE");
+    expect(result.sandwichTemporalStatus).toBe("TOO_SLOW");
+    expect(result.sandwichTemporalCoherence?.quoteBatchDurationMs).toBe(76_000);
+    expect(reasonCodes(result)).toContain("SANDWICH_TOO_SLOW");
+  });
+
+  it("rejects unresolved reference cache evidence without using reference age", async () => {
+    const d = deps({
+      getPiteasQuote: defaultQuoteMock({
+        referenceBefore: {
+          quoteIdentifier: null,
+          quoteTimestamp: null,
+          expiresAt: null,
+          blockNumber: null,
+          responseFingerprint: "same-reference",
+        },
+        referenceAfter: {
+          quoteIdentifier: null,
+          quoteTimestamp: null,
+          expiresAt: null,
+          blockNumber: null,
+          responseFingerprint: "same-reference",
+        },
+      }),
+    });
+
+    const result = await buildPhiatShadowBuy(baseConfig, baseInput(), d);
+
+    expect(result.decision).toBe("REJECT");
+    expect(result.referenceFreshness?.possibleCacheDetected).toBe(true);
+    expect(result.referenceFreshness?.confidence).toBe("low");
+    expect(reasonCodes(result)).toContain("REFERENCE_CACHE_UNRESOLVED");
   });
 
   it("does not start a Piteas request below the minimum viable timeout", async () => {
