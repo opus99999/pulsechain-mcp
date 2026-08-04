@@ -3,6 +3,8 @@
  * Private keys are never stored in plaintext and never appear in tool responses.
  */
 
+import type { PiteasReviewIntent } from "../piteas/routerIntent.js";
+
 export interface EncryptedBlob {
   /** AES-256-GCM ciphertext (hex) */
   ciphertext: string;
@@ -200,10 +202,15 @@ export interface TokenNotionalPolicyView {
     spender?: string;
     from?: string;
     path?: string[];
+    outputToken?: string;
+    minimumOutputRaw?: string;
     fromMulticall?: boolean;
     multicallIndex?: number;
   }>;
   notes: string[];
+  piteas?: PiteasReviewIntent;
+  decodeKnowledgeStatus?: "known_top_level_with_opaque_route" | "unknown";
+  agentGuidanceOverride?: "review_carefully" | "refuse";
   /** Cap comparisons applied (when erc20NotionalCaps hit a decoded token). */
   capsApplied: Array<{
     token: string;

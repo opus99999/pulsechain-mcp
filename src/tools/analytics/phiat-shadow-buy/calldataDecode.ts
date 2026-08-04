@@ -4,13 +4,12 @@ import {
   EUSDC_DECIMALS,
   MAX_UINT256,
   PHIAT_DECIMALS,
-  PITEAS_SWAP_CANONICAL_SIGNATURE,
   PITEAS_SWAP_SELECTOR,
-  piteasRouterSwapAbi,
 } from "./constants.js";
 import type { DecodedIntent } from "./types.js";
 import { fingerprint, selectorOf } from "./inputNormalization.js";
 import { decodePiteasRouteEnvelope } from "./routeEnvelope.js";
+import { decodePiteasRouterSwapCalldata } from "../../../piteas/routerIntent.js";
 
 export function decodeShadowBuyCalldata(
   calldata: string,
@@ -32,34 +31,42 @@ export function decodeShadowBuyCalldata(
     );
   }
 
+  const topLevel = decodePiteasRouterSwapCalldata({
+    data: calldata,
+    valueWei: nativeValueWei,
+  });
+  if (!topLevel.ok) {
+    return undecodable(selector, topLevel.reason, nativeValueWei, calldata);
+  }
+
   try {
-    const decoded = decodeFunctionData({
-      abi: piteasRouterSwapAbi,
-      data: calldata as Hex,
-    });
-    const [detail, routeData] = decoded.args;
+    const detail = topLevel.intent;
+    const routeData = detail.routeDataRaw;
     const route = decodePiteasRouteEnvelope(routeData);
     const validationErrors = [...route.validationErrors];
 
     return {
       decodable: true,
-      canonicalFunction: PITEAS_SWAP_CANONICAL_SIGNATURE,
-      method: decoded.functionName,
+      canonicalFunction: detail.canonicalFunction,
+      method: detail.method,
       selector,
-      tokenIn: detail.srcToken,
-      tokenOut: detail.destToken,
-      amountInRaw: detail.srcAmount.toString(),
-      amountInHuman: formatUnits(detail.srcAmount, EUSDC_DECIMALS),
-      minimumOutputRaw: detail.destMinAmount.toString(),
-      minimumAmountOutRaw: detail.destMinAmount.toString(),
-      minimumAmountOutHuman: formatUnits(detail.destMinAmount, PHIAT_DECIMALS),
-      recipient: detail.destAccount,
+      tokenIn: detail.sourceToken,
+      tokenOut: detail.destinationToken,
+      amountInRaw: detail.sourceAmountRaw,
+      amountInHuman: formatUnits(BigInt(detail.sourceAmountRaw), EUSDC_DECIMALS),
+      minimumOutputRaw: detail.destinationMinimumAmountRaw,
+      minimumAmountOutRaw: detail.destinationMinimumAmountRaw,
+      minimumAmountOutHuman: formatUnits(
+        BigInt(detail.destinationMinimumAmountRaw),
+        PHIAT_DECIMALS,
+      ),
+      recipient: detail.destinationAccount,
       deadline: route.deadline,
       nativeValueWei,
       permitDataPresent: route.permitDataPresent,
-      routeDataFingerprint: fingerprint(routeData),
+      routeDataFingerprint: detail.routeDataFingerprint,
       routeDataRaw: routeData,
-      calldataFingerprint: fingerprint(calldata),
+      calldataFingerprint: detail.calldataFingerprint,
       routeData: {
         decodable: route.status === "PASSED",
         status: route.status,

@@ -13,6 +13,7 @@ import type {
   TxProposal,
 } from "./types.js";
 import type { TokenNotionalInspection } from "./tokenNotional.js";
+import type { PiteasReviewIntent } from "../piteas/routerIntent.js";
 
 /** Concise movement line for operators (no secrets). */
 export interface ReviewTokenMovement {
@@ -21,6 +22,9 @@ export interface ReviewTokenMovement {
   role: string;
   recipient?: string;
   spender?: string;
+  path?: string[];
+  outputToken?: string;
+  minimumOutputRaw?: string;
   /** Plain-language explanation for agents */
   explanation?: string;
 }
@@ -37,6 +41,7 @@ export interface DecodeKnowledge {
   status:
     | "empty"
     | "known_priority"
+    | "known_top_level_with_opaque_route"
     | "unknown"
     | "truncated_or_invalid"
     | "not_applicable";
@@ -109,6 +114,10 @@ export interface TxReviewSummary {
     multicallExpanded: boolean;
     capsApplied: TokenNotionalPolicyView["capsApplied"];
   };
+  piteas?: PiteasReviewIntent & {
+    simulationStatus: "not_run" | "passed" | "failed";
+    proposalExpiresAt?: string;
+  };
   /** Known vs unknown decode posture */
   decodeKnowledge: DecodeKnowledge;
   /**
@@ -146,6 +155,7 @@ export interface TxReviewSummary {
   };
   proposalId?: string;
   walletId?: string;
+  proposalExpiresAt?: string;
 }
 
 /** Honest label for remainingDaily / maxPls* under operator-trust. */
@@ -267,6 +277,8 @@ function explainMovement(m: {
   recipient?: string;
   spender?: string;
   path?: string[];
+  outputToken?: string;
+  minimumOutputRaw?: string;
 }): string {
   const tok =
     m.token === "native" ? "native PLS" : `token ${shortAddr(m.token)}`;
@@ -282,6 +294,9 @@ function explainMovement(m: {
     case "withdraw":
       return `Unwrap/withdraw ${m.amountRaw} raw of ${tok} to native PLS`;
     case "swapExactIn":
+      if (m.outputToken && m.minimumOutputRaw) {
+        return `Swap exact-in ${m.amountRaw} raw of ${tok} for at least ${m.minimumOutputRaw} raw of token ${shortAddr(m.outputToken)}`;
+      }
       return `Swap exact-in ${m.amountRaw} raw of ${tok} (path start / native-in)`;
     case "swapExactOutMaxIn":
       return `Swap exact-out max-in ${m.amountRaw} raw of ${tok} (upper bound)`;
@@ -309,6 +324,9 @@ function compactMovements(
     role: m.role,
     recipient: m.recipient,
     spender: m.spender,
+    path: m.path,
+    outputToken: m.outputToken,
+    minimumOutputRaw: m.minimumOutputRaw,
     explanation: explainMovement(m),
   }));
 }
@@ -336,6 +354,24 @@ function buildDecodeKnowledge(
     };
   }
   const p = tn.pattern;
+  if (tn.decodeKnowledgeStatus === "known_top_level_with_opaque_route") {
+    return {
+      status: "known_top_level_with_opaque_route",
+      confidence: tn.confidence,
+      reliable: false,
+      pattern: p,
+      unknownMayBypassNotionalCaps: false,
+    };
+  }
+  if (tn.decodeKnowledgeStatus === "unknown") {
+    return {
+      status: "unknown",
+      confidence: tn.confidence,
+      reliable: false,
+      pattern: p,
+      unknownMayBypassNotionalCaps: true,
+    };
+  }
   if (p === "truncated" || p === "invalid") {
     return {
       status: "truncated_or_invalid",
@@ -404,6 +440,12 @@ function buildAgentGuidance(params: {
     );
   } else if (params.decode.status === "unknown") {
     hints.push("Unknown selector — advisory only; no hard token-notional deny");
+  } else if (params.decode.status === "known_top_level_with_opaque_route") {
+    hints.push("Piteas top-level swap decoded, but route data is manager-specific");
+    hints.push("Quote and calldata may become stale quickly");
+    hints.push("Successful current simulation is mandatory");
+    hints.push("Piteas router/manager state may change");
+    hints.push("No stale proposal may be reused");
   } else if (params.decode.status === "known_priority" && !params.decode.reliable) {
     hints.push("Known pattern family but unreliable decode — amounts may be incomplete");
   } else if (
@@ -424,6 +466,7 @@ function buildAgentGuidance(params: {
   if (
     params.decode.status === "unknown" ||
     params.decode.status === "truncated_or_invalid" ||
+    params.decode.status === "known_top_level_with_opaque_route" ||
     (params.decode.status === "known_priority" &&
       (params.decode.confidence === "low" || !params.decode.reliable))
   ) {
@@ -457,6 +500,7 @@ export interface AgentIntentView {
   safetyHints: string[];
   /** What the agent still cannot know without simulation */
   residualUncertainty: string[];
+  piteas?: PiteasReviewIntent;
 }
 
 export function buildAgentIntentView(params: {
@@ -482,6 +526,9 @@ export function buildAgentIntentView(params: {
     innerUnreliableCount: params.inspection.innerUnreliableCount,
     movements: params.inspection.movements,
     notes: params.inspection.notes,
+    piteas: params.inspection.piteas,
+    decodeKnowledgeStatus: params.inspection.decodeKnowledgeStatus,
+    agentGuidanceOverride: params.inspection.agentGuidanceOverride,
     capsApplied: [],
     requireDecodableCalldata: false,
   };
@@ -499,6 +546,9 @@ export function buildAgentIntentView(params: {
   } else if (decodeKnowledge.status === "unknown") {
     agentGuidance = "review_carefully";
     safetyHints.push("Unknown selector — amounts not fully decoded");
+  } else if (decodeKnowledge.status === "known_top_level_with_opaque_route") {
+    agentGuidance = "review_carefully";
+    safetyHints.push("Piteas top-level swap decoded; route data remains opaque");
   } else if (!params.inspection.reliable && params.inspection.riskRelevant) {
     agentGuidance = "review_carefully";
     safetyHints.push("Risk-relevant but unreliable decode");
@@ -507,6 +557,12 @@ export function buildAgentIntentView(params: {
     safetyHints.push("Low confidence decode");
   }
   safetyHints.push(...params.inspection.notes.slice(0, 4));
+  if (params.inspection.agentGuidanceOverride === "refuse") {
+    agentGuidance = "refuse";
+    safetyHints.push("Piteas selector/router/ABI shape failed validation");
+  } else if (params.inspection.agentGuidanceOverride === "review_carefully") {
+    agentGuidance = "review_carefully";
+  }
 
   const residualUncertainty = [
     "No on-chain simulation in this tool (slippage, taxes, reverts unknown)",
@@ -515,7 +571,7 @@ export function buildAgentIntentView(params: {
     "Operator-trust: no hard allowlist/cap gate on propose/execute",
     "PulseChain gas cost in PLS is not estimated here — fees can be large in PLS terms " +
       "(transfers tens, approvals tens–hundreds, swaps ~250+); fund value + gas",
-  ];
+  ].concat(params.inspection.piteas?.residualUncertainty ?? []);
 
   return {
     to: params.to.toLowerCase(),
@@ -539,6 +595,7 @@ export function buildAgentIntentView(params: {
     agentGuidance,
     safetyHints,
     residualUncertainty,
+    piteas: params.inspection.piteas,
   };
 }
 
@@ -552,6 +609,7 @@ export interface BuildTxReviewSummaryInput {
   simulation?: SimulationResult;
   proposalId?: string;
   walletId?: string;
+  proposalExpiresAt?: string;
   /** Where this summary is attached (affects nextStep wording) */
   context?: "propose" | "check" | "execute" | "transfer";
 }
@@ -608,14 +666,21 @@ export function buildTxReviewSummary(
     hasCalldata,
     nativeValuePls: valuePls,
   });
+  let finalAgentGuidance = agentGuidance;
+  if (check.tokenNotional?.agentGuidanceOverride === "refuse") {
+    finalAgentGuidance = "refuse";
+    safetyHints.push("Piteas selector/router/ABI shape failed validation");
+  } else if (check.tokenNotional?.agentGuidanceOverride === "review_carefully") {
+    finalAgentGuidance = "review_carefully";
+  }
 
   const ctx = input.context ?? "propose";
   let nextStep: string;
-  if (decision === "deny" || agentGuidance === "refuse") {
+  if (decision === "deny" || finalAgentGuidance === "refuse") {
     nextStep =
       "Do not execute. Clear kill switch / re-enable wallet, or fix invalid address/value. " +
       "Caps and allowlists are not hard gates in operator-trust mode.";
-  } else if (agentGuidance === "review_carefully") {
+  } else if (finalAgentGuidance === "review_carefully") {
     nextStep =
       "Optional careful review of destination/calldata, then execute_agent_tx with confirm=true. " +
       "Operator-trust: funding authorizes; still verify value + gas headroom.";
@@ -639,6 +704,17 @@ export function buildTxReviewSummary(
     "Always read destination, native PLS value, gas headroom, and decoded movements before confirming. " +
     PLS_VALUE_VS_GAS_HINT;
   const tn = check.tokenNotional;
+  const piteas = tn?.piteas
+    ? {
+        ...tn.piteas,
+        simulationStatus: input.simulation
+          ? input.simulation.ok
+            ? ("passed" as const)
+            : ("failed" as const)
+          : ("not_run" as const),
+        proposalExpiresAt: input.proposalExpiresAt,
+      }
+    : undefined;
   return {
     headline,
     decision,
@@ -667,7 +743,7 @@ export function buildTxReviewSummary(
         }
       : undefined,
     decodeKnowledge,
-    agentGuidance,
+    agentGuidance: finalAgentGuidance,
     safetyHints,
     checksApplied: listChecksApplied(check),
     reasons: check.reasons,
@@ -690,6 +766,8 @@ export function buildTxReviewSummary(
       : undefined,
     proposalId: input.proposalId,
     walletId: input.walletId,
+    proposalExpiresAt: input.proposalExpiresAt,
+    piteas,
   };
 }
 
@@ -708,6 +786,7 @@ export function buildProposalReviewSummary(
     simulation: proposal.simulation,
     proposalId: proposal.id,
     walletId: proposal.walletId,
+    proposalExpiresAt: proposal.expiresAt,
     context,
   });
 }
@@ -747,6 +826,19 @@ export function formatConfirmPrompt(summary: TxReviewSummary): string {
         .slice(0, 4)
         .map((m) => `${m.role} ${m.amountRaw}@${shortAddr(m.token)}`)
         .join("; ")}`,
+    );
+  }
+  if (summary.piteas) {
+    lines.push(
+      `Piteas: ${summary.piteas.method}; tokenIn=${shortAddr(
+        summary.piteas.sourceToken,
+      )}; tokenOut=${shortAddr(summary.piteas.destinationToken)}; inputRaw=${
+        summary.piteas.sourceAmountRaw
+      }; minOutRaw=${summary.piteas.destinationMinimumAmountRaw}; recipient=${shortAddr(
+        summary.piteas.destinationAccount,
+      )}; route=${summary.piteas.routeDataStatus}; simulation=${
+        summary.piteas.simulationStatus
+      }`,
     );
   }
   if (summary.decision === "deny" && summary.reasons[0]) {

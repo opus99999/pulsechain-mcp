@@ -1,5 +1,10 @@
 import { USDC_FROM_ETH_ADDRESS } from "../../../constants.js";
 import { PITEAS_ROUTER as PITEAS_ROUTER_ADDRESS } from "../../../data/index.js";
+export {
+  PITEAS_ROUTER_SWAP_CANONICAL_SIGNATURE as PITEAS_SWAP_CANONICAL_SIGNATURE,
+  PITEAS_ROUTER_SWAP_SELECTOR as PITEAS_SWAP_SELECTOR,
+  piteasRouterSwapAbi,
+} from "../../../piteas/routerIntent.js";
 
 export { erc20ApproveAbi } from "../../chain/abis.js";
 export const PITEAS_ROUTER = PITEAS_ROUTER_ADDRESS;
@@ -21,9 +26,6 @@ export const PITEAS_ROUTER_VERIFIED_ABI_FINGERPRINT =
   "0xef1647fc4243f8b82509fd173aea291de2787ea38303faab8769be1984ecc5e4" as const;
 export const PITEAS_ROUTER_VERIFIED_SOURCE_FINGERPRINT =
   "0xbefbefcf4178fc63b1ed8a6e2277f5891f94421915d947cb3be9b92aa7796afa" as const;
-export const PITEAS_SWAP_CANONICAL_SIGNATURE =
-  "swap((address,address,address,uint256,uint256),bytes)" as const;
-export const PITEAS_SWAP_SELECTOR = "0x8218b58f" as const;
 export const PITEAS_SWAP_MANAGER_CANONICAL_SIGNATURE = "swap(bytes)" as const;
 export const PITEAS_SWAP_MANAGER_SELECTOR = "0x627dd56a" as const;
 export const PITEAS_CHANGED_SWAP_MANAGER_TOPIC =
@@ -120,28 +122,5 @@ export const erc20AllowanceAbi = [
       { name: "spender", type: "address" },
     ],
     outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
-export const piteasRouterSwapAbi = [
-  {
-    type: "function",
-    name: "swap",
-    stateMutability: "payable",
-    inputs: [
-      {
-        name: "detail",
-        type: "tuple",
-        components: [
-          { name: "srcToken", type: "address" },
-          { name: "destToken", type: "address" },
-          { name: "destAccount", type: "address" },
-          { name: "srcAmount", type: "uint256" },
-          { name: "destMinAmount", type: "uint256" },
-        ],
-      },
-      { name: "data", type: "bytes" },
-    ],
-    outputs: [{ name: "returnAmount", type: "uint256" }],
   },
 ] as const;

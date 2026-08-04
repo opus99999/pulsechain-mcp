@@ -34,6 +34,13 @@ import {
   PULSEX_V2_ROUTER,
   WPLS_ADDRESS,
 } from "../constants.js";
+import {
+  decodePiteasRouterSwapCalldata,
+  PITEAS_ROUTER_SWAP_SELECTOR,
+  VERIFIED_PITEAS_ROUTER,
+  toPublicPiteasReviewIntent,
+  type PiteasReviewIntent,
+} from "../piteas/routerIntent.js";
 
 export type TokenNotionalConfidence = "high" | "low" | "none";
 
@@ -57,6 +64,7 @@ export type TokenNotionalPattern =
   | "router.addLiquidityETH"
   | "router.removeLiquidity"
   | "router.removeLiquidityETH"
+  | "piteas.swap"
   | "multicall.bytes"
   | "multicall.deadlineBytes"
   | "multicall.aggregate"
@@ -86,6 +94,8 @@ export interface TokenMovement {
   path?: `0x${string}`[];
   spender?: `0x${string}`;
   from?: `0x${string}`;
+  outputToken?: `0x${string}`;
+  minimumOutputRaw?: string;
   /** When movement came from a one-level multicall inner call */
   fromMulticall?: boolean;
   /** Index of the inner call (0-based) when fromMulticall */
@@ -111,6 +121,10 @@ export interface TokenNotionalInspection {
   innerCallCount?: number;
   /** How many risk-relevant inners were not reliable */
   innerUnreliableCount?: number;
+  /** PiteasRouter.swap top-level intent when canonical router calldata is decoded. */
+  piteas?: PiteasReviewIntent;
+  decodeKnowledgeStatus?: "known_top_level_with_opaque_route" | "unknown";
+  agentGuidanceOverride?: "review_carefully" | "refuse";
 }
 
 const KNOWN_PULSEX_ROUTERS = new Set([
@@ -574,6 +588,25 @@ function routerNotes(knownPulsexRouter: boolean, extra: string[] = []): string[]
   notes.push("Amount is raw token units (decimals not resolved)");
   notes.push(...extra);
   return notes;
+}
+
+function piteasFailureResult(params: {
+  knownPulsexRouter: boolean;
+  reason: string;
+}): TokenNotionalInspection {
+  return emptyResult({
+    pattern: "unknown",
+    confidence: "none",
+    reliable: false,
+    riskRelevant: true,
+    knownPulsexRouter: params.knownPulsexRouter,
+    decodeKnowledgeStatus: "unknown",
+    agentGuidanceOverride: "refuse",
+    notes: [
+      params.reason,
+      "Malformed or misdirected PiteasRouter.swap calldata is not safe to treat as a known swap intent",
+    ],
+  });
 }
 
 function normPath(
@@ -1299,6 +1332,53 @@ export function inspectTokenNotional(params: {
   const selector = hex.slice(0, 10) as string;
   const bodyLen = (hex.length - 10) / 2;
   const valueWei = parseValueWei(params.valueWei);
+
+  const toIsVerifiedPiteasRouter =
+    toLower === VERIFIED_PITEAS_ROUTER.toLowerCase();
+  if (toIsVerifiedPiteasRouter || selector === PITEAS_ROUTER_SWAP_SELECTOR) {
+    const decodedPiteas = decodePiteasRouterSwapCalldata({
+      to: toLower,
+      data: hex,
+      valueWei,
+    });
+    if (!decodedPiteas.ok) {
+      return piteasFailureResult({
+        knownPulsexRouter,
+        reason: decodedPiteas.reason,
+      });
+    }
+    const piteas = decodedPiteas.intent;
+    const publicPiteas = toPublicPiteasReviewIntent(piteas);
+    return {
+      considered: true,
+      confidence: "low",
+      pattern: "piteas.swap",
+      reliable: false,
+      riskRelevant: true,
+      knownPulsexRouter: false,
+      multicallExpanded: false,
+      decodeKnowledgeStatus: "known_top_level_with_opaque_route",
+      agentGuidanceOverride: "review_carefully",
+      piteas: publicPiteas,
+      notes: [
+        "Decoded verified top-level PiteasRouter.swap call",
+        "Route data is manager-specific and opaque to native wallet review",
+        "Amount and token identity are address-based; no ticker-based inference",
+        "Quote and calldata may become stale quickly",
+        "Successful current simulation is mandatory before execution",
+        "No stale proposal may be reused",
+      ],
+      movements: piteas.tokenMovements.map((m) => ({
+        token: m.token,
+        amountRaw: m.amountRaw,
+        role: m.role,
+        recipient: m.recipient,
+        path: m.path,
+        outputToken: m.outputToken,
+        minimumOutputRaw: m.minimumOutputRaw,
+      })),
+    };
+  }
 
   // --- ERC-20 transfer ---
   if (selector === SELECTOR.transfer) {

@@ -232,6 +232,8 @@ export function evaluatePolicy(input: PolicyEvalInput): PolicyCheckResult {
       spender: m.spender,
       from: m.from,
       path: m.path,
+      outputToken: m.outputToken,
+      minimumOutputRaw: m.minimumOutputRaw,
       fromMulticall: m.fromMulticall,
       multicallIndex: m.multicallIndex,
     })),
@@ -239,6 +241,9 @@ export function evaluatePolicy(input: PolicyEvalInput): PolicyCheckResult {
       ...inspection.notes,
       "Operator-trust mode: allowlists, PLS caps, and token-notional rules are not hard gates. Funding the agent is authorization.",
     ],
+    piteas: inspection.piteas,
+    decodeKnowledgeStatus: inspection.decodeKnowledgeStatus,
+    agentGuidanceOverride: inspection.agentGuidanceOverride,
     capsApplied: [],
     requireDecodableCalldata: false,
   };
