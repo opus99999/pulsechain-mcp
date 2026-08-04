@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { decodeFunctionData, type Abi, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionData, type Abi, type Hex } from "viem";
 import { USDC_FROM_ETH_ADDRESS } from "../constants.js";
 import { PITEAS_ROUTER } from "../data/piteas.js";
 
@@ -35,6 +35,20 @@ export const piteasRouterSwapAbi = [
 ] as const satisfies Abi;
 
 export type PiteasRouteDataStatus = "OPAQUE_MANAGER_SPECIFIC";
+export type PiteasTopLevelDecodeStatus =
+  | "PASSED_CANONICAL"
+  | "PASSED_CONTRACT_ACCEPTED_NONCANONICAL"
+  | "MALFORMED"
+  | "UNSUPPORTED"
+  | "LIBRARY_DECODER_DISAGREEMENT";
+export type PiteasViemCrossCheckStatus =
+  | "passed"
+  | "failed"
+  | "not_run";
+export type PiteasContractAcceptanceStatus =
+  | "not_checked_by_decoder"
+  | "accepted_in_fixture"
+  | "rejected_in_fixture";
 
 export interface PiteasDecodedTokenMovement {
   token: `0x${string}`;
@@ -70,6 +84,11 @@ export interface PiteasTopLevelSwapIntent {
   routeTargets: string[];
   routeDataRaw: Hex;
   calldataFingerprint: `0x${string}`;
+  topLevelDecodeStatus: PiteasTopLevelDecodeStatus;
+  consumedBytes: number;
+  trailingBytes: number;
+  viemCrossCheckStatus: PiteasViemCrossCheckStatus;
+  contractAcceptanceStatus: PiteasContractAcceptanceStatus;
 }
 
 export type PiteasReviewIntent = Omit<PiteasTopLevelSwapIntent, "routeDataRaw">;
@@ -78,7 +97,9 @@ export type PiteasDecodeFailureKind =
   | "invalid_hex"
   | "wrong_selector"
   | "wrong_router"
-  | "malformed_abi";
+  | "malformed_abi"
+  | "empty_route_data"
+  | "noncanonical_abi";
 
 export type PiteasTopLevelSwapDecode =
   | {
@@ -93,6 +114,9 @@ export type PiteasTopLevelSwapDecode =
       kind: PiteasDecodeFailureKind;
       reason: string;
       calldataFingerprint: `0x${string}` | null;
+      topLevelDecodeStatus: PiteasTopLevelDecodeStatus;
+      viemCrossCheckStatus: PiteasViemCrossCheckStatus;
+      contractAcceptanceStatus: PiteasContractAcceptanceStatus;
     };
 
 export function sameAddress(a: string | null | undefined, b: string): boolean {
@@ -142,6 +166,49 @@ export function normalizeNativeValueWei(valueWei?: bigint | string | null): stri
   }
 }
 
+function calldataByteLength(data: string): number {
+  return Math.max(0, (data.length - 2) / 2);
+}
+
+function bodyWord(calldata: string, index: number): string {
+  const start = 10 + index * 64;
+  return calldata.slice(start, start + 64);
+}
+
+function hasCanonicalAddressPadding(word: string): boolean {
+  return /^0{24}[0-9a-fA-F]{40}$/.test(word);
+}
+
+function uintWord(word: string): bigint {
+  return BigInt(`0x${word || "0"}`);
+}
+
+function paddedByteLength(length: bigint): bigint {
+  return ((length + 31n) / 32n) * 32n;
+}
+
+function failure(params: {
+  matchedSelector: boolean;
+  selector: string | null;
+  kind: PiteasDecodeFailureKind;
+  reason: string;
+  calldataFingerprint: `0x${string}` | null;
+  topLevelDecodeStatus: PiteasTopLevelDecodeStatus;
+  viemCrossCheckStatus?: PiteasViemCrossCheckStatus;
+}): PiteasTopLevelSwapDecode {
+  return {
+    ok: false,
+    matchedSelector: params.matchedSelector,
+    selector: params.selector,
+    kind: params.kind,
+    reason: params.reason,
+    calldataFingerprint: params.calldataFingerprint,
+    topLevelDecodeStatus: params.topLevelDecodeStatus,
+    viemCrossCheckStatus: params.viemCrossCheckStatus ?? "not_run",
+    contractAcceptanceStatus: "not_checked_by_decoder",
+  };
+}
+
 export function decodePiteasRouterSwapCalldata(params: {
   to?: string | null;
   data: string;
@@ -152,37 +219,163 @@ export function decodePiteasRouterSwapCalldata(params: {
   const selector = selectorOfCalldata(calldata);
   const calldataFingerprint = fingerprint(calldata);
   if (!/^0x(?:[a-fA-F0-9]{2})+$/.test(calldata)) {
-    return {
-      ok: false,
+    return failure({
       matchedSelector: selector === PITEAS_ROUTER_SWAP_SELECTOR,
       selector,
       kind: "invalid_hex",
       reason: "calldata is not even-length hex",
       calldataFingerprint,
-    };
+      topLevelDecodeStatus: "MALFORMED",
+    });
   }
   if (selector !== PITEAS_ROUTER_SWAP_SELECTOR) {
-    return {
-      ok: false,
+    return failure({
       matchedSelector: false,
       selector,
       kind: "wrong_selector",
       reason: "calldata selector is not the verified PiteasRouter.swap selector",
       calldataFingerprint,
-    };
+      topLevelDecodeStatus: "UNSUPPORTED",
+    });
   }
 
   const expectedRouter = (params.expectedRouter ?? VERIFIED_PITEAS_ROUTER).toLowerCase();
   const to = params.to?.toLowerCase();
   if (to && to !== expectedRouter) {
-    return {
-      ok: false,
+    return failure({
       matchedSelector: true,
       selector,
       kind: "wrong_router",
       reason: "PiteasRouter.swap selector sent to a destination other than the verified Piteas router",
       calldataFingerprint,
-    };
+      topLevelDecodeStatus: "UNSUPPORTED",
+    });
+  }
+  if (calldataByteLength(calldata) < 4 + 6 * 32) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap calldata is shorter than the required six-word head",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  for (const index of [0, 1, 2]) {
+    if (!hasCanonicalAddressPadding(bodyWord(calldata, index))) {
+      return failure({
+        matchedSelector: true,
+        selector,
+        kind: "malformed_abi",
+        reason: `PiteasRouter.swap address word ${index} has nonzero high-order padding`,
+        calldataFingerprint,
+        topLevelDecodeStatus: "MALFORMED",
+        viemCrossCheckStatus: "failed",
+      });
+    }
+  }
+  const totalBytes = BigInt(calldataByteLength(calldata));
+  const bodyBytes = totalBytes - 4n;
+  const requiredHeadBytes = 6n * 32n;
+  const dynamicOffset = uintWord(bodyWord(calldata, 5));
+  if (dynamicOffset % 32n !== 0n) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap dynamic bytes offset is not 32-byte aligned",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  if (dynamicOffset < requiredHeadBytes) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap dynamic bytes offset points inside the required head",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  if (dynamicOffset > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap dynamic bytes offset exceeds Number.MAX_SAFE_INTEGER",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  if (dynamicOffset + 32n > bodyBytes) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap dynamic bytes length word is outside calldata",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  const dynamicOffsetNumber = Number(dynamicOffset);
+  const routeDataLength = uintWord(
+    calldata.slice(10 + dynamicOffsetNumber * 2, 10 + dynamicOffsetNumber * 2 + 64),
+  );
+  if (routeDataLength === 0n) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "empty_route_data",
+      reason: "PiteasRouter.swap route data must be non-empty",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+    });
+  }
+  const routeStart = dynamicOffset + 32n;
+  const routeEnd = routeStart + routeDataLength;
+  if (routeEnd > bodyBytes) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap declared route data length exceeds available calldata",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  const paddedRouteEnd = routeStart + paddedByteLength(routeDataLength);
+  if (paddedRouteEnd > bodyBytes) {
+    return failure({
+      matchedSelector: true,
+      selector,
+      kind: "malformed_abi",
+      reason: "PiteasRouter.swap padded route data end exceeds calldata",
+      calldataFingerprint,
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
+  }
+  if (paddedRouteEnd < bodyBytes) {
+    const trailingStart = 10 + Number(paddedRouteEnd) * 2;
+    const trailing = calldata.slice(trailingStart);
+    if (!/^0*$/.test(trailing)) {
+      return failure({
+        matchedSelector: true,
+        selector,
+        kind: "noncanonical_abi",
+        reason: "PiteasRouter.swap calldata has nonzero trailing bytes",
+        calldataFingerprint,
+        topLevelDecodeStatus: "LIBRARY_DECODER_DISAGREEMENT",
+        viemCrossCheckStatus: "failed",
+      });
+    }
   }
 
   try {
@@ -191,6 +384,23 @@ export function decodePiteasRouterSwapCalldata(params: {
       data: calldata as Hex,
     });
     const [detail, routeData] = decoded.args;
+    const reencoded = encodeFunctionData({
+      abi: piteasRouterSwapAbi,
+      functionName: "swap",
+      args: decoded.args,
+    });
+    if (reencoded.toLowerCase() !== calldata.toLowerCase()) {
+      return failure({
+        matchedSelector: true,
+        selector,
+        kind: "noncanonical_abi",
+        reason:
+          "PiteasRouter.swap calldata decoded with viem but differs from canonical re-encoding",
+        calldataFingerprint,
+        topLevelDecodeStatus: "LIBRARY_DECODER_DISAGREEMENT",
+        viemCrossCheckStatus: "failed",
+      });
+    }
     const sourceToken = detail.srcToken.toLowerCase() as `0x${string}`;
     const destinationToken = detail.destToken.toLowerCase() as `0x${string}`;
     const destinationAccount = detail.destAccount.toLowerCase() as `0x${string}`;
@@ -198,7 +408,19 @@ export function decodePiteasRouterSwapCalldata(params: {
     const destinationMinimumAmountRaw = detail.destMinAmount.toString();
     const nativeValueWei = normalizeNativeValueWei(params.valueWei);
     const routeDataFingerprint = fingerprint(routeData);
-    const routeDataByteLength = Math.max(0, (routeData.length - 2) / 2);
+    const routeDataByteLength = calldataByteLength(routeData);
+    if (routeDataByteLength === 0) {
+      return failure({
+        matchedSelector: true,
+        selector,
+        kind: "empty_route_data",
+        reason: "PiteasRouter.swap route data must be non-empty",
+        calldataFingerprint,
+        topLevelDecodeStatus: "MALFORMED",
+        viemCrossCheckStatus: "passed",
+      });
+    }
+    const consumedBytes = calldataByteLength(reencoded);
 
     return {
       ok: true,
@@ -249,11 +471,15 @@ export function decodePiteasRouterSwapCalldata(params: {
         routeTargets: [],
         routeDataRaw: routeData,
         calldataFingerprint,
+        topLevelDecodeStatus: "PASSED_CANONICAL",
+        consumedBytes,
+        trailingBytes: 0,
+        viemCrossCheckStatus: "passed",
+        contractAcceptanceStatus: "not_checked_by_decoder",
       },
     };
   } catch (err) {
-    return {
-      ok: false,
+    return failure({
       matchedSelector: true,
       selector,
       kind: "malformed_abi",
@@ -262,7 +488,9 @@ export function decodePiteasRouterSwapCalldata(params: {
           ? err.message
           : "PiteasRouter.swap calldata failed ABI decode",
       calldataFingerprint,
-    };
+      topLevelDecodeStatus: "MALFORMED",
+      viemCrossCheckStatus: "failed",
+    });
   }
 }
 
