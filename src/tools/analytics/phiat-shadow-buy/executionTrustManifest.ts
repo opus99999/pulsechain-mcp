@@ -14,6 +14,7 @@ import { registerTool } from "../../define.js";
 import { PITEAS_ROUTER } from "./constants.js";
 import {
   buildExecutionTrustReport,
+  type ExecutionClassificationEvidence,
   type ExecutionTargetClassification,
   type ExecutionTrustReport,
   type NormalizedExecutionCall,
@@ -422,136 +423,6 @@ interface TrustManifestCandidateFailure {
 }
 
 type TrustManifestCandidateResult = TrustManifestCandidateSuccess | TrustManifestCandidateFailure;
-
-interface ClosedRecordOverride {
-  role: ExecutionTargetClassification;
-  approvedSelectors: string[];
-  allowedCallTypes?: string[];
-  factoryConstraints?: TrustManifestFactoryConstraint | null;
-  tokenConstraints?: TrustManifestTokenConstraint | null;
-  residualRisks?: string[];
-}
-
-const CLOSED_RECORD_OVERRIDES: Record<string, ClosedRecordOverride> = {
-  [SMART_ROUTER_HELPER]: {
-    role: "PROTOCOL_LIBRARY",
-    approvedSelectors: ["0x4e6c8ed8", "0x8bdb1925"],
-    allowedCallTypes: ["DELEGATECALL"],
-    residualRisks: [
-      "Approval is valid only as a SmartRouter delegatecall library, never as a global address approval.",
-    ],
-  },
-  [SMART_ROUTER]: {
-    role: "PROTOCOL_ROUTER",
-    approvedSelectors: ["0x04e45aaf", "0x23a69e75"],
-    residualRisks: [
-      "SmartRouter can initiate downstream protocol calls; exact edge constraints are required.",
-    ],
-  },
-  "0xe3acfa6c40d53c3faf2aa62d0a715c737071511c": {
-    role: "STABLE_POOL",
-    approvedSelectors: ["0x5b41b908"],
-    residualRisks: ["Stable-pool state changes are route-local only."],
-  },
-  "0x796fcbdc956b85797efe21145aa97599b7fb36a6": {
-    role: "PROTOCOL_FACTORY",
-    approvedSelectors: ["0x07200e33"],
-    allowedCallTypes: ["STATICCALL"],
-    residualRisks: ["Only feeProtocolDistributionInfo() is included; mutators are not approved."],
-  },
-  "0x55b432ad0518a4285ded6bb4d15e9a7182ef7a4d": {
-    role: "V3_POOL",
-    approvedSelectors: ["0x128acb08"],
-    factoryConstraints: {
-      factoryAddress: "0xe50dbdc88e87a2c92984d794bcf3d1d76f619c68",
-      factoryCodeHash: "0x7c7dc7bf84221881cc7961d92b890d2d93036ae0f34c8e6177ff6e5ee6a43971",
-      protocol: "PancakeSwap V3",
-      poolAddress: "0x55b432ad0518a4285ded6bb4d15e9a7182ef7a4d",
-      fee: 10000,
-      tickSpacing: 200,
-    },
-    tokenConstraints: {
-      token0: "0x6b175474e89094c44da98b954eedeac495271d0f",
-      token1: "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
-      assets: [
-        "0x6b175474e89094c44da98b954eedeac495271d0f",
-        "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
-      ],
-      fee: 10000,
-      tickSpacing: 200,
-    },
-  },
-  "0x096af49f24293318661cbbf749a1e3f93ce1fbb2": {
-    role: "V3_POOL",
-    approvedSelectors: ["0x128acb08"],
-    factoryConstraints: libertyFactory("0x096af49f24293318661cbbf749a1e3f93ce1fbb2", 2500, 50),
-    tokenConstraints: tokenPair(
-      "0x6b175474e89094c44da98b954eedeac495271d0f",
-      "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
-      2500,
-      50,
-    ),
-  },
-  "0x13500f3449e337464eb8b5897dc2b06fe3fa692a": {
-    role: "V3_POOL",
-    approvedSelectors: ["0x128acb08"],
-    factoryConstraints: libertyFactory("0x13500f3449e337464eb8b5897dc2b06fe3fa692a", 2500, 50),
-    tokenConstraints: tokenPair(
-      "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07",
-      "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
-      2500,
-      50,
-    ),
-  },
-  "0x475e1f945427cc02bfb2d76f111c5541413505c0": {
-    role: "V3_POOL",
-    approvedSelectors: ["0x128acb08"],
-    factoryConstraints: libertyFactory("0x475e1f945427cc02bfb2d76f111c5541413505c0", 10000, 200),
-    tokenConstraints: tokenPair(
-      "0x6b175474e89094c44da98b954eedeac495271d0f",
-      "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
-      10000,
-      200,
-    ),
-  },
-  "0x042ff2668957c7ad7d8b42232af59f339803cd10": {
-    role: "V3_POOL",
-    approvedSelectors: ["0x128acb08"],
-    factoryConstraints: libertyFactory("0x042ff2668957c7ad7d8b42232af59f339803cd10", 2500, 50),
-    tokenConstraints: tokenPair(
-      "0x6b175474e89094c44da98b954eedeac495271d0f",
-      "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
-      2500,
-      50,
-    ),
-  },
-};
-
-function libertyFactory(poolAddress: string, fee: number, tickSpacing: number): TrustManifestFactoryConstraint {
-  return {
-    factoryAddress: "0x796fcbdc956b85797efe21145aa97599b7fb36a6",
-    factoryCodeHash: "0x06980a00918587c043af9085626962ebb94f9d0482e0028ff9a9f233d34cebd3",
-    protocol: "LibertySwap V3 fork",
-    poolAddress,
-    fee,
-    tickSpacing,
-  };
-}
-
-function tokenPair(
-  token0: string,
-  token1: string,
-  fee: number,
-  tickSpacing: number,
-): TrustManifestTokenConstraint {
-  return {
-    token0,
-    token1,
-    assets: [token0, token1],
-    fee,
-    tickSpacing,
-  };
-}
 
 export function canonicalizeJson(value: unknown): string {
   if (value === null) return "null";
@@ -974,12 +845,13 @@ export function buildTrustManifestCandidateFromReport(
 ): TrustManifestCandidateResult {
   const expiresAt = args.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const expiresAtBlock = args.expiresAtBlock ?? null;
-  const closed = isClosedHistoricalReport(report);
+  const closureErrors = candidateTrustClosureErrors(report);
+  if (closureErrors.length > 0) return internalCandidateFailure(closureErrors);
   const sourceRecordConflicts = candidateRecordConflictErrors(report.candidateRecords);
   if (sourceRecordConflicts.length > 0) return internalCandidateFailure(sourceRecordConflicts);
   const records = report.candidateRecords
     .filter((record) => record.role !== "EOA" && record.role !== "PRECOMPILE")
-    .map((record) => manifestRecordFromCandidate(report, record, closed, expiresAtBlock))
+    .map((record) => manifestRecordFromCandidate(report, record, expiresAtBlock))
     .sort((a, b) => lexCompare(recordSortKey(a), recordSortKey(b)));
   const layout = deriveSwapManagerStorageLayout();
   const manifestWithoutId: Omit<TrustManifest, "manifestId"> = {
@@ -1002,7 +874,7 @@ export function buildTrustManifestCandidateFromReport(
       managerChangeEventBlock: null,
     },
     records,
-    allowedEdges: allowedEdges(report.normalizedCalls, closed),
+    allowedEdges: allowedEdges(report.normalizedCalls),
     prohibitedOperations: ["CREATE", "CREATE2", "SELFDESTRUCT", "CALLCODE"],
     approvalPolicy: {
       unexpectedTarget: "REJECT",
@@ -1037,7 +909,7 @@ export function buildTrustManifestCandidateFromReport(
     manifest: prepared.manifest,
     manifestFingerprint: prepared.manifestFingerprint,
     unresolvedRecords: prepared.manifest.records.filter((record) =>
-      closed ? false : record.residualRisks.some((risk) => risk.startsWith("unresolved:")),
+      record.residualRisks.some((risk) => risk.startsWith("unresolved:")),
     ),
     residualRisks,
     operatorSignatureRequired: true,
@@ -1053,6 +925,49 @@ export function buildTrustManifestCandidateFromReport(
     },
     reviewReport: renderTrustManifestReview(prepared.manifest, residualRisks),
   };
+}
+
+function candidateTrustClosureErrors(report: ExecutionTrustReport): string[] {
+  const errors: string[] = [];
+  const closure = report.trustClosure ?? {
+    unresolvedCallCount: report.graphPolicy.unresolvedCallCount,
+    unresolvedStateChangingCallCount: report.graphPolicy.unresolvedStateChangingCallCount,
+    unresolvedDelegatecallCount: report.graphPolicy.unresolvedDelegatecallCount,
+    unknownSelectorCount: report.graphPolicy.unknownSelectorCount,
+    prohibitedOperationCount: report.graphPolicy.prohibitedOperationCount,
+    candidateRecordCount: report.candidateRecords.length,
+    unresolvedRecordCount: report.routeTrustBundle.unresolvedRecords.length,
+  };
+  const status = report.trustClosureStatus ?? (
+    closure.prohibitedOperationCount > 0
+      ? "FAILED"
+      : closure.unresolvedStateChangingCallCount === 0 &&
+          closure.unresolvedDelegatecallCount === 0 &&
+          closure.unknownSelectorCount === 0 &&
+          closure.prohibitedOperationCount === 0 &&
+          closure.unresolvedRecordCount === 0
+        ? "COMPLETE"
+        : "PARTIAL"
+  );
+  if (status !== "COMPLETE") {
+    errors.push(`TRUST_CLOSURE_${status}`);
+  }
+  if (closure.unresolvedStateChangingCallCount > 0) {
+    errors.push(`UNRESOLVED_STATE_CHANGING_CALLS:${closure.unresolvedStateChangingCallCount}`);
+  }
+  if (closure.unresolvedDelegatecallCount > 0) {
+    errors.push(`UNRESOLVED_DELEGATECALLS:${closure.unresolvedDelegatecallCount}`);
+  }
+  if (closure.unknownSelectorCount > 0) {
+    errors.push(`UNKNOWN_SELECTORS:${closure.unknownSelectorCount}`);
+  }
+  if (closure.prohibitedOperationCount > 0) {
+    errors.push(`PROHIBITED_OPERATIONS:${closure.prohibitedOperationCount}`);
+  }
+  if (closure.unresolvedRecordCount > 0) {
+    errors.push(`UNRESOLVED_REQUIRED_RECORDS:${closure.unresolvedRecordCount}`);
+  }
+  return uniqueStrings(errors).sort();
 }
 
 function candidateRecordConflictErrors(
@@ -1679,11 +1594,10 @@ async function readCurrentBlockForManifestVerifier(config: AppConfig): Promise<s
 function manifestRecordFromCandidate(
   report: ExecutionTrustReport,
   record: ExecutionTrustReport["candidateRecords"][number],
-  closed: boolean,
   expiresAtBlock: string | null,
 ): TrustManifestRecord {
   const address = record.normalizedAddress.toLowerCase();
-  const override = closed ? CLOSED_RECORD_OVERRIDES[address] : undefined;
+  const evidence = runtimeClassificationEvidence(record);
   const observedSelectors = uniqueStrings(record.observedSelectors.map((value) => value.toLowerCase())).sort();
   const parentConstraints = record.parentConstraints.map((constraint) => ({
     parentAddress: constraint.parentAddress ? constraint.parentAddress.toLowerCase() : null,
@@ -1694,31 +1608,34 @@ function manifestRecordFromCandidate(
     selector: constraint.selector ? constraint.selector.toLowerCase() : null,
     callType: constraint.callType.toUpperCase(),
   })).sort((a, b) => lexCompare(callerConstraintKey(a), callerConstraintKey(b)));
-  const role = override?.role ?? record.role;
+  const approvedSelectorCandidates = record.approvedSelectors.length > 0
+    ? record.approvedSelectors
+    : evidence?.approvedSelectorCandidates ?? observedSelectors;
+  const allowedCallTypes = evidence?.allowedCallTypes ?? callerConstraints.map((constraint) => constraint.callType);
   return {
     address,
-    role,
+    role: record.role,
     runtimeCodeHash: record.runtimeCodeHash?.toLowerCase() ?? null,
     implementationAddress: implementationAddressFor(record.implementationAddress, address),
     implementationCodeHash: record.implementationCodeHash?.toLowerCase() ?? null,
     approvedSelectors: uniqueStrings(
-      (override?.approvedSelectors ?? observedSelectors).map((value) => value.toLowerCase()),
+      approvedSelectorCandidates.map((value) => value.toLowerCase()),
     ).sort(),
     allowedCallTypes: uniqueStrings(
-      (override?.allowedCallTypes ?? callerConstraints.map((constraint) => constraint.callType)).map((value) =>
+      allowedCallTypes.map((value) =>
         value.toUpperCase(),
       ),
     ).sort(),
     parentConstraints,
     callerConstraints,
-    factoryConstraints: override?.factoryConstraints ?? factoryConstraintFromRecord(record),
-    tokenConstraints: override?.tokenConstraints ?? tokenConstraintFromRecord(record),
+    factoryConstraints: factoryConstraintFromRecord(record, evidence),
+    tokenConstraints: tokenConstraintFromRecord(record, evidence),
     managerHashConstraint: record.managerCodeHashConstraint?.toLowerCase() ?? null,
     routerHashConstraint: CURRENT_ROUTER_HASH,
     delegatecallContexts: delegatecallContextsFor(report, address, callerConstraints),
     firstApprovedBlock: report.historicalBlock,
     expiresAtBlock,
-    residualRisks: residualRisks(record.unresolvedReasons, override),
+    residualRisks: residualRisks(record, evidence),
   };
 }
 
@@ -1728,7 +1645,38 @@ function implementationAddressFor(value: string | null, address: string): string
   return value.toLowerCase();
 }
 
-function factoryConstraintFromRecord(record: ExecutionTrustReport["candidateRecords"][number]): TrustManifestFactoryConstraint | null {
+function runtimeClassificationEvidence(
+  record: ExecutionTrustReport["candidateRecords"][number],
+): ExecutionClassificationEvidence | null {
+  const value = record.evidence.runtimeClassificationEvidence;
+  if (
+    value &&
+    typeof value === "object" &&
+    "normalizedAddress" in value &&
+    "runtimeCodeHash" in value &&
+    "role" in value &&
+    "classificationEvidenceMode" in value
+  ) {
+    return value as ExecutionClassificationEvidence;
+  }
+  return null;
+}
+
+function factoryConstraintFromRecord(
+  record: ExecutionTrustReport["candidateRecords"][number],
+  evidence: ExecutionClassificationEvidence | null,
+): TrustManifestFactoryConstraint | null {
+  const evidenceConstraint = evidence?.factoryConstraints[0];
+  if (evidenceConstraint) {
+    return {
+      factoryAddress: evidenceConstraint.factoryAddress.toLowerCase(),
+      factoryCodeHash: evidenceConstraint.factoryCodeHash.toLowerCase(),
+      protocol: evidenceConstraint.protocol,
+      poolAddress: evidenceConstraint.poolAddress?.toLowerCase() ?? null,
+      fee: evidenceConstraint.fee ?? null,
+      tickSpacing: evidenceConstraint.tickSpacing ?? null,
+    };
+  }
   if (!record.factoryAddress && !record.factoryCodeHash) return null;
   return {
     factoryAddress: record.factoryAddress?.toLowerCase() ?? null,
@@ -1737,7 +1685,20 @@ function factoryConstraintFromRecord(record: ExecutionTrustReport["candidateReco
   };
 }
 
-function tokenConstraintFromRecord(record: ExecutionTrustReport["candidateRecords"][number]): TrustManifestTokenConstraint | null {
+function tokenConstraintFromRecord(
+  record: ExecutionTrustReport["candidateRecords"][number],
+  evidence: ExecutionClassificationEvidence | null,
+): TrustManifestTokenConstraint | null {
+  const evidenceConstraint = evidence?.tokenConstraints[0];
+  if (evidenceConstraint) {
+    return {
+      token0: evidenceConstraint.token0?.toLowerCase() ?? null,
+      token1: evidenceConstraint.token1?.toLowerCase() ?? null,
+      assets: evidenceConstraint.assets.map((value) => value.toLowerCase()).sort(),
+      fee: evidenceConstraint.fee ?? null,
+      tickSpacing: evidenceConstraint.tickSpacing ?? null,
+    };
+  }
   if (!record.tokenConstraints) return null;
   return {
     token0: record.tokenConstraints.token0?.toLowerCase() ?? null,
@@ -1787,17 +1748,40 @@ function delegatecallContextsFor(
     })));
 }
 
-function residualRisks(unresolvedReasons: string[], override: ClosedRecordOverride | undefined): string[] {
-  const risks = [...(override?.residualRisks ?? [])];
-  if (!override) risks.push(...unresolvedReasons.map((reason) => `unresolved:${reason}`));
+function residualRisks(
+  record: ExecutionTrustReport["candidateRecords"][number],
+  evidence: ExecutionClassificationEvidence | null,
+): string[] {
+  const risks = evidence ? residualRisksForEvidence(evidence) : [];
+  risks.push(...record.unresolvedReasons.map((reason) => `unresolved:${reason}`));
   return uniqueStrings(risks).sort();
 }
 
-function allowedEdges(calls: NormalizedExecutionCall[], closed: boolean): TrustManifestEdge[] {
+function residualRisksForEvidence(evidence: ExecutionClassificationEvidence): string[] {
+  if (sameAddress(evidence.normalizedAddress, SMART_ROUTER_HELPER)) {
+    return [
+      "Approval is valid only as a SmartRouter delegatecall library, never as a global address approval.",
+    ];
+  }
+  if (sameAddress(evidence.normalizedAddress, SMART_ROUTER)) {
+    return [
+      "SmartRouter can initiate downstream protocol calls; exact edge constraints are required.",
+    ];
+  }
+  if (evidence.role === "PROTOCOL_FACTORY") {
+    return ["Only feeProtocolDistributionInfo() is included; mutators are not approved."];
+  }
+  if (evidence.role === "STABLE_POOL") {
+    return ["Stable-pool state changes are route-local only."];
+  }
+  return [];
+}
+
+function allowedEdges(calls: NormalizedExecutionCall[]): TrustManifestEdge[] {
   const byAddress = new Map<string, ExecutionTargetClassification>();
   for (const call of calls) {
     if (!call.to) continue;
-    byAddress.set(call.to, closed && CLOSED_RECORD_OVERRIDES[call.to] ? CLOSED_RECORD_OVERRIDES[call.to]!.role : call.classification);
+    byAddress.set(call.to, call.classification);
   }
   const seen = new Set<string>();
   const edges: TrustManifestEdge[] = [];
@@ -1818,16 +1802,6 @@ function allowedEdges(calls: NormalizedExecutionCall[], closed: boolean): TrustM
     }
   }
   return edges.sort((a, b) => lexCompare(edgeKey(a), edgeKey(b)));
-}
-
-function isClosedHistoricalReport(report: ExecutionTrustReport): boolean {
-  return (
-    report.historicalTransaction.toLowerCase() === HISTORICAL_TX &&
-    report.historicalBlock === HISTORICAL_BLOCK &&
-    report.routeTrustBundle.graphFingerprint === HISTORICAL_GRAPH_FINGERPRINT &&
-    report.routeTrustBundle.bundleFingerprint === HISTORICAL_BUNDLE_FINGERPRINT &&
-    report.routeTrustBundle.prohibitedOperations.length === 0
-  );
 }
 
 function renderTrustManifestReview(manifest: TrustManifest, residualRisks: string[]): string {

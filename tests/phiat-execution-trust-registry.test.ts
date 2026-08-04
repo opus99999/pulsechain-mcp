@@ -42,14 +42,95 @@ const ROUTER_HASH =
   "0xb5258c97b5eab452bf93b61916631704898cc81bcbb2dff8524c3215a8f1454b";
 const TOKEN_PROXY = "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07";
 const TOKEN_IMPL = "0x539a69de74e9ed69fbe7f909fa935d05b8caba11";
+const TOKEN_IMPL_HASH =
+  "0x57a73a555fee21aa544bcd2feeba6033020677d82977701a78e89b7da0f45b08";
 const UNPROVEN_DELEGATE = "0x2d14e7701ce7d5558eb02f1919ec431a76fb2cad";
+const SMART_ROUTER = "0xf6076d61a0c46c944852f65838e1b12a2910a717";
+const SMART_ROUTER_HASH =
+  "0x8675933f176bbd98e4af9cc8015ca7fbdaf003dfd67782a2b26167f559d6c0fd";
+const SMART_ROUTER_HELPER = "0x2d14e7701ce7d5558eb02f1919ec431a76fb2cad";
+const SMART_ROUTER_HELPER_HASH =
+  "0x99dbcfd8791473ebe1f2127aa162bea456a0e88db9bf211872f90a0b1ac14830";
+const STABLE_POOL = "0xe3acfa6c40d53c3faf2aa62d0a715c737071511c";
+const STABLE_POOL_HASH =
+  "0x9bc8ce0d268e55bf55b6fe84d2453a8fcf13a6874671a2e68172e3a937886427";
+const LIBERTY_FACTORY = "0x796fcbdc956b85797efe21145aa97599b7fb36a6";
+const LIBERTY_FACTORY_HASH =
+  "0x06980a00918587c043af9085626962ebb94f9d0482e0028ff9a9f233d34cebd3";
+const PHUX_ROUTER = "0x48e8100374ae6ff2cc8871db6224b296718eeb0d";
+const PHUX_ROUTER_HASH =
+  "0x61d40f5d698419b552d51f9f49abebaefd199a88f29e97eeeb66a7871f742830";
 const WPLS = "0xa1077a294dde1b09bb078844df40758a5d0f9a27";
 const PULSEX_V1_ROUTER = "0x98bf93ebf5c380c0e6ae8e192a7e2ae08edacc02";
 const PULSEX_V1_FACTORY = "0x1715a3e4a142d8b698131108995174f37aeba10d";
 const V2_POOL = "0x6753560538eca67617a9ce605178f788be7e524e";
 const DIRECT_TOKEN = "0x6b175474e89094c44da98b954eedeac495271d0f";
+const CST_TOKEN = "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f";
 const UNKNOWN = "0x4444444444444444444444444444444444444444";
 const UNKNOWN_LIVE = "0x5555555555555555555555555555555555555555";
+
+const PINNED_V3_POOLS = [
+  {
+    address: "0x55b432ad0518a4285ded6bb4d15e9a7182ef7a4d",
+    protocol: "PancakeSwap V3",
+    factoryAddress: "0xe50dbdc88e87a2c92984d794bcf3d1d76f619c68",
+    factoryCodeHash: "0x7c7dc7bf84221881cc7961d92b890d2d93036ae0f34c8e6177ff6e5ee6a43971",
+    token0: DIRECT_TOKEN,
+    token1: WPLS,
+    fee: 10000,
+    tickSpacing: 200,
+    runtimeCodeHash: "0xffe7ac163e0f3a464d1daa934c8bf207d82f15e490fe934c49acd723d0e68c3d",
+    caller: SMART_ROUTER,
+  },
+  {
+    address: "0x096af49f24293318661cbbf749a1e3f93ce1fbb2",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_FACTORY,
+    factoryCodeHash: LIBERTY_FACTORY_HASH,
+    token0: DIRECT_TOKEN,
+    token1: WPLS,
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0xdeeee829f4a6fb924b2fc02ed05a8c9a6d8ae5499fdf3d9c5610f23205798428",
+    caller: PHUX_ROUTER,
+  },
+  {
+    address: "0x13500f3449e337464eb8b5897dc2b06fe3fa692a",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_FACTORY,
+    factoryCodeHash: LIBERTY_FACTORY_HASH,
+    token0: TOKEN_PROXY,
+    token1: CST_TOKEN,
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0x7273abcac81c217f2e33b60c4a027061b924468867ede48439b4e5ae0248d1d4",
+    caller: PHUX_ROUTER,
+  },
+  {
+    address: "0x475e1f945427cc02bfb2d76f111c5541413505c0",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_FACTORY,
+    factoryCodeHash: LIBERTY_FACTORY_HASH,
+    token0: DIRECT_TOKEN,
+    token1: CST_TOKEN,
+    fee: 10000,
+    tickSpacing: 200,
+    runtimeCodeHash: "0x8a896473a92f65d2052908acfb345d341b3d0bc8a538e6c013126e5c8df6da76",
+    caller: PHUX_ROUTER,
+  },
+  {
+    address: "0x042ff2668957c7ad7d8b42232af59f339803cd10",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_FACTORY,
+    factoryCodeHash: LIBERTY_FACTORY_HASH,
+    token0: DIRECT_TOKEN,
+    token1: CST_TOKEN,
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0xf8f050e61b62eac593fc98d326cf91759d1cb32c30b476e1c2685ac2b4b11330",
+    caller: PHUX_ROUTER,
+  },
+] as const;
 
 const baseConfig: AppConfig = {
   rpcUrls: ["https://rpc-a.example", "https://rpc-b.example"],
@@ -75,6 +156,11 @@ const CODE = {
   proxy: "0x60006000f4600055",
   tokenImpl: "0x6003600055",
   unprovenDelegate: "0x6004600055",
+  smartRouter: "0x600a600055",
+  smartRouterHelper: "0x600b600055",
+  stablePool: "0x600c600055",
+  libertyFactory: "0x600d600055",
+  phuxRouter: "0x600e600055",
   erc20: "0x6005600055",
   protocolRouter: "0x6006600055",
   factory: "0x6007600055",
@@ -119,13 +205,19 @@ function codeMap(): Map<string, RuntimeCodeEvidence> {
     runtimeEvidence(PITEAS_ROUTER.toLowerCase(), CODE.router, ROUTER_HASH),
     runtimeEvidence(MANAGER, CODE.manager, MANAGER_HASH),
     runtimeEvidence(TOKEN_PROXY, CODE.proxy),
-    runtimeEvidence(TOKEN_IMPL, CODE.tokenImpl),
-    runtimeEvidence(UNPROVEN_DELEGATE, CODE.unprovenDelegate),
+    runtimeEvidence(TOKEN_IMPL, CODE.tokenImpl, TOKEN_IMPL_HASH),
+    runtimeEvidence(UNPROVEN_DELEGATE, CODE.unprovenDelegate, SMART_ROUTER_HELPER_HASH),
+    runtimeEvidence(SMART_ROUTER, CODE.smartRouter, SMART_ROUTER_HASH),
+    runtimeEvidence(STABLE_POOL, CODE.stablePool, STABLE_POOL_HASH),
+    runtimeEvidence(LIBERTY_FACTORY, CODE.libertyFactory, LIBERTY_FACTORY_HASH),
+    runtimeEvidence(PHUX_ROUTER, CODE.phuxRouter, PHUX_ROUTER_HASH),
+    ...PINNED_V3_POOLS.map((pool) => runtimeEvidence(pool.address, CODE.pool, pool.runtimeCodeHash)),
     runtimeEvidence(WPLS, CODE.erc20),
     runtimeEvidence(PULSEX_V1_ROUTER, CODE.protocolRouter),
     runtimeEvidence(PULSEX_V1_FACTORY, CODE.factory),
     runtimeEvidence(V2_POOL, CODE.pool),
     runtimeEvidence(DIRECT_TOKEN, CODE.erc20),
+    runtimeEvidence(CST_TOKEN, CODE.erc20),
     runtimeEvidence(UNKNOWN, CODE.unknown),
   ];
   return new Map(entries.map((entry) => [entry.normalizedAddress, entry]));
@@ -168,6 +260,44 @@ function poolEvidence(factoryVerified = true): PoolProvenanceEvidence {
 
 function poolMap(factoryVerified = true): Map<string, PoolProvenanceEvidence> {
   return new Map([[V2_POOL, poolEvidence(factoryVerified)]]);
+}
+
+function pinnedPoolEvidence(
+  pool: (typeof PINNED_V3_POOLS)[number],
+  overrides: Partial<PoolProvenanceEvidence> = {},
+): PoolProvenanceEvidence {
+  return {
+    protocol: pool.protocol,
+    poolType: "V3_POOL",
+    factoryAddress: pool.factoryAddress,
+    factoryCodeHash: pool.factoryCodeHash,
+    token0: pool.token0,
+    token1: pool.token1,
+    assets: [pool.token0, pool.token1],
+    fee: pool.fee,
+    tickSpacing: pool.tickSpacing,
+    factoryVerified: true,
+    selectorAppropriate: true,
+    evidence: {
+      address: pool.address,
+      factoryLookup: pool.address,
+      poolCreatedEvent: true,
+    },
+    unresolvedReasons: [],
+    ...overrides,
+  };
+}
+
+function pinnedPoolMap(
+  overrides: Record<string, Partial<PoolProvenanceEvidence>> = {},
+): Map<string, PoolProvenanceEvidence> {
+  return new Map([
+    ...poolMap().entries(),
+    ...PINNED_V3_POOLS.map((pool) => [
+      pool.address,
+      pinnedPoolEvidence(pool, overrides[pool.address] ?? {}),
+    ] as const),
+  ]);
 }
 
 function call(to: string, selector: string, calls: TraceNode[] = [], type = "CALL"): TraceNode {
@@ -214,11 +344,11 @@ function historicalTraceFixture(): TraceNode {
   while (countTrace(root) < 154) {
     managerChildren.push(call(DIRECT_TOKEN, ERC20_BALANCE_OF_SELECTOR, [], "STATICCALL"));
   }
-  return root;
+  return withTraceCallers(root);
 }
 
 function fullyClassifiedTraceFixture(): TraceNode {
-  return {
+  return withTraceCallers({
     type: "CALL",
     from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
     to: PITEAS_ROUTER,
@@ -235,44 +365,102 @@ function fullyClassifiedTraceFixture(): TraceNode {
         ]),
       ]),
     ],
-  };
+  });
 }
 
 function arbitraryDelegateTrace(): TraceNode {
-  return {
+  return withTraceCallers({
     type: "CALL",
     from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
     to: MANAGER,
     input: `${PITEAS_SWAP_MANAGER_SELECTOR}${"00".repeat(32)}`,
     value: "0x0",
     calls: [call(TOKEN_IMPL, ERC20_TRANSFER_SELECTOR, [], "DELEGATECALL")],
+  });
+}
+
+function runtimeClosureTraceFixture(): TraceNode {
+  const managerChildren: TraceNode[] = [
+    call(SMART_ROUTER, "0x04e45aaf", [
+      call(SMART_ROUTER_HELPER, "0x4e6c8ed8", [], "DELEGATECALL"),
+      call(PINNED_V3_POOLS[0].address, "0x128acb08", [
+        call(DIRECT_TOKEN, ERC20_TRANSFER_SELECTOR),
+        call(SMART_ROUTER, "0x23a69e75", [
+          call(SMART_ROUTER_HELPER, "0x8bdb1925", [], "DELEGATECALL"),
+          call(WPLS, ERC20_TRANSFER_FROM_SELECTOR),
+        ]),
+      ]),
+    ]),
+    call(STABLE_POOL, "0x5b41b908"),
+    ...PINNED_V3_POOLS.slice(1).map((pool) =>
+      call(PHUX_ROUTER, "0x414bf389", [
+        call(pool.address, "0x128acb08", [
+          call(LIBERTY_FACTORY, "0x07200e33", [], "STATICCALL"),
+          call(pool.token0, ERC20_TRANSFER_SELECTOR),
+          call(pool.token1, ERC20_TRANSFER_SELECTOR),
+        ]),
+      ]),
+    ),
+  ];
+  const root: TraceNode = {
+    type: "CALL",
+    from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+    to: PITEAS_ROUTER,
+    input: `0x8218b58f${"00".repeat(32)}`,
+    output: "0x",
+    value: "0x0",
+    gasUsed: "0x1",
+    calls: [
+      call(TOKEN_PROXY, ERC20_TRANSFER_FROM_SELECTOR, [
+        call(TOKEN_IMPL, ERC20_TRANSFER_FROM_SELECTOR, [], "DELEGATECALL"),
+      ]),
+      call(MANAGER, PITEAS_SWAP_MANAGER_SELECTOR, managerChildren),
+      call(DIRECT_TOKEN, ERC20_TRANSFER_SELECTOR),
+    ],
   };
+  while (countTrace(root) < 154) {
+    managerChildren.push(call(DIRECT_TOKEN, ERC20_BALANCE_OF_SELECTOR, [], "STATICCALL"));
+  }
+  return withTraceCallers(root);
 }
 
 function countTrace(root: TraceNode): number {
   return 1 + (root.calls ?? []).reduce((sum, child) => sum + countTrace(child), 0);
 }
 
+function withTraceCallers(root: TraceNode): TraceNode {
+  const walk = (node: TraceNode) => {
+    for (const child of node.calls ?? []) {
+      if (node.to) child.from = node.to;
+      walk(child);
+    }
+  };
+  walk(root);
+  return root;
+}
+
 function classifiedCalls(
   root = historicalTraceFixture(),
   pools = poolMap(),
+  codes = codeMap(),
+  sources = sourceMap(),
 ): NormalizedExecutionCall[] {
   return classifyCalls({
     calls: normalizeExecutionTrace({
       root,
-      runtimeCodeByAddress: codeMap(),
+      runtimeCodeByAddress: codes,
       blockNumber: HISTORICAL_BLOCK,
     }),
-    codeByAddress: codeMap(),
-    sourceByAddress: sourceMap(),
+    codeByAddress: codes,
+    sourceByAddress: sources,
     poolByAddress: pools,
   });
 }
 
-function recordsFor(calls = classifiedCalls(), pools = poolMap()) {
+function recordsFor(calls = classifiedCalls(), pools = poolMap(), codes = codeMap()) {
   return buildTrustRecordCandidates({
     calls,
-    codeByAddress: codeMap(),
+    codeByAddress: codes,
     sourceByAddress: sourceMap(),
     poolByAddress: pools,
     managerCodeHash: MANAGER_HASH,
@@ -359,10 +547,10 @@ describe("Piteas execution trust registry", () => {
     const calls = classifiedCalls(arbitraryDelegateTrace());
     const implementation = calls.find((row) => row.to === TOKEN_IMPL);
 
-    expect(implementation?.classification).toBe("TOKEN_IMPLEMENTATION");
+    expect(implementation?.classification).toBe("UNKNOWN_CONTRACT");
     expect(implementation?.parentRole).not.toBe("TOKEN_PROXY");
     expect(implementation?.unresolvedReasons).toContain(
-      "token_implementation_without_token_proxy_parent",
+      "delegatecall_target_unresolved",
     );
   });
 
@@ -543,6 +731,187 @@ describe("Piteas execution trust registry", () => {
     expect(policy.graphStatus).toBe("FULLY_CLASSIFIED");
     expect(policy.unresolvedCallCount).toBe(0);
     expect(policy.automaticExecutionEligible).toBe(false);
+  });
+
+  it("closes the 154-call Piteas runtime evidence fixture without operator approval", async () => {
+    const report = await buildExecutionTrustReport({
+      config: baseConfig,
+      historicalTransactionHash: HISTORICAL_TX,
+      pinnedBlock: HISTORICAL_BLOCK,
+      traceRoot: runtimeClosureTraceFixture(),
+      provider: provider(pinnedPoolMap()),
+    });
+
+    expect(report.callCount).toBe(154);
+    expect(report.graphPolicy.classifiedCallCount).toBe(154);
+    expect(report.graphPolicy.unresolvedCallCount).toBe(0);
+    expect(report.graphPolicy.unresolvedStateChangingCallCount).toBe(0);
+    expect(report.graphPolicy.unresolvedDelegatecallCount).toBe(0);
+    expect(report.graphPolicy.unknownSelectorCount).toBe(0);
+    expect(report.graphPolicy.prohibitedOperationCount).toBe(0);
+    expect(report.trustClosureStatus).toBe("COMPLETE");
+    expect(report.routeTrustBundle.unresolvedRecords).toEqual([]);
+    expect(report.candidateRecords.every((record) => record.operatorApproved === false)).toBe(true);
+    expect(report.runtimeResolutionEvidence.map((evidence) => evidence.normalizedAddress)).toEqual(
+      expect.arrayContaining([
+        SMART_ROUTER,
+        SMART_ROUTER_HELPER,
+        STABLE_POOL,
+        LIBERTY_FACTORY,
+        ...PINNED_V3_POOLS.map((pool) => pool.address),
+      ]),
+    );
+  });
+
+  it("classifies SmartRouterHelper only with exact hash, parent, call type, and selector", () => {
+    const exact = classifiedCalls(runtimeClosureTraceFixture(), pinnedPoolMap());
+    const helper = exact.find((row) => row.to === SMART_ROUTER_HELPER && row.selector === "0x4e6c8ed8");
+    expect(helper).toMatchObject({
+      classification: "PROTOCOL_LIBRARY",
+      classificationEvidenceMode: "PINNED_AUDITED_EVIDENCE",
+      unresolvedReasons: [],
+    });
+
+    const wrongParent = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: MANAGER,
+      input: `${PITEAS_SWAP_MANAGER_SELECTOR}${"00".repeat(32)}`,
+      calls: [call(UNKNOWN, "0xabcdef01", [call(SMART_ROUTER_HELPER, "0x4e6c8ed8", [], "DELEGATECALL")])],
+    }));
+    expect(wrongParent.find((row) => row.to === SMART_ROUTER_HELPER)?.unresolvedReasons).toContain(
+      "delegatecall_target_0x2d14_role_not_proven",
+    );
+
+    const wrongSelector = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: MANAGER,
+      input: `${PITEAS_SWAP_MANAGER_SELECTOR}${"00".repeat(32)}`,
+      calls: [call(SMART_ROUTER, "0x04e45aaf", [call(SMART_ROUTER_HELPER, "0xdeadbeef", [], "DELEGATECALL")])],
+    }));
+    expect(wrongSelector.find((row) => row.to === SMART_ROUTER_HELPER)?.classification).toBe("UNKNOWN_CONTRACT");
+
+    const callInstead = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: MANAGER,
+      input: `${PITEAS_SWAP_MANAGER_SELECTOR}${"00".repeat(32)}`,
+      calls: [call(SMART_ROUTER, "0x04e45aaf", [call(SMART_ROUTER_HELPER, "0x4e6c8ed8")])],
+    }));
+    expect(callInstead.find((row) => row.to === SMART_ROUTER_HELPER)?.classification).toBe("UNKNOWN_CONTRACT");
+
+    const badCodes = new Map(codeMap());
+    badCodes.set(SMART_ROUTER_HELPER, runtimeEvidence(SMART_ROUTER_HELPER, CODE.smartRouterHelper, codeHash(CODE.smartRouterHelper)));
+    const wrongHash = classifiedCalls(runtimeClosureTraceFixture(), pinnedPoolMap(), badCodes);
+    expect(wrongHash.find((row) => row.to === SMART_ROUTER_HELPER)?.classification).toBe("UNKNOWN_CONTRACT");
+  });
+
+  it("classifies SmartRouter calls only with exact route and callback context", () => {
+    const exact = classifiedCalls(runtimeClosureTraceFixture(), pinnedPoolMap());
+    expect(exact.find((row) => row.to === SMART_ROUTER && row.selector === "0x04e45aaf")?.classification).toBe(
+      "PROTOCOL_ROUTER",
+    );
+    expect(exact.find((row) => row.to === SMART_ROUTER && row.selector === "0x23a69e75")?.classification).toBe(
+      "PROTOCOL_ROUTER",
+    );
+
+    const wrongPoolCallback = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: UNKNOWN,
+      input: `0x128acb08${"00".repeat(32)}`,
+      calls: [call(SMART_ROUTER, "0x23a69e75")],
+    }), pinnedPoolMap());
+    expect(wrongPoolCallback.find((row) => row.to === SMART_ROUTER)?.classification).toBe("UNKNOWN_CONTRACT");
+
+    const badCodes = new Map(codeMap());
+    badCodes.set(SMART_ROUTER_HELPER, runtimeEvidence(SMART_ROUTER_HELPER, CODE.smartRouterHelper, codeHash(CODE.smartRouterHelper)));
+    const helperMismatch = classifiedCalls(runtimeClosureTraceFixture(), pinnedPoolMap(), badCodes);
+    expect(helperMismatch.find((row) => row.to === SMART_ROUTER && row.selector === "0x04e45aaf")?.classification).toBe(
+      "UNKNOWN_CONTRACT",
+    );
+  });
+
+  it("classifies stable-pool and Liberty factory evidence only for exact selector and caller context", () => {
+    const exact = classifiedCalls(runtimeClosureTraceFixture(), pinnedPoolMap());
+    expect(exact.find((row) => row.to === STABLE_POOL)?.classification).toBe("STABLE_POOL");
+    expect(exact.find((row) => row.to === LIBERTY_FACTORY)?.classification).toBe("PROTOCOL_FACTORY");
+
+    const wrongStableSelector = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: MANAGER,
+      input: `${PITEAS_SWAP_MANAGER_SELECTOR}${"00".repeat(32)}`,
+      calls: [call(STABLE_POOL, "0xdeadbeef")],
+    }));
+    expect(wrongStableSelector.find((row) => row.to === STABLE_POOL)?.classification).toBe("UNKNOWN_CONTRACT");
+
+    const wrongFactoryCallType = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: PINNED_V3_POOLS[1].address,
+      input: `0x128acb08${"00".repeat(32)}`,
+      calls: [call(LIBERTY_FACTORY, "0x07200e33")],
+    }), pinnedPoolMap());
+    expect(wrongFactoryCallType.find((row) => row.to === LIBERTY_FACTORY)?.classification).toBe("UNKNOWN_CONTRACT");
+  });
+
+  it("requires exact V3 pool provenance and rejects factory, token, fee, tick, hash, and caller mismatches", () => {
+    for (const pool of PINNED_V3_POOLS) {
+      const calls = classifiedCalls(withTraceCallers({
+        type: "CALL",
+        from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+        to: pool.caller,
+        input: `0x414bf389${"00".repeat(32)}`,
+        calls: [call(pool.address, "0x128acb08")],
+      }), pinnedPoolMap());
+      expect(calls.find((row) => row.to === pool.address)?.classification).toBe("V3_POOL");
+    }
+
+    const pool = PINNED_V3_POOLS[1];
+    const rejects = [
+      { factoryAddress: UNKNOWN },
+      { token0: WPLS },
+      { fee: pool.fee + 1 },
+      { tickSpacing: pool.tickSpacing + 1 },
+      { factoryVerified: false, unresolvedReasons: ["factory_did_not_confirm_pool"] },
+    ];
+    for (const override of rejects) {
+      const calls = classifiedCalls(withTraceCallers({
+        type: "CALL",
+        from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+        to: pool.caller,
+        input: `0x414bf389${"00".repeat(32)}`,
+        calls: [call(pool.address, "0x128acb08")],
+      }), pinnedPoolMap({ [pool.address]: override }));
+      const record = recordsFor(calls, pinnedPoolMap({ [pool.address]: override })).find((row) => row.normalizedAddress === pool.address);
+      expect(record?.confidence).toBe("unresolved");
+    }
+
+    const badCodes = new Map(codeMap());
+    badCodes.set(pool.address, runtimeEvidence(pool.address, CODE.pool, codeHash(CODE.pool)));
+    const wrongHash = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: pool.caller,
+      input: `0x414bf389${"00".repeat(32)}`,
+      calls: [call(pool.address, "0x128acb08")],
+    }), pinnedPoolMap(), badCodes);
+    expect(wrongHash.find((row) => row.to === pool.address)?.unresolvedReasons).toContain(
+      "pinned_v3_pool_provenance_unresolved",
+    );
+
+    const wrongCaller = classifiedCalls(withTraceCallers({
+      type: "CALL",
+      from: "0x579ecfc5b9e9dc3cf71e4067f199e7146848e68f",
+      to: UNKNOWN,
+      input: `0x414bf389${"00".repeat(32)}`,
+      calls: [call(pool.address, "0x128acb08")],
+    }), pinnedPoolMap());
+    expect(wrongCaller.find((row) => row.to === pool.address)?.unresolvedReasons).toContain(
+      "pinned_v3_pool_provenance_unresolved",
+    );
   });
 
   it("builds the read-only report payload with candidate records and a rejecting live comparison preview", async () => {

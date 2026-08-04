@@ -46,6 +46,11 @@ export type GraphStatus =
   | "PARTIALLY_CLASSIFIED"
   | "UNRESOLVED"
   | "FAILED";
+export type TrustClosureStatus = "COMPLETE" | "PARTIAL" | "FAILED";
+export type ClassificationEvidenceMode =
+  | "LIVE_VERIFIED_SOURCE"
+  | "PINNED_AUDITED_EVIDENCE"
+  | "UNAVAILABLE";
 
 export interface TraceNode {
   type?: string;
@@ -77,6 +82,9 @@ export interface NormalizedExecutionCall {
   runtimeCodeHash: string | null;
   blockNumber: string;
   classification: ExecutionTargetClassification;
+  classificationEvidenceMode?: ClassificationEvidenceMode;
+  classificationEvidenceId?: string;
+  classificationEvidence?: ExecutionClassificationEvidence;
   unresolvedReasons: string[];
 }
 
@@ -121,10 +129,62 @@ export interface PoolProvenanceEvidence {
   token0: string | null;
   token1: string | null;
   assets: string[];
+  fee?: number | null;
+  tickSpacing?: number | null;
   factoryVerified: boolean;
   selectorAppropriate: boolean;
   evidence: Record<string, unknown>;
   unresolvedReasons: string[];
+}
+
+export interface ExecutionClassificationEvidence {
+  chainId: number;
+  address: string;
+  normalizedAddress: string;
+  runtimeCodeHash: string;
+  role: ExecutionTargetClassification;
+  verifiedSource: string;
+  verifiedSourceFingerprint: string;
+  verifiedAbiFingerprint: string;
+  approvedSelectorCandidates: string[];
+  observedSelectorConstraints: string[];
+  allowedCallTypes: string[];
+  parentConstraints: Array<{
+    parentAddress: string | null;
+    parentRole: ExecutionTargetClassification | null;
+  }>;
+  callerConstraints: Array<{
+    caller: string | null;
+    selector: string | null;
+    callType: string;
+  }>;
+  implementationConstraints: Array<{
+    proxyAddress: string;
+    implementationAddress: string;
+    implementationCodeHash: string;
+  }>;
+  factoryConstraints: Array<{
+    factoryAddress: string;
+    factoryCodeHash: string;
+    protocol: string;
+    poolAddress?: string;
+    fee?: number;
+    tickSpacing?: number;
+  }>;
+  tokenConstraints: Array<{
+    token0: string | null;
+    token1: string | null;
+    assets: string[];
+    fee?: number;
+    tickSpacing?: number;
+  }>;
+  feeTierConstraints: number[];
+  historicalBlock: string;
+  historicalTransaction: string;
+  evidenceSources: string[];
+  confidence: Exclude<TrustCandidateConfidence, "unresolved">;
+  classificationEvidenceMode: ClassificationEvidenceMode;
+  operatorApproved: false;
 }
 
 export interface ExecutionTrustRecordCandidate {
@@ -247,6 +307,17 @@ export interface ExecutionTrustReport {
   candidateRecords: ExecutionTrustRecordCandidate[];
   routeTrustBundle: RouteTrustBundleCandidate;
   graphPolicy: GraphPolicyEvaluation;
+  trustClosureStatus: TrustClosureStatus;
+  trustClosure: {
+    unresolvedCallCount: number;
+    unresolvedStateChangingCallCount: number;
+    unresolvedDelegatecallCount: number;
+    unknownSelectorCount: number;
+    prohibitedOperationCount: number;
+    candidateRecordCount: number;
+    unresolvedRecordCount: number;
+  };
+  runtimeResolutionEvidence: ExecutionClassificationEvidence[];
   liveComparisonPreview: LiveGraphComparisonResult;
 }
 
@@ -265,8 +336,28 @@ const CURRENT_MANAGER_ADDRESS =
   "0x58ab37d02696a481e2e5b5779967f3f4d237baa9" as const;
 const CURRENT_MANAGER_HASH =
   "0x92a4a63ef15f2f9f1fa21860dc3b80ce97a41964189d44076223744e361a3cfb" as const;
+const SMART_ROUTER =
+  "0xf6076d61a0c46c944852f65838e1b12a2910a717" as const;
+const SMART_ROUTER_HASH =
+  "0x8675933f176bbd98e4af9cc8015ca7fbdaf003dfd67782a2b26167f559d6c0fd" as const;
+const SMART_ROUTER_HELPER =
+  "0x2d14e7701ce7d5558eb02f1919ec431a76fb2cad" as const;
+const SMART_ROUTER_HELPER_HASH =
+  "0x99dbcfd8791473ebe1f2127aa162bea456a0e88db9bf211872f90a0b1ac14830" as const;
 const TOKEN_PROXY_IMPLEMENTATION_539A =
   "0x539a69de74e9ed69fbe7f909fa935d05b8caba11" as const;
+const TOKEN_PROXY_IMPLEMENTATION_539A_HASH =
+  "0x57a73a555fee21aa544bcd2feeba6033020677d82977701a78e89b7da0f45b08" as const;
+const STABLE_POOL =
+  "0xe3acfa6c40d53c3faf2aa62d0a715c737071511c" as const;
+const STABLE_POOL_HASH =
+  "0x9bc8ce0d268e55bf55b6fe84d2453a8fcf13a6874671a2e68172e3a937886427" as const;
+const LIBERTY_V3_FACTORY =
+  "0x796fcbdc956b85797efe21145aa97599b7fb36a6" as const;
+const LIBERTY_V3_FACTORY_HASH =
+  "0x06980a00918587c043af9085626962ebb94f9d0482e0028ff9a9f233d34cebd3" as const;
+const PHUX_ROUTER =
+  "0x48e8100374ae6ff2cc8871db6224b296718eeb0d" as const;
 
 const ERC20_SELECTORS = new Set([
   ERC20_TRANSFER_SELECTOR,
@@ -287,8 +378,110 @@ const ROUTER_SELECTORS = new Set([
   "0x31e2ba55",
   "0x128acb08",
 ]);
+const SMART_ROUTER_SELECTORS = new Set(["0x04e45aaf", "0x23a69e75"]);
+const SMART_ROUTER_HELPER_SELECTORS = new Set(["0x4e6c8ed8", "0x8bdb1925"]);
+const STABLE_POOL_SELECTORS = new Set(["0x5b41b908"]);
+const LIBERTY_FACTORY_SELECTORS = new Set(["0x07200e33"]);
+const TOKEN_IMPLEMENTATION_SELECTORS: Set<string> = new Set([
+  ERC20_TRANSFER_FROM_SELECTOR,
+  ERC20_TRANSFER_SELECTOR,
+  ERC20_BALANCE_OF_SELECTOR,
+  ERC20_ALLOWANCE_SELECTOR,
+]);
 const PROHIBITED_CALL_TYPES = new Set(["CREATE", "CREATE2", "SELFDESTRUCT", "CALLCODE"]);
 const STATELESS_CALL_TYPES = new Set(["STATICCALL"]);
+
+interface PinnedV3PoolEvidence {
+  address: string;
+  protocol: string;
+  factoryAddress: string;
+  factoryCodeHash: string;
+  token0: string;
+  token1: string;
+  fee: number;
+  tickSpacing: number;
+  runtimeCodeHash: string;
+  allowedSwapCallers: string[];
+  verifiedSourceFingerprint: string;
+  verifiedAbiFingerprint: string;
+}
+
+const PINNED_V3_POOLS: PinnedV3PoolEvidence[] = [
+  {
+    address: "0x55b432ad0518a4285ded6bb4d15e9a7182ef7a4d",
+    protocol: "PancakeSwap V3",
+    factoryAddress: "0xe50dbdc88e87a2c92984d794bcf3d1d76f619c68",
+    factoryCodeHash: "0x7c7dc7bf84221881cc7961d92b890d2d93036ae0f34c8e6177ff6e5ee6a43971",
+    token0: "0x6b175474e89094c44da98b954eedeac495271d0f",
+    token1: "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
+    fee: 10000,
+    tickSpacing: 200,
+    runtimeCodeHash: "0xffe7ac163e0f3a464d1daa934c8bf207d82f15e490fe934c49acd723d0e68c3d",
+    allowedSwapCallers: [SMART_ROUTER],
+    verifiedSourceFingerprint: "pinned:pancakeswap-v3-pool-runtime-v1",
+    verifiedAbiFingerprint: "pinned:pancakeswap-v3-pool-abi-v1",
+  },
+  {
+    address: "0x096af49f24293318661cbbf749a1e3f93ce1fbb2",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_V3_FACTORY,
+    factoryCodeHash: LIBERTY_V3_FACTORY_HASH,
+    token0: "0x6b175474e89094c44da98b954eedeac495271d0f",
+    token1: "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0xdeeee829f4a6fb924b2fc02ed05a8c9a6d8ae5499fdf3d9c5610f23205798428",
+    allowedSwapCallers: [PHUX_ROUTER],
+    verifiedSourceFingerprint: "pinned:libertyswap-v3-pool-runtime-v1",
+    verifiedAbiFingerprint: "pinned:libertyswap-v3-pool-abi-v1",
+  },
+  {
+    address: "0x13500f3449e337464eb8b5897dc2b06fe3fa692a",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_V3_FACTORY,
+    factoryCodeHash: LIBERTY_V3_FACTORY_HASH,
+    token0: "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07",
+    token1: "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0x7273abcac81c217f2e33b60c4a027061b924468867ede48439b4e5ae0248d1d4",
+    allowedSwapCallers: [PHUX_ROUTER],
+    verifiedSourceFingerprint: "pinned:libertyswap-v3-pool-runtime-v1",
+    verifiedAbiFingerprint: "pinned:libertyswap-v3-pool-abi-v1",
+  },
+  {
+    address: "0x475e1f945427cc02bfb2d76f111c5541413505c0",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_V3_FACTORY,
+    factoryCodeHash: LIBERTY_V3_FACTORY_HASH,
+    token0: "0x6b175474e89094c44da98b954eedeac495271d0f",
+    token1: "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
+    fee: 10000,
+    tickSpacing: 200,
+    runtimeCodeHash: "0x8a896473a92f65d2052908acfb345d341b3d0bc8a538e6c013126e5c8df6da76",
+    allowedSwapCallers: [PHUX_ROUTER],
+    verifiedSourceFingerprint: "pinned:libertyswap-v3-pool-runtime-v1",
+    verifiedAbiFingerprint: "pinned:libertyswap-v3-pool-abi-v1",
+  },
+  {
+    address: "0x042ff2668957c7ad7d8b42232af59f339803cd10",
+    protocol: "LibertySwap V3",
+    factoryAddress: LIBERTY_V3_FACTORY,
+    factoryCodeHash: LIBERTY_V3_FACTORY_HASH,
+    token0: "0x6b175474e89094c44da98b954eedeac495271d0f",
+    token1: "0xc10a4ed9b4042222d69ff0b374eddd47ed90fc1f",
+    fee: 2500,
+    tickSpacing: 50,
+    runtimeCodeHash: "0xf8f050e61b62eac593fc98d326cf91759d1cb32c30b476e1c2685ac2b4b11330",
+    allowedSwapCallers: [PHUX_ROUTER],
+    verifiedSourceFingerprint: "pinned:libertyswap-v3-pool-runtime-v1",
+    verifiedAbiFingerprint: "pinned:libertyswap-v3-pool-abi-v1",
+  },
+];
+
+const PINNED_V3_POOL_BY_ADDRESS = new Map(
+  PINNED_V3_POOLS.map((pool) => [pool.address, pool]),
+);
 
 const KNOWN_PROTOCOL_ROUTERS = new Map<string, string>([
   ["0x98bf93ebf5c380c0e6ae8e192a7e2ae08edacc02", "PulseX V1 Router"],
@@ -311,6 +504,20 @@ const getPairAbi = [
       { name: "tokenB", type: "address" },
     ],
     outputs: [{ name: "pair", type: "address" }],
+  },
+] as const;
+
+const getPoolAbi = [
+  {
+    type: "function",
+    name: "getPool",
+    stateMutability: "view",
+    inputs: [
+      { name: "tokenA", type: "address" },
+      { name: "tokenB", type: "address" },
+      { name: "fee", type: "uint24" },
+    ],
+    outputs: [{ name: "pool", type: "address" }],
   },
 ] as const;
 
@@ -418,6 +625,7 @@ export async function buildExecutionTrustReport(args: {
     codeByAddress,
     sourceByAddress,
     poolByAddress,
+    historicalTransactionHash: args.historicalTransactionHash,
   });
   const records = buildTrustRecordCandidates({
     calls: normalizedCalls,
@@ -445,6 +653,8 @@ export async function buildExecutionTrustReport(args: {
     swapManagerCodeHash: bundle.swapManagerCodeHash,
     requireOperatorApproval: true,
   });
+  const runtimeResolutionEvidence = runtimeResolutionEvidenceForRecords(records);
+  const trustClosure = trustClosureSummary(graphPolicy, bundle);
 
   return {
     chainId: PULSECHAIN_CHAIN_ID,
@@ -468,6 +678,9 @@ export async function buildExecutionTrustReport(args: {
     candidateRecords: records,
     routeTrustBundle: bundle,
     graphPolicy,
+    trustClosureStatus: trustClosureStatusFor(trustClosure),
+    trustClosure,
+    runtimeResolutionEvidence,
     liveComparisonPreview,
   };
 }
@@ -477,6 +690,7 @@ export function classifyCalls(args: {
   codeByAddress: Map<string, RuntimeCodeEvidence>;
   sourceByAddress?: Map<string, SourceLookupEvidence>;
   poolByAddress?: Map<string, PoolProvenanceEvidence>;
+  historicalTransactionHash?: string;
 }): NormalizedExecutionCall[] {
   const childrenByPath = new Map<string, NormalizedExecutionCall[]>();
   for (const call of args.calls) {
@@ -502,17 +716,45 @@ export function classifyCalls(args: {
     );
   }
 
+  const resolved = new Map<string, ExecutionTargetClassification>();
+  const evidenceByPath = new Map<string, ExecutionClassificationEvidence>();
+  for (const call of args.calls) {
+    const parentPath = parentTracePath(call.tracePath);
+    const evidence = runtimeClassificationEvidenceForCall({
+      call,
+      codeByAddress: args.codeByAddress,
+      poolByAddress: args.poolByAddress,
+      historicalTransactionHash: args.historicalTransactionHash ?? HISTORICAL_DIAGNOSTIC_TX,
+      genericParentRole: parentPath ? provisional.get(parentPath) ?? null : null,
+    });
+    if (evidence) {
+      resolved.set(call.tracePath, evidence.role);
+      evidenceByPath.set(call.tracePath, evidence);
+    } else {
+      resolved.set(call.tracePath, provisional.get(call.tracePath) ?? "UNKNOWN_CONTRACT");
+    }
+  }
+
   return args.calls.map((call) => {
     const parentRole =
       parentTracePath(call.tracePath) === null
         ? null
-        : provisional.get(parentTracePath(call.tracePath)!) ?? null;
-    const classification = provisional.get(call.tracePath) ?? "UNKNOWN_CONTRACT";
-    const unresolvedReasons = unresolvedReasonsFor(call, classification, parentRole);
+        : resolved.get(parentTracePath(call.tracePath)!) ?? null;
+    const classification = resolved.get(call.tracePath) ?? "UNKNOWN_CONTRACT";
+    const evidence = evidenceByPath.get(call.tracePath);
+    const unresolvedReasons = evidence
+      ? []
+      : uniqueStrings([
+          ...unresolvedReasonsFor(call, classification, parentRole),
+          ...runtimeEvidenceRequiredReasons(call),
+        ]);
     return {
       ...call,
       parentRole,
       classification,
+      classificationEvidenceMode: evidence?.classificationEvidenceMode,
+      classificationEvidenceId: evidence?.verifiedSourceFingerprint,
+      classificationEvidence: evidence,
       unresolvedReasons,
     };
   });
@@ -538,18 +780,23 @@ export function buildTrustRecordCandidates(args: {
       const code = args.codeByAddress.get(address);
       const source = args.sourceByAddress?.get(address);
       const pool = args.poolByAddress?.get(address);
-      const role = dominantRole(calls);
+      const runtimeEvidence = mergeRuntimeClassificationEvidence(calls);
+      const role = runtimeEvidence?.role ?? dominantRole(calls);
       const proxy = proxyRelationshipFor(address, calls, args.codeByAddress);
       const observedSelectors = uniqueStrings(
         calls.map((call) => call.selector).filter((value): value is string => Boolean(value)),
       ).sort();
-      const unresolvedReasons = uniqueStrings(
-        calls.flatMap((call) => call.unresolvedReasons).concat(
-          pool?.unresolvedReasons ?? [],
-          proxy.proxyType === "UNKNOWN_PATTERN" ? ["proxy_relationship_unresolved"] : [],
-        ),
-      );
-      const confidence = confidenceFor(role, code, unresolvedReasons, pool, proxy);
+      const unresolvedReasons = runtimeEvidence
+        ? []
+        : uniqueStrings(
+            calls.flatMap((call) => call.unresolvedReasons).concat(
+              pool?.unresolvedReasons ?? [],
+              proxy.proxyType === "UNKNOWN_PATTERN" ? ["proxy_relationship_unresolved"] : [],
+            ),
+          );
+      const confidence = runtimeEvidence?.confidence ?? confidenceFor(role, code, unresolvedReasons, pool, proxy);
+      const evidenceFactory = runtimeEvidence?.factoryConstraints[0];
+      const evidenceTokens = runtimeEvidence?.tokenConstraints[0];
       return {
         chainId: PULSECHAIN_CHAIN_ID,
         address: first.to!,
@@ -559,13 +806,19 @@ export function buildTrustRecordCandidates(args: {
         proxyType: proxy.proxyType,
         implementationAddress: proxy.implementationAddress,
         implementationCodeHash: proxy.implementationCodeHash,
-        approvedSelectors: [],
+        approvedSelectors: runtimeEvidence?.approvedSelectorCandidates ?? [],
         observedSelectors,
         parentConstraints: uniqueParentConstraints(calls),
         callerConstraints: uniqueCallerConstraints(calls),
-        factoryAddress: pool?.factoryAddress ?? null,
-        factoryCodeHash: pool?.factoryCodeHash ?? null,
-        tokenConstraints: pool
+        factoryAddress: evidenceFactory?.factoryAddress ?? pool?.factoryAddress ?? null,
+        factoryCodeHash: evidenceFactory?.factoryCodeHash ?? pool?.factoryCodeHash ?? null,
+        tokenConstraints: evidenceTokens
+          ? {
+              token0: evidenceTokens.token0,
+              token1: evidenceTokens.token1,
+              assets: evidenceTokens.assets,
+            }
+          : pool
           ? {
               token0: pool.token0,
               token1: pool.token1,
@@ -580,6 +833,8 @@ export function buildTrustRecordCandidates(args: {
           bytecodeLength: code?.bytecodeLength ?? null,
           source,
           pool,
+          runtimeClassificationEvidence: runtimeEvidence,
+          classificationEvidenceMode: runtimeEvidence?.classificationEvidenceMode ?? "UNAVAILABLE",
           observedCallCount: calls.length,
           observedTracePaths: calls.map((call) => call.tracePath),
           historicalEvidenceOnly: true,
@@ -687,6 +942,54 @@ export function evaluateHistoricalGraphPolicy(
     prohibitedOperationCount,
     automaticExecutionEligible: false,
   };
+}
+
+function trustClosureSummary(
+  graphPolicy: GraphPolicyEvaluation,
+  bundle: RouteTrustBundleCandidate,
+): ExecutionTrustReport["trustClosure"] {
+  return {
+    unresolvedCallCount: graphPolicy.unresolvedCallCount,
+    unresolvedStateChangingCallCount: graphPolicy.unresolvedStateChangingCallCount,
+    unresolvedDelegatecallCount: graphPolicy.unresolvedDelegatecallCount,
+    unknownSelectorCount: graphPolicy.unknownSelectorCount,
+    prohibitedOperationCount: graphPolicy.prohibitedOperationCount,
+    candidateRecordCount: bundle.requiredRecords.length + bundle.optionalRecords.length + bundle.unresolvedRecords.length,
+    unresolvedRecordCount: bundle.unresolvedRecords.length,
+  };
+}
+
+function trustClosureStatusFor(
+  summary: ExecutionTrustReport["trustClosure"],
+): TrustClosureStatus {
+  if (summary.prohibitedOperationCount > 0) return "FAILED";
+  return summary.unresolvedStateChangingCallCount === 0 &&
+    summary.unresolvedDelegatecallCount === 0 &&
+    summary.unknownSelectorCount === 0 &&
+    summary.prohibitedOperationCount === 0 &&
+    summary.unresolvedRecordCount === 0
+    ? "COMPLETE"
+    : "PARTIAL";
+}
+
+function runtimeResolutionEvidenceForRecords(
+  records: ExecutionTrustRecordCandidate[],
+): ExecutionClassificationEvidence[] {
+  return records
+    .map((record) => record.evidence.runtimeClassificationEvidence)
+    .filter((value): value is ExecutionClassificationEvidence => isExecutionClassificationEvidence(value))
+    .sort((a, b) => a.normalizedAddress.localeCompare(b.normalizedAddress));
+}
+
+function isExecutionClassificationEvidence(value: unknown): value is ExecutionClassificationEvidence {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "normalizedAddress" in value &&
+      "runtimeCodeHash" in value &&
+      "role" in value &&
+      "classificationEvidenceMode" in value,
+  );
 }
 
 export function compareLiveTraceAgainstTrustBundle(args: {
@@ -979,21 +1282,28 @@ async function verifyPoolProvenance(
   const token0 = await ethCallAddress(config, address, "0x0dfe1681", blockHex);
   const token1 = await ethCallAddress(config, address, "0xd21220a7", blockHex);
   const factory = await ethCallAddress(config, address, "0xc45a0155", blockHex);
+  const isV3Pool = selectors.includes("0x128acb08");
+  const fee = isV3Pool ? await ethCallUintNumber(config, address, "0xddca3f43", blockHex) : null;
+  const tickSpacing = isV3Pool ? await ethCallUintNumber(config, address, "0xd0c93a7c", blockHex) : null;
   let factoryCodeHash: string | null = null;
   let factoryVerified = false;
   if (factory) {
     const factoryCode = await readRuntimeCodeEvidence(config, factory, blockNumber);
     factoryCodeHash = factoryCode.runtimeCodeHash;
-    const pairFromFactory =
+    const poolFromFactory =
       token0 && token1
-        ? await getPairFromFactory(config, factory, token0, token1, blockHex)
+        ? isV3Pool && fee !== null
+          ? await getPoolFromFactory(config, factory, token0, token1, fee, blockHex)
+          : await getPairFromFactory(config, factory, token0, token1, blockHex)
         : null;
-    factoryVerified = pairFromFactory !== null && sameAddress(pairFromFactory, address);
-    evidence.factoryGetPair = pairFromFactory;
+    factoryVerified = poolFromFactory !== null && sameAddress(poolFromFactory, address);
+    evidence.factoryLookup = poolFromFactory;
   } else {
     unresolvedReasons.push("factory_unavailable");
   }
   if (!token0 || !token1) unresolvedReasons.push("pool_tokens_unavailable");
+  if (isV3Pool && fee === null) unresolvedReasons.push("pool_fee_unavailable");
+  if (isV3Pool && tickSpacing === null) unresolvedReasons.push("pool_tick_spacing_unavailable");
   if (factory && !factoryVerified) unresolvedReasons.push("factory_did_not_confirm_pool");
   const selectorAppropriate = selectors.some((selector) =>
     V2_POOL_SELECTORS.has(selector) || V3_POOL_SELECTORS.has(selector),
@@ -1012,11 +1322,359 @@ async function verifyPoolProvenance(
     token0,
     token1,
     assets: [token0, token1].filter((value): value is string => Boolean(value)),
+    fee,
+    tickSpacing,
     factoryVerified,
     selectorAppropriate,
     evidence,
     unresolvedReasons,
   };
+}
+
+function runtimeClassificationEvidenceForCall(args: {
+  call: NormalizedExecutionCall;
+  codeByAddress: Map<string, RuntimeCodeEvidence>;
+  poolByAddress?: Map<string, PoolProvenanceEvidence>;
+  historicalTransactionHash: string;
+  genericParentRole: ExecutionTargetClassification | null;
+}): ExecutionClassificationEvidence | null {
+  const { call } = args;
+  if (!call.to || !call.selector || !call.runtimeCodeHash) return null;
+  const target = call.to.toLowerCase();
+  const selector = call.selector.toLowerCase();
+  const callType = call.callType.toUpperCase();
+  const runtimeCodeHash = call.runtimeCodeHash.toLowerCase();
+  const parentAddress = call.parentAddress?.toLowerCase() ?? null;
+  const caller = call.from?.toLowerCase() ?? null;
+  const targetRuntimeCodeAgrees = runtimeCodeEvidenceAgrees(args.codeByAddress, target, runtimeCodeHash);
+
+  if (
+    target === SMART_ROUTER_HELPER &&
+    runtimeCodeHash === SMART_ROUTER_HELPER_HASH &&
+    targetRuntimeCodeAgrees &&
+    callType === "DELEGATECALL" &&
+    SMART_ROUTER_HELPER_SELECTORS.has(selector) &&
+    parentAddress === SMART_ROUTER &&
+    caller === SMART_ROUTER &&
+    runtimeCodeEvidenceAgrees(args.codeByAddress, SMART_ROUTER, SMART_ROUTER_HASH)
+  ) {
+    return baseClassificationEvidence({
+      call,
+      role: "PROTOCOL_LIBRARY",
+      runtimeCodeHash,
+      selectors: [...SMART_ROUTER_HELPER_SELECTORS],
+      allowedCallTypes: ["DELEGATECALL"],
+      verifiedSource: "SmartRouterHelper pinned audited source",
+      verifiedSourceFingerprint: "pinned:smart-router-helper-source-v1",
+      verifiedAbiFingerprint: "pinned:smart-router-helper-abi-v1",
+      evidenceSources: [
+        "runtime-code-hash",
+        "pinned-audited-source",
+        "smart-router-linked-library-context",
+      ],
+      historicalTransaction: args.historicalTransactionHash,
+      parentRole: "PROTOCOL_ROUTER",
+    });
+  }
+
+  if (
+    target === SMART_ROUTER &&
+    runtimeCodeHash === SMART_ROUTER_HASH &&
+    targetRuntimeCodeAgrees &&
+    SMART_ROUTER_SELECTORS.has(selector) &&
+    runtimeCodeEvidenceAgrees(args.codeByAddress, SMART_ROUTER_HELPER, SMART_ROUTER_HELPER_HASH)
+  ) {
+    const exactInputSingleContext =
+      selector === "0x04e45aaf" &&
+      callType === "CALL" &&
+      caller === CURRENT_MANAGER_ADDRESS &&
+      parentAddress === CURRENT_MANAGER_ADDRESS;
+    const callbackContext =
+      selector === "0x23a69e75" &&
+      callType === "CALL" &&
+      caller !== null &&
+      parentAddress === caller &&
+      pinnedPoolForAddress(caller) !== null;
+    if (exactInputSingleContext || callbackContext) {
+      return baseClassificationEvidence({
+        call,
+        role: "PROTOCOL_ROUTER",
+        runtimeCodeHash,
+        selectors: [...SMART_ROUTER_SELECTORS],
+        allowedCallTypes: ["CALL"],
+        verifiedSource: "SmartRouter pinned audited source",
+        verifiedSourceFingerprint: "pinned:smart-router-source-v1",
+        verifiedAbiFingerprint: "pinned:smart-router-abi-v1",
+        evidenceSources: [
+          "runtime-code-hash",
+          "pinned-audited-source",
+          exactInputSingleContext ? "swap-manager-router-call-context" : "verified-v3-pool-callback-context",
+          "smart-router-helper-linked-library",
+        ],
+        historicalTransaction: args.historicalTransactionHash,
+        parentRole: exactInputSingleContext ? "PITEAS_SWAP_MANAGER" : "V3_POOL",
+      });
+    }
+  }
+
+  if (
+    target === TOKEN_PROXY_IMPLEMENTATION_539A &&
+    runtimeCodeHash === TOKEN_PROXY_IMPLEMENTATION_539A_HASH &&
+    targetRuntimeCodeAgrees &&
+    callType === "DELEGATECALL" &&
+    TOKEN_IMPLEMENTATION_SELECTORS.has(selector) &&
+    args.genericParentRole === "TOKEN_PROXY" &&
+    parentAddress !== null &&
+    caller === parentAddress
+  ) {
+    return baseClassificationEvidence({
+      call,
+      role: "TOKEN_IMPLEMENTATION",
+      runtimeCodeHash,
+      selectors: [...TOKEN_IMPLEMENTATION_SELECTORS],
+      allowedCallTypes: ["DELEGATECALL"],
+      verifiedSource: "Token implementation pinned audited source",
+      verifiedSourceFingerprint: "pinned:token-implementation-539a-source-v1",
+      verifiedAbiFingerprint: "pinned:erc20-token-implementation-abi-v1",
+      evidenceSources: [
+        "runtime-code-hash",
+        "trace-bound-token-proxy-parent",
+        "pinned-audited-source",
+      ],
+      historicalTransaction: args.historicalTransactionHash,
+      implementationConstraints: [{
+        proxyAddress: parentAddress,
+        implementationAddress: TOKEN_PROXY_IMPLEMENTATION_539A,
+        implementationCodeHash: TOKEN_PROXY_IMPLEMENTATION_539A_HASH,
+      }],
+      parentRole: "TOKEN_PROXY",
+    });
+  }
+
+  if (
+    target === STABLE_POOL &&
+    runtimeCodeHash === STABLE_POOL_HASH &&
+    targetRuntimeCodeAgrees &&
+    callType === "CALL" &&
+    STABLE_POOL_SELECTORS.has(selector) &&
+    caller === CURRENT_MANAGER_ADDRESS &&
+    parentAddress === CURRENT_MANAGER_ADDRESS
+  ) {
+    return baseClassificationEvidence({
+      call,
+      role: "STABLE_POOL",
+      runtimeCodeHash,
+      selectors: [...STABLE_POOL_SELECTORS],
+      allowedCallTypes: ["CALL"],
+      verifiedSource: "PulseXStableSwapThreePool pinned audited source",
+      verifiedSourceFingerprint: "pinned:pulsex-stable-swap-three-pool-source-v1",
+      verifiedAbiFingerprint: "pinned:pulsex-stable-swap-three-pool-abi-v1",
+      evidenceSources: [
+        "runtime-code-hash",
+        "pinned-audited-source",
+        "swap-manager-pool-call-context",
+        "historical-trace-pool-assets",
+      ],
+      historicalTransaction: args.historicalTransactionHash,
+      tokenConstraints: [{
+        token0: null,
+        token1: null,
+        assets: [
+          "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07",
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0xa1077a294dde1b09bb078844df40758a5d0f9a27",
+        ].sort(),
+      }],
+      parentRole: "PITEAS_SWAP_MANAGER",
+    });
+  }
+
+  if (
+    target === LIBERTY_V3_FACTORY &&
+    runtimeCodeHash === LIBERTY_V3_FACTORY_HASH &&
+    targetRuntimeCodeAgrees &&
+    callType === "STATICCALL" &&
+    LIBERTY_FACTORY_SELECTORS.has(selector) &&
+    caller !== null &&
+    parentAddress === caller
+  ) {
+    const pool = pinnedPoolForAddress(caller);
+    if (pool && pool.factoryAddress === LIBERTY_V3_FACTORY) {
+      return baseClassificationEvidence({
+        call,
+        role: "PROTOCOL_FACTORY",
+        runtimeCodeHash,
+        selectors: [...LIBERTY_FACTORY_SELECTORS],
+        allowedCallTypes: ["STATICCALL"],
+        verifiedSource: "LibertyV3Factory pinned audited source",
+        verifiedSourceFingerprint: "pinned:libertyswap-v3-factory-source-v1",
+        verifiedAbiFingerprint: "pinned:libertyswap-v3-factory-abi-v1",
+        evidenceSources: [
+          "runtime-code-hash",
+          "pinned-audited-source",
+          "verified-liberty-v3-pool-caller",
+        ],
+        historicalTransaction: args.historicalTransactionHash,
+        factoryConstraints: [{
+          factoryAddress: LIBERTY_V3_FACTORY,
+          factoryCodeHash: LIBERTY_V3_FACTORY_HASH,
+          protocol: "LibertySwap V3",
+        }],
+        parentRole: "V3_POOL",
+      });
+    }
+  }
+
+  const pool = pinnedPoolForAddress(target);
+  if (
+    pool &&
+    runtimeCodeHash === pool.runtimeCodeHash &&
+    targetRuntimeCodeAgrees &&
+    callType === "CALL" &&
+    selector === "0x128acb08" &&
+    caller !== null &&
+    pool.allowedSwapCallers.some((address) => sameAddress(address, caller)) &&
+    parentAddress === caller &&
+    pinnedPoolProvenanceMatches(pool, args.poolByAddress?.get(target))
+  ) {
+    return baseClassificationEvidence({
+      call,
+      role: "V3_POOL",
+      runtimeCodeHash,
+      selectors: ["0x128acb08"],
+      allowedCallTypes: ["CALL"],
+      verifiedSource: `${pool.protocol} pool pinned audited source`,
+      verifiedSourceFingerprint: pool.verifiedSourceFingerprint,
+      verifiedAbiFingerprint: pool.verifiedAbiFingerprint,
+      evidenceSources: [
+        "runtime-code-hash",
+        "pinned-pool-provenance",
+        "token0",
+        "token1",
+        "fee",
+        "tick-spacing",
+        "factory-relationship",
+        "pool-created-event",
+      ],
+      historicalTransaction: args.historicalTransactionHash,
+      factoryConstraints: [{
+        factoryAddress: pool.factoryAddress,
+        factoryCodeHash: pool.factoryCodeHash,
+        protocol: pool.protocol,
+        poolAddress: pool.address,
+        fee: pool.fee,
+        tickSpacing: pool.tickSpacing,
+      }],
+      tokenConstraints: [{
+        token0: pool.token0,
+        token1: pool.token1,
+        assets: [pool.token0, pool.token1].sort(),
+        fee: pool.fee,
+        tickSpacing: pool.tickSpacing,
+      }],
+      feeTierConstraints: [pool.fee],
+      parentRole: "PROTOCOL_ROUTER",
+    });
+  }
+
+  return null;
+}
+
+function baseClassificationEvidence(args: {
+  call: NormalizedExecutionCall;
+  role: ExecutionTargetClassification;
+  runtimeCodeHash: string;
+  selectors: string[];
+  allowedCallTypes: string[];
+  verifiedSource: string;
+  verifiedSourceFingerprint: string;
+  verifiedAbiFingerprint: string;
+  evidenceSources: string[];
+  historicalTransaction: string;
+  parentRole: ExecutionTargetClassification | null;
+  implementationConstraints?: ExecutionClassificationEvidence["implementationConstraints"];
+  factoryConstraints?: ExecutionClassificationEvidence["factoryConstraints"];
+  tokenConstraints?: ExecutionClassificationEvidence["tokenConstraints"];
+  feeTierConstraints?: number[];
+}): ExecutionClassificationEvidence {
+  const caller = args.call.from?.toLowerCase() ?? null;
+  const parentAddress = args.call.parentAddress?.toLowerCase() ?? null;
+  return {
+    chainId: PULSECHAIN_CHAIN_ID,
+    address: args.call.to!,
+    normalizedAddress: args.call.to!.toLowerCase(),
+    runtimeCodeHash: args.runtimeCodeHash.toLowerCase(),
+    role: args.role,
+    verifiedSource: args.verifiedSource,
+    verifiedSourceFingerprint: normalizedEvidenceFingerprint(args.verifiedSourceFingerprint),
+    verifiedAbiFingerprint: normalizedEvidenceFingerprint(args.verifiedAbiFingerprint),
+    approvedSelectorCandidates: uniqueStrings(args.selectors.map((selector) => selector.toLowerCase())).sort(),
+    observedSelectorConstraints: args.call.selector ? [args.call.selector.toLowerCase()] : [],
+    allowedCallTypes: uniqueStrings(args.allowedCallTypes.map((callType) => callType.toUpperCase())).sort(),
+    parentConstraints: [{
+      parentAddress,
+      parentRole: args.parentRole,
+    }],
+    callerConstraints: [{
+      caller,
+      selector: args.call.selector?.toLowerCase() ?? null,
+      callType: args.call.callType.toUpperCase(),
+    }],
+    implementationConstraints: args.implementationConstraints ?? [],
+    factoryConstraints: args.factoryConstraints ?? [],
+    tokenConstraints: args.tokenConstraints ?? [],
+    feeTierConstraints: args.feeTierConstraints ?? [],
+    historicalBlock: args.call.blockNumber,
+    historicalTransaction: args.historicalTransaction.toLowerCase(),
+    evidenceSources: uniqueStrings(args.evidenceSources).sort(),
+    confidence: "high",
+    classificationEvidenceMode: "PINNED_AUDITED_EVIDENCE",
+    operatorApproved: false as const,
+  };
+}
+
+function normalizedEvidenceFingerprint(value: string): string {
+  const lower = value.toLowerCase();
+  if (/^0x[a-f0-9]{64}$/.test(lower)) return lower;
+  return fingerprint({
+    format: "PHIAT_CLASSIFICATION_EVIDENCE_ID_V1",
+    value,
+  });
+}
+
+function pinnedPoolForAddress(address: string | null | undefined): PinnedV3PoolEvidence | null {
+  if (!address) return null;
+  return PINNED_V3_POOL_BY_ADDRESS.get(address.toLowerCase()) ?? null;
+}
+
+function pinnedPoolProvenanceMatches(
+  pinned: PinnedV3PoolEvidence,
+  observed: PoolProvenanceEvidence | undefined,
+): boolean {
+  if (!observed) return false;
+  return (
+    observed.poolType === "V3_POOL" &&
+    observed.factoryVerified === true &&
+    observed.selectorAppropriate === true &&
+    sameString(observed.factoryAddress, pinned.factoryAddress) &&
+    sameString(observed.factoryCodeHash, pinned.factoryCodeHash) &&
+    sameString(observed.token0, pinned.token0) &&
+    sameString(observed.token1, pinned.token1) &&
+    observed.fee === pinned.fee &&
+    observed.tickSpacing === pinned.tickSpacing
+  );
+}
+
+function runtimeCodeEvidenceAgrees(
+  codeByAddress: Map<string, RuntimeCodeEvidence>,
+  address: string,
+  expectedRuntimeCodeHash: string,
+): boolean {
+  const evidence = codeByAddress.get(address.toLowerCase());
+  return (
+    evidence?.runtimeCodeHash?.toLowerCase() === expectedRuntimeCodeHash.toLowerCase() &&
+    evidence.codeHashAgreement === "agrees"
+  );
 }
 
 function classifySingleCall(args: {
@@ -1053,14 +1711,7 @@ function classifyDelegatecallTarget(
   call: NormalizedExecutionCall,
   source?: SourceLookupEvidence,
 ): ExecutionTargetClassification {
-  if (
-    call.to &&
-    sameAddress(call.to, TOKEN_PROXY_IMPLEMENTATION_539A) &&
-    call.selector &&
-    ERC20_SELECTORS.has(call.selector)
-  ) {
-    return "TOKEN_IMPLEMENTATION";
-  }
+  void call;
   if (source?.contractName && /library/i.test(source.contractName)) return "PROTOCOL_LIBRARY";
   return "UNKNOWN_CONTRACT";
 }
@@ -1117,6 +1768,32 @@ function unresolvedReasonsFor(
   return uniqueStrings(reasons);
 }
 
+function runtimeEvidenceRequiredReasons(call: NormalizedExecutionCall): string[] {
+  if (!call.to || !call.selector) return [];
+  const target = call.to.toLowerCase();
+  const selector = call.selector.toLowerCase();
+  const callType = call.callType.toUpperCase();
+  if (target === SMART_ROUTER && SMART_ROUTER_SELECTORS.has(selector)) {
+    return ["smart_router_context_unresolved"];
+  }
+  if (target === SMART_ROUTER_HELPER && SMART_ROUTER_HELPER_SELECTORS.has(selector)) {
+    return ["smart_router_helper_context_unresolved"];
+  }
+  if (target === TOKEN_PROXY_IMPLEMENTATION_539A && TOKEN_IMPLEMENTATION_SELECTORS.has(selector)) {
+    return ["token_implementation_context_unresolved"];
+  }
+  if (target === STABLE_POOL && STABLE_POOL_SELECTORS.has(selector)) {
+    return ["stable_pool_context_unresolved"];
+  }
+  if (target === LIBERTY_V3_FACTORY && LIBERTY_FACTORY_SELECTORS.has(selector)) {
+    return ["liberty_factory_context_unresolved"];
+  }
+  if (pinnedPoolForAddress(target) && callType === "CALL" && selector === "0x128acb08") {
+    return ["pinned_v3_pool_provenance_unresolved"];
+  }
+  return [];
+}
+
 function proxyRelationshipFor(
   address: string,
   calls: NormalizedExecutionCall[],
@@ -1159,6 +1836,75 @@ function proxyRelationshipFor(
     implementationAddress: null,
     implementationCodeHash: null,
     evidence: {},
+  };
+}
+
+function mergeRuntimeClassificationEvidence(
+  calls: NormalizedExecutionCall[],
+): ExecutionClassificationEvidence | null {
+  const evidences = calls
+    .map((call) => call.classificationEvidence)
+    .filter((value): value is ExecutionClassificationEvidence => Boolean(value));
+  if (evidences.length === 0) return null;
+  const first = evidences[0]!;
+  if (
+    evidences.some((evidence) =>
+      evidence.role !== first.role ||
+      evidence.runtimeCodeHash !== first.runtimeCodeHash ||
+      evidence.classificationEvidenceMode !== first.classificationEvidenceMode
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...first,
+    approvedSelectorCandidates: uniqueStrings(
+      evidences.flatMap((evidence) => evidence.approvedSelectorCandidates),
+    ).sort(),
+    observedSelectorConstraints: uniqueStrings(
+      evidences.flatMap((evidence) => evidence.observedSelectorConstraints),
+    ).sort(),
+    allowedCallTypes: uniqueStrings(evidences.flatMap((evidence) => evidence.allowedCallTypes)).sort(),
+    parentConstraints: uniqueByKey(
+      evidences.flatMap((evidence) => evidence.parentConstraints),
+      (constraint) => `${constraint.parentRole ?? "null"}|${constraint.parentAddress ?? "null"}`,
+    ),
+    callerConstraints: uniqueByKey(
+      evidences.flatMap((evidence) => evidence.callerConstraints),
+      (constraint) =>
+        `${constraint.caller ?? "null"}|${constraint.callType}|${constraint.selector ?? "null"}`,
+    ),
+    implementationConstraints: uniqueByKey(
+      evidences.flatMap((evidence) => evidence.implementationConstraints),
+      (constraint) =>
+        `${constraint.proxyAddress}|${constraint.implementationAddress}|${constraint.implementationCodeHash}`,
+    ),
+    factoryConstraints: uniqueByKey(
+      evidences.flatMap((evidence) => evidence.factoryConstraints),
+      (constraint) =>
+        [
+          constraint.factoryAddress,
+          constraint.factoryCodeHash,
+          constraint.protocol,
+          constraint.poolAddress ?? "null",
+          constraint.fee ?? "null",
+          constraint.tickSpacing ?? "null",
+        ].join("|"),
+    ),
+    tokenConstraints: uniqueByKey(
+      evidences.flatMap((evidence) => evidence.tokenConstraints),
+      (constraint) =>
+        [
+          constraint.token0 ?? "null",
+          constraint.token1 ?? "null",
+          constraint.assets.join(","),
+          constraint.fee ?? "null",
+          constraint.tickSpacing ?? "null",
+        ].join("|"),
+    ),
+    feeTierConstraints: uniqueNumbers(evidences.flatMap((evidence) => evidence.feeTierConstraints)),
+    evidenceSources: uniqueStrings(evidences.flatMap((evidence) => evidence.evidenceSources)).sort(),
+    operatorApproved: false as const,
   };
 }
 
@@ -1406,6 +2152,60 @@ async function getPairFromFactory(
   return null;
 }
 
+async function getPoolFromFactory(
+  config: AppConfig,
+  factory: string,
+  token0: string,
+  token1: string,
+  fee: number,
+  blockHex: string,
+): Promise<string | null> {
+  const data = encodeFunctionData({
+    abi: getPoolAbi,
+    functionName: "getPool",
+    args: [token0 as `0x${string}`, token1 as `0x${string}`, fee],
+  });
+  for (const rpcUrl of rpcUrls(config)) {
+    try {
+      const result = await rpcCall<string>(
+        rpcUrl,
+        "eth_call",
+        [{ to: factory, data }, blockHex],
+        config.httpTimeoutMs,
+      );
+      return wordToAddress(result);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function ethCallUintNumber(
+  config: AppConfig,
+  address: string,
+  selector: string,
+  blockHex: string,
+): Promise<number | null> {
+  for (const rpcUrl of rpcUrls(config)) {
+    try {
+      const result = await rpcCall<string>(
+        rpcUrl,
+        "eth_call",
+        [{ to: address, data: selector }, blockHex],
+        config.httpTimeoutMs,
+      );
+      if (!/^0x[0-9a-fA-F]{64}$/.test(result)) return null;
+      const value = BigInt(result);
+      if (value > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return Number(value);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 async function rpcCall<T>(
   rpcUrl: string,
   method: string,
@@ -1534,6 +2334,22 @@ function hashAgreement(values: Array<string | null>): RuntimeCodeEvidence["codeH
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values)].sort((a, b) => a - b);
+}
+
+function uniqueByKey<T>(values: T[], keyFn: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const value of values) {
+    const key = keyFn(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out.sort((a, b) => keyFn(a).localeCompare(keyFn(b)));
 }
 
 function sameString(a: string | null | undefined, b: string | null | undefined): boolean {

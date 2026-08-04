@@ -1469,6 +1469,55 @@ describe("signed PHIAT execution trust manifests", () => {
     expect(canonicalizeJson(second.manifest)).toBe(canonicalizeJson(first.manifest));
   });
 
+  it("blocks manifest candidates when the source runtime trust report is not complete", () => {
+    const report = mockTrustReport();
+    const unresolvedRecord = {
+      ...report.candidateRecords[0]!,
+      confidence: "unresolved" as const,
+      unresolvedReasons: ["unknown_contract_classification"],
+    };
+    const partialReport: ExecutionTrustReport = {
+      ...report,
+      candidateRecords: [unresolvedRecord],
+      routeTrustBundle: {
+        ...report.routeTrustBundle,
+        requiredRecords: [],
+        unresolvedRecords: [unresolvedRecord],
+      },
+      graphPolicy: {
+        ...report.graphPolicy,
+        graphStatus: "PARTIALLY_CLASSIFIED",
+        unresolvedCallCount: 1,
+        unresolvedStateChangingCallCount: 1,
+        unknownSelectorCount: 1,
+      },
+      trustClosureStatus: "PARTIAL",
+      trustClosure: {
+        unresolvedCallCount: 1,
+        unresolvedStateChangingCallCount: 1,
+        unresolvedDelegatecallCount: 0,
+        unknownSelectorCount: 1,
+        prohibitedOperationCount: 0,
+        candidateRecordCount: 1,
+        unresolvedRecordCount: 1,
+      },
+    };
+
+    const candidate = buildTrustManifestCandidateFromReport(partialReport, {
+      expiresAt: "2026-08-04T00:00:00.000Z",
+      operatorPublicKeyId: TEST_OPERATOR_PUBLIC_KEY_ID,
+    });
+
+    expect(candidate.candidateGenerationStatus).toBe("FAILED");
+    expect(candidate.automaticExecutionEligible).toBe(false);
+    expect(candidate.operatorSignatureRequired).toBe(true);
+    expect(candidate.validationErrors).toEqual(expect.arrayContaining([
+      "TRUST_CLOSURE_PARTIAL",
+      "UNRESOLVED_REQUIRED_RECORDS:1",
+      "UNRESOLVED_STATE_CHANGING_CALLS:1",
+    ]));
+  });
+
   it("generates unsigned candidates and registers read-only manifest tools", () => {
     const candidate = buildTrustManifestCandidateFromReport(mockTrustReport(), {
       expiresAtBlock: "27195600",
