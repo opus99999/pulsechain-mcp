@@ -96,6 +96,7 @@ export interface PiteasQuoteData {
    * Review aid — on-chain min is encoded in exact calldata.
    */
   amountOutMin?: string;
+  amountOutMinSource?: "computed_slippage_floor" | "upstream";
   /** Native PLS value to attach (decimal wei string); "0" when not selling native. */
   valueWei: string;
   /**
@@ -732,6 +733,7 @@ export function normalizePiteasQuote(
     amountIn,
     amountOut,
     amountOutMin,
+    amountOutMinSource: amountOutMin === undefined ? undefined : "computed_slippage_floor",
     valueWei: meta.sellingNativePls ? valueWei : "0",
     valuePls: meta.sellingNativePls ? weiToHumanPls(valueWei) : "0",
     gasUseEstimate: numOrNull(root.gasUseEstimate),

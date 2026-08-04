@@ -10,16 +10,21 @@ export function evaluateMinimumOutputValidation(args: {
   const decodedMinimumOutputRaw =
     decodedIntent.minimumOutputRaw ?? decodedIntent.minimumAmountOutRaw ?? null;
   const apiMinimumOutputRaw = quote.amountOutMin ?? null;
+  const apiGuaranteedOutputRaw = guaranteedOutputRaw(quote);
   const decodedMin = stringToBigInt(decodedMinimumOutputRaw);
-  const quoteMin = stringToBigInt(apiMinimumOutputRaw);
+  const authoritativeMin = stringToBigInt(apiGuaranteedOutputRaw ?? decodedMinimumOutputRaw);
   const relationship =
-    decodedMin === null || quoteMin === null
+    decodedMin === null || authoritativeMin === null
       ? "SEMANTICS_UNRESOLVED"
-      : decodedMin === quoteMin
+      : decodedMin === authoritativeMin
         ? "EXACT_MATCH"
-        : decodedMin > quoteMin
+        : decodedMin > authoritativeMin
           ? "CALLDATA_STRICTER"
           : "CALLDATA_WEAKER";
+  const diagnosticComputedMinimumRelationship = compareBigints(
+    decodedMin,
+    stringToBigInt(apiMinimumOutputRaw),
+  );
   const validationStatus =
     relationship === "EXACT_MATCH" || relationship === "CALLDATA_STRICTER"
       ? "PASSED"
@@ -28,15 +33,19 @@ export function evaluateMinimumOutputValidation(args: {
   return {
     apiExpectedOutputRaw: quote.amountOut,
     apiMinimumOutputRaw,
+    apiGuaranteedOutputRaw,
     quoteRouteMinimumOutputRaw: routeMinimumOutputRaw(quote),
     methodParametersMinimumOutputRaw: decodedMinimumOutputRaw,
     decodedDestMinAmountRaw: decodedMinimumOutputRaw,
     decodedReturnConstraintRaw: decodedMinimumOutputRaw,
+    decodedManagerConstraintRaw: null,
     allowedSlippagePercent: quote.allowedSlippage,
     sourceForEachValue: {
       apiExpectedOutputRaw: "Piteas response destAmount normalized as quote.amountOut",
       apiMinimumOutputRaw:
-        "Retained quote amountOutMin, computed from destAmount and allowedSlippage when upstream does not expose a separate min field",
+        "Local computed quote.amountOutMin review aid from destAmount and allowedSlippage when upstream does not expose a separate min field",
+      apiGuaranteedOutputRaw:
+        "Independent upstream guaranteed/minimum output field when provided; absent for the captured current Piteas response",
       quoteRouteMinimumOutputRaw:
         "Piteas route summary has no authoritative minimum-output field in the normalized quote",
       methodParametersMinimumOutputRaw:
@@ -45,10 +54,61 @@ export function evaluateMinimumOutputValidation(args: {
         "ABI-decoded PiteasRouter.swap Detail.destMinAmount from exact methodParameters.calldata",
       decodedReturnConstraintRaw:
         "Executable router return constraint; PiteasRouter reverts unless returnAmount >= Detail.destMinAmount",
+      decodedManagerConstraintRaw:
+        "No separate SwapManager minimum-output field is proven in the current route envelope; router Detail.destMinAmount is authoritative",
       allowedSlippagePercent: "Requested quote allowedSlippage retained with the candidate response",
     },
+    fieldJsonPaths: {
+      apiExpectedOutputRaw: "$.destAmount",
+      apiMinimumOutputRaw:
+        quote.amountOutMinSource === "computed_slippage_floor"
+          ? "$.amountOutMin (local computed review aid)"
+          : "$.amountOutMin",
+      apiGuaranteedOutputRaw: guaranteedOutputPath(quote),
+      quoteRouteMinimumOutputRaw: "$.route.minimumOutputRaw|$.route.amountOutMin|$.route.minAmountOut",
+      methodParametersMinimumOutputRaw:
+        "$.methodParameters.calldata -> PiteasRouter.swap.detail.destMinAmount",
+      decodedDestMinAmountRaw:
+        "$.methodParameters.calldata -> PiteasRouter.swap.detail.destMinAmount",
+      decodedReturnConstraintRaw:
+        "$.methodParameters.calldata -> PiteasRouter.swap.detail.destMinAmount",
+      decodedManagerConstraintRaw: null,
+      allowedSlippagePercent: "$.allowedSlippage",
+    },
+    fieldMeanings: {
+      apiExpectedOutputRaw: "Expected output amount, not a minimum.",
+      apiMinimumOutputRaw:
+        quote.amountOutMinSource === "computed_slippage_floor"
+          ? "Locally computed slippage floor for review diagnostics."
+          : "Candidate quote minimum-output field.",
+      apiGuaranteedOutputRaw: "Authoritative upstream guaranteed minimum when present.",
+      quoteRouteMinimumOutputRaw: "Route-summary minimum-output field if one exists.",
+      methodParametersMinimumOutputRaw: "Executable router minimum-output constraint.",
+      decodedDestMinAmountRaw: "ABI-decoded Detail.destMinAmount.",
+      decodedReturnConstraintRaw: "Router return-amount constraint.",
+      decodedManagerConstraintRaw: "Separate manager route constraint; unresolved for current envelope.",
+      allowedSlippagePercent: "Slippage requested from Piteas.",
+    },
+    fieldProvenance: {
+      apiExpectedOutputRaw: "normalized Piteas API response",
+      apiMinimumOutputRaw:
+        quote.amountOutMinSource === "computed_slippage_floor"
+          ? "local MCP normalization"
+          : "normalized Piteas API response",
+      apiGuaranteedOutputRaw: apiGuaranteedOutputRaw === null ? "absent" : "normalized Piteas API response",
+      quoteRouteMinimumOutputRaw: "normalized Piteas route summary",
+      methodParametersMinimumOutputRaw: "retained Piteas methodParameters calldata",
+      decodedDestMinAmountRaw: "retained Piteas methodParameters calldata",
+      decodedReturnConstraintRaw: "retained Piteas methodParameters calldata",
+      decodedManagerConstraintRaw: "not established",
+      allowedSlippagePercent: "shadow-buy request",
+    },
     relationship,
-    authoritativeQuoteField: "quote.amountOutMin",
+    authoritativeQuoteField:
+      apiGuaranteedOutputRaw === null
+        ? "quote.methodParameters.calldata.detail.destMinAmount"
+        : guaranteedOutputPath(quote),
+    diagnosticComputedMinimumRelationship,
     validationStatus,
     explanation: explanation(relationship),
     evidenceFingerprint: fingerprint({
@@ -57,11 +117,54 @@ export function evaluateMinimumOutputValidation(args: {
       methodParameters: quote.methodParameters,
       apiExpectedOutputRaw: quote.amountOut,
       apiMinimumOutputRaw,
+      apiGuaranteedOutputRaw,
       decodedMinimumOutputRaw,
       allowedSlippagePercent: quote.allowedSlippage,
       relationship,
+      diagnosticComputedMinimumRelationship,
     }),
   };
+}
+
+function guaranteedOutputRaw(quote: PiteasQuoteData): string | null {
+  const rec = quote as PiteasQuoteData & Record<string, unknown>;
+  const candidates = [
+    ["guaranteedOutputRaw", rec.guaranteedOutputRaw],
+    ["guaranteedOutput", rec.guaranteedOutput],
+    ["minimumOutputRaw", rec.minimumOutputRaw],
+    ["minAmountOutRaw", rec.minAmountOutRaw],
+    ["minAmountOut", rec.minAmountOut],
+    ["amountOutMin", quote.amountOutMinSource === "upstream" ? quote.amountOutMin : undefined],
+  ] as const;
+  for (const [, value] of candidates) {
+    if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
+function guaranteedOutputPath(quote: PiteasQuoteData): string | null {
+  const rec = quote as PiteasQuoteData & Record<string, unknown>;
+  const candidates = [
+    ["$.guaranteedOutputRaw", rec.guaranteedOutputRaw],
+    ["$.guaranteedOutput", rec.guaranteedOutput],
+    ["$.minimumOutputRaw", rec.minimumOutputRaw],
+    ["$.minAmountOutRaw", rec.minAmountOutRaw],
+    ["$.minAmountOut", rec.minAmountOut],
+    ["$.amountOutMin", quote.amountOutMinSource === "upstream" ? quote.amountOutMin : undefined],
+  ] as const;
+  for (const [path, value] of candidates) {
+    if (typeof value === "string" && /^\d+$/.test(value)) return path;
+  }
+  return null;
+}
+
+function compareBigints(
+  left: bigint | null,
+  right: bigint | null,
+): MinimumOutputValidation["relationship"] {
+  if (left === null || right === null) return "SEMANTICS_UNRESOLVED";
+  if (left === right) return "EXACT_MATCH";
+  return left > right ? "CALLDATA_STRICTER" : "CALLDATA_WEAKER";
 }
 
 function routeMinimumOutputRaw(quote: PiteasQuoteData): string | null {

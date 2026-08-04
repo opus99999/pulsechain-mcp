@@ -211,6 +211,7 @@ export interface DecodedIntent {
   calldataFingerprint: string | null;
   routeData: {
     decodable: boolean;
+    status?: "PASSED" | "FAILED" | "UNSUPPORTED_VERSION" | "MALFORMED" | "PARTIAL";
     destinationToken: string | null;
     expectedOutputRaw: string | null;
     deadline: string | null;
@@ -218,6 +219,20 @@ export interface DecodedIntent {
     swapPayloadFingerprints: string[];
     embeddedAddresses: string[];
     validationErrors: string[];
+    authoritativeFields?: Record<string, unknown>;
+    diagnosticFields?: Record<string, unknown>;
+    unresolvedFields?: string[];
+    consumedBytes?: number;
+    totalBytes?: number;
+    trailingBytes?: number;
+    decoderVersion?: string;
+    managerHashBinding?: {
+      status: "MATCHED" | "MISMATCH" | "NOT_EVALUATED";
+      managerRuntimeCodeHash: string | null;
+      requiredManagerRuntimeCodeHash: string;
+      evidenceFingerprint: string;
+    };
+    supportedEnvelopeVersion?: string | null;
   } | null;
   executionTargets: ExecutionTargetEvidence[];
   unresolvedExecutionTargets: string[];
@@ -536,6 +551,23 @@ export interface RouteDataCertification {
   decoderVersion: string;
   decoderMatchesManagerHash: boolean;
   authoritativeFields: string[];
+  routeEnvelopeDecode: {
+    status: "PASSED" | "FAILED" | "UNSUPPORTED_VERSION" | "MALFORMED" | "PARTIAL";
+    authoritativeFields: Record<string, unknown>;
+    diagnosticFields: Record<string, unknown>;
+    unresolvedFields: string[];
+    consumedBytes: number;
+    totalBytes: number;
+    trailingBytes: number;
+    decoderVersion: string;
+    managerHashBinding: {
+      status: "MATCHED" | "MISMATCH" | "NOT_EVALUATED";
+      managerRuntimeCodeHash: string | null;
+      requiredManagerRuntimeCodeHash: string;
+      evidenceFingerprint: string;
+    };
+    supportedEnvelopeVersion: string | null;
+  };
   heuristicObservations: Array<{
     kind: string;
     value: string;
@@ -550,6 +582,33 @@ export interface TraceBackend {
   stateOverridesUsed: boolean;
   supported: boolean;
   failureReason: string | null;
+}
+
+export interface ExecutionStatePrerequisites {
+  inputBalanceRequiredRaw: string;
+  inputBalanceAvailableRaw: string | null;
+  allowanceRequiredRaw: string;
+  allowanceAvailableRaw: string | null;
+  nativeGasRequiredWei: string | null;
+  nativeGasAvailableWei: string | null;
+}
+
+export interface DiagnosticOverrideTrace {
+  status: "NOT_RUN" | "UNSUPPORTED" | "PASSED" | "FAILED";
+  stateOverridesUsed: boolean;
+  automaticExecutionQualifying: false;
+  overrideSpecification: {
+    token: string;
+    owner: string;
+    spender: string;
+    inputBalanceRaw: string;
+    allowanceRaw: string;
+    nativeBalanceWei: string | null;
+    storageOverridesUsed: false;
+    codeOverridesUsed: false;
+  } | null;
+  reason: string | null;
+  traceBackend: TraceBackend | null;
 }
 
 export interface RouterCallSequenceEntry {
@@ -601,6 +660,8 @@ export interface ExecutionLayerCertification {
   routerManagerBinding: RouterManagerBinding;
   routeData: RouteDataCertification;
   traceBackend: TraceBackend;
+  statePrerequisites: ExecutionStatePrerequisites;
+  diagnosticOverrideTrace: DiagnosticOverrideTrace;
   routerCallSequence: RouterCallSequenceEntry[];
   executionGraph: ExecutionGraphCall[];
   approvedTargets: ExecutionTrustRecord[];
@@ -709,18 +770,28 @@ export interface GasPolicy {
 export interface MinimumOutputValidation {
   apiExpectedOutputRaw: string | null;
   apiMinimumOutputRaw: string | null;
+  apiGuaranteedOutputRaw: string | null;
   quoteRouteMinimumOutputRaw: string | null;
   methodParametersMinimumOutputRaw: string | null;
   decodedDestMinAmountRaw: string | null;
   decodedReturnConstraintRaw: string | null;
+  decodedManagerConstraintRaw: string | null;
   allowedSlippagePercent: number | null;
   sourceForEachValue: Record<string, string>;
+  fieldJsonPaths: Record<string, string | null>;
+  fieldMeanings: Record<string, string>;
+  fieldProvenance: Record<string, string>;
   relationship:
     | "EXACT_MATCH"
     | "CALLDATA_STRICTER"
     | "CALLDATA_WEAKER"
     | "SEMANTICS_UNRESOLVED";
   authoritativeQuoteField: string | null;
+  diagnosticComputedMinimumRelationship:
+    | "EXACT_MATCH"
+    | "CALLDATA_STRICTER"
+    | "CALLDATA_WEAKER"
+    | "SEMANTICS_UNRESOLVED";
   validationStatus: "PASSED" | "FAILED";
   explanation: string;
   evidenceFingerprint: string | null;

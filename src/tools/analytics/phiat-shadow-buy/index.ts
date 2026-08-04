@@ -8,4 +8,6 @@ export * from "./executionTrustRegistry.js";
 export * from "./executionTrustManifest.js";
 export * from "./offlineTrustSigner.js";
 export * from "./minimumOutput.js";
+export * from "./routeEnvelope.js";
+export * from "./liveRouteReadiness.js";
 export * from "./storageLayout.js";

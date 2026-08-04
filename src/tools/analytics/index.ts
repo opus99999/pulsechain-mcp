@@ -18,6 +18,7 @@ import { registerDexScreenerTools } from "./dexscreener.js";
 import { registerFreeTierAnalyticsTools } from "./freeTier.js";
 import { registerPhiatDashboardTool } from "./phiatDashboard.js";
 import { registerPhiatShadowBuyTool } from "./phiatShadowBuy.js";
+import { registerPhiatLiveRouteReadinessTool } from "./phiat-shadow-buy/liveRouteReadiness.js";
 import { registerPhiatExecutionTrustReportTool } from "./phiat-shadow-buy/executionTrustRegistry.js";
 import { registerPhiatTrustManifestTools } from "./phiat-shadow-buy/executionTrustManifest.js";
 import { registerPiteasAccumulationPlanTool } from "./piteasAccumulationPlan.js";
@@ -34,6 +35,7 @@ export { registerAdvancedAnalyticsTools } from "./advanced.js";
 export { registerDexScreenerTools } from "./dexscreener.js";
 export { registerPhiatDashboardTool, buildPhiatDashboard } from "./phiatDashboard.js";
 export { registerPhiatShadowBuyTool, buildPhiatShadowBuy } from "./phiatShadowBuy.js";
+export { registerPhiatLiveRouteReadinessTool, buildPhiatLiveRouteReadiness } from "./phiat-shadow-buy/liveRouteReadiness.js";
 export { registerPhiatExecutionTrustReportTool } from "./phiat-shadow-buy/executionTrustRegistry.js";
 export { registerPhiatTrustManifestTools } from "./phiat-shadow-buy/executionTrustManifest.js";
 export {
@@ -79,6 +81,8 @@ export function registerAnalyticsTools(
   registerPhiatDashboardTool(server, config);
   // Shadow-only PHIAT buyer certificate: prepare/decode/simulate, never sign/broadcast
   registerPhiatShadowBuyTool(server, config);
+  // Read-only live Piteas route readiness: summarizes route hardening gates
+  registerPhiatLiveRouteReadinessTool(server, config);
   // Historical Piteas execution-target trust candidate report, read-only
   registerPhiatExecutionTrustReportTool(server, config);
   // Signed Piteas execution trust manifest candidate/verification, read-only

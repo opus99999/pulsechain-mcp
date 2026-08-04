@@ -173,9 +173,9 @@ describe("smoke: tool registration (no live network)", () => {
     registerAllTools(server as never, smokeConfig);
 
     const meta = getRegisteredTools();
-    // 100 tools: 94 prior + phiat_dashboard + phiat_shadow_buy + trust report + 2 trust manifest tools + piteas_accumulation_plan
-    expect(meta.length).toBe(100);
-    expect(names.length).toBe(100);
+    // 101 tools: 94 prior + phiat_dashboard + phiat_shadow_buy + live route readiness + trust report + 2 trust manifest tools + piteas_accumulation_plan
+    expect(meta.length).toBe(101);
+    expect(names.length).toBe(101);
     expect(names.length).toBe(meta.length);
 
     const byName = new Set(meta.map((t) => t.name));
@@ -189,6 +189,7 @@ describe("smoke: tool registration (no live network)", () => {
     for (const n of ADVANCED_ANALYTICS) expect(byName.has(n)).toBe(true);
     expect(byName.has("phiat_dashboard")).toBe(true);
     expect(byName.has("phiat_shadow_buy")).toBe(true);
+    expect(byName.has("phiat_live_route_readiness")).toBe(true);
     expect(byName.has("phiat_execution_trust_report")).toBe(true);
     expect(byName.has("phiat_trust_manifest_candidate")).toBe(true);
     expect(byName.has("phiat_trust_manifest_verify")).toBe(true);
@@ -236,7 +237,7 @@ describe("smoke: tool registration (no live network)", () => {
       expect(byName.has(n)).toBe(true);
     }
 
-    // Exact family counts: 3 health + 27 chain + 56 analytics + 14 wallet = 100
+    // Exact family counts: 3 health + 27 chain + 57 analytics + 14 wallet = 101
     const byCat = (c: string) => meta.filter((t) => t.category === c);
     expect(byCat("health").length).toBe(3);
     expect(byCat("chain").length).toBe(27);
@@ -244,8 +245,8 @@ describe("smoke: tool registration (no live network)", () => {
     const analytics = byCat("analytics");
     // free + advanced + PulseX + DexScreener + Tier A (11) + Tier B
     // PulseX: 8 low-level + 3 Tier B factory/day/lp = 11 starting with pulsex_
-    // + 2 hex_* Tier B; Tier A: 7 prior + 2 Piteas + 2 Switch
-    expect(analytics.length).toBe(11 + 9 + 8 + 6 + 6 + 11 + 5);
+    // + 2 hex_* Tier B; Tier A: 7 prior + 2 Piteas + 2 Switch; + live route readiness
+    expect(analytics.length).toBe(11 + 9 + 8 + 6 + 6 + 11 + 5 + 1);
     expect(FREE_ANALYTICS).toHaveLength(11);
     expect(ADVANCED_ANALYTICS).toHaveLength(9);
     expect(WALLET_TOOLS).toHaveLength(14);
@@ -259,6 +260,7 @@ describe("smoke: tool registration (no live network)", () => {
     expect(dexscreenerTools.length).toBe(6);
     expect(meta.find((t) => t.name === "phiat_dashboard")?.write).toBe(false);
     expect(meta.find((t) => t.name === "phiat_shadow_buy")?.write).toBe(false);
+    expect(meta.find((t) => t.name === "phiat_live_route_readiness")?.write).toBe(false);
     expect(meta.find((t) => t.name === "phiat_execution_trust_report")?.write).toBe(false);
     expect(meta.find((t) => t.name === "phiat_trust_manifest_candidate")?.write).toBe(false);
     expect(meta.find((t) => t.name === "phiat_trust_manifest_verify")?.write).toBe(false);
@@ -299,7 +301,7 @@ describe("smoke: tool registration (no live network)", () => {
     expect(server).toBeTruthy();
 
     const tools = getRegisteredTools();
-    expect(tools.length).toBe(100);
+    expect(tools.length).toBe(101);
     expect(tools.some((t) => t.name === "get_rpc_health")).toBe(true);
     const names = tools.map((t) => t.name).sort();
     expect(names).toContain("pulsechain_health");
@@ -311,6 +313,7 @@ describe("smoke: tool registration (no live network)", () => {
     expect(names).toContain("dexscreener_token_pairs");
     expect(names).toContain("phiat_dashboard");
     expect(names).toContain("phiat_shadow_buy");
+    expect(names).toContain("phiat_live_route_readiness");
     expect(names).toContain("phiat_execution_trust_report");
     expect(names).toContain("phiat_trust_manifest_candidate");
     expect(names).toContain("phiat_trust_manifest_verify");

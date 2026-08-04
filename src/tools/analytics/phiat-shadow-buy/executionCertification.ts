@@ -7,6 +7,7 @@ import type { AppConfig } from "../../../types.js";
 import { PULSECHAIN_CHAIN_ID } from "../../../constants.js";
 import {
   ERC20_APPROVE_SELECTOR,
+  ERC20_ALLOWANCE_SELECTOR,
   ERC20_BALANCE_OF_SELECTOR,
   ERC20_TRANSFER_FROM_SELECTOR,
   ERC20_TRANSFER_SELECTOR,
@@ -54,6 +55,7 @@ import {
   decodeAddressFromStorageWord,
   deriveSwapManagerStorageLayout,
 } from "./storageLayout.js";
+import { decodePiteasRouteEnvelope } from "./routeEnvelope.js";
 
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" as const;
@@ -148,6 +150,14 @@ export async function certifyPiteasExecutionLayer(
     args.approvedTrustRecords,
   );
   const routeData = certifyRouteData(args.routeDataRaw, swapManagerIntegrity);
+  const statePrerequisites = await readExecutionStatePrerequisites(config, {
+    walletAddress: args.walletAddress,
+    tokenIn: args.tokenIn,
+    spender: args.router,
+    amountInRaw: args.amountInRaw,
+    valueWei: args.valueWei,
+    blockHex: block.blockHex,
+  });
   const trace = await traceExactPreparedTransaction(config, {
     from: args.walletAddress,
     to: args.router,
@@ -155,18 +165,37 @@ export async function certifyPiteasExecutionLayer(
     value: args.valueWei,
     blockHex: block.blockHex,
   });
+  const effectiveTrace =
+    trace.status === "FAILED" && statePrerequisitesInsufficient(statePrerequisites)
+      ? {
+          ...trace,
+          status: "STATE_INSUFFICIENT" as const,
+          backend: {
+            ...trace.backend,
+            failureReason: [
+              trace.backend.failureReason,
+              "Actual wallet state is insufficient for the prepared route.",
+            ].filter(Boolean).join(" "),
+          },
+        }
+      : trace;
+  const diagnosticOverrideTrace = diagnosticOverrideTraceFor(statePrerequisites, effectiveTrace.status, {
+    token: args.tokenIn,
+    owner: args.walletAddress,
+    spender: args.router,
+  });
   const binding = await buildRouterManagerBinding(config, {
     router: args.router,
     manager: activeSwapManager.address,
     quoteAfterBlock: args.referenceAfterBlock,
     certificationBlock: block.blockNumber,
     certificationBlockHex: block.blockHex,
-    traceBlock: trace.backend.blockNumber,
+    traceBlock: effectiveTrace.backend.blockNumber,
   });
 
-  const graph = trace.root
+  const graph = effectiveTrace.status === "PASSED" && effectiveTrace.root
     ? await analyzeExecutionTrace(config, {
-        traceRoot: trace.root,
+        traceRoot: effectiveTrace.root,
         blockHex: block.blockHex,
         walletAddress: args.walletAddress,
         router: args.router,
@@ -178,18 +207,19 @@ export async function certifyPiteasExecutionLayer(
         managerTrusted: swapManagerIntegrity.trusted,
         approvedTrustRecords: args.approvedTrustRecords,
       })
-    : emptyGraphAnalysis(trace.status);
+    : emptyGraphAnalysis(effectiveTrace.status);
 
   const baseFailureCodes = failureCodesFor({
     activeSwapManager,
     swapManagerIntegrity,
+    routeData,
     binding,
-    traceStatus: trace.status,
+    traceStatus: effectiveTrace.status,
     graph,
   });
   const manifestGate = await evaluateTrustManifestGate(config, {
     signedExecutionTrustManifest: args.signedExecutionTrustManifest,
-    traceStatus: trace.status,
+    traceStatus: effectiveTrace.status,
     block,
     router: args.router,
     routerCodeHash: args.routerCodeHash ?? null,
@@ -217,8 +247,8 @@ export async function certifyPiteasExecutionLayer(
   const automaticExecutionEligible =
     failureCodes.length === 0 &&
     managerIntegrityStatus === "PASSED" &&
-    trace.status === "PASSED" &&
-    trace.backend.stateOverridesUsed === false &&
+    effectiveTrace.status === "PASSED" &&
+    effectiveTrace.backend.stateOverridesUsed === false &&
     manifestGate.executionAuthority === "VALID" &&
     manifestGate.comparison?.automaticExecutionEligible === true &&
     graph.prohibitedOperations.length === 0 &&
@@ -227,7 +257,7 @@ export async function certifyPiteasExecutionLayer(
   return {
     sourceEvidence,
     managerIntegrityStatus,
-    executionTraceStatus: trace.status,
+    executionTraceStatus: effectiveTrace.status,
     executionGraphStatus,
     activeSwapManager,
     swapManagerIntegrity,
@@ -236,13 +266,15 @@ export async function certifyPiteasExecutionLayer(
       candidateQuoteBlock: args.candidateQuoteBlock,
       quoteAfterBlock: args.referenceAfterBlock,
       certificationBlock: binding.certificationBlock,
-      simulationBlock: trace.backend.blockNumber,
+      simulationBlock: effectiveTrace.backend.blockNumber,
       managerChangedSinceQuote: binding.managerChangedSinceQuote,
       routerCodeChangedSinceQuote: binding.routerCodeChangedSinceQuote,
       managerCodeChangedSinceQuote: binding.managerCodeChangedSinceQuote,
     },
     routeData,
-    traceBackend: trace.backend,
+    traceBackend: effectiveTrace.backend,
+    statePrerequisites,
+    diagnosticOverrideTrace,
     routerCallSequence: graph.routerCallSequence,
     executionGraph: graph.executionGraph,
     approvedTargets: graph.approvedTargets,
@@ -259,7 +291,7 @@ export async function certifyPiteasExecutionLayer(
     executionAuthority: manifestGate.executionAuthority,
     failureCodes,
     validationErrors,
-    warnings: warningsFor(activeSwapManager, swapManagerIntegrity, routeData, trace.status),
+    warnings: warningsFor(activeSwapManager, swapManagerIntegrity, routeData, effectiveTrace.status),
   };
 }
 
@@ -690,14 +722,164 @@ function certifyRouteData(
   manager: SwapManagerIntegrity,
 ): RouteDataCertification {
   const managerCodeHash = firstNonNull(manager.codeHashesByRpc.map((row) => row.runtimeCodeHash));
+  const routeEnvelope = decodePiteasRouteEnvelope(routeDataRaw, {
+    managerRuntimeCodeHash: managerCodeHash,
+  });
   return {
     rawFingerprint: routeDataRaw ? fingerprint(routeDataRaw) : null,
     length: routeDataRaw ? Math.max(0, (routeDataRaw.length - 2) / 2) : 0,
     managerCodeHash,
-    decoderVersion: "opaque-manager-bound-v1",
-    decoderMatchesManagerHash: false,
-    authoritativeFields: [],
+    decoderVersion: routeEnvelope.decoderVersion,
+    decoderMatchesManagerHash:
+      routeEnvelope.status === "PASSED" && routeEnvelope.managerHashBinding.status === "MATCHED",
+    authoritativeFields: Object.keys(routeEnvelope.authoritativeFields),
+    routeEnvelopeDecode: {
+      status: routeEnvelope.status,
+      authoritativeFields: routeEnvelope.authoritativeFields,
+      diagnosticFields: routeEnvelope.diagnosticFields,
+      unresolvedFields: routeEnvelope.unresolvedFields,
+      consumedBytes: routeEnvelope.consumedBytes,
+      totalBytes: routeEnvelope.totalBytes,
+      trailingBytes: routeEnvelope.trailingBytes,
+      decoderVersion: routeEnvelope.decoderVersion,
+      managerHashBinding: routeEnvelope.managerHashBinding,
+      supportedEnvelopeVersion: routeEnvelope.supportedEnvelopeVersion,
+    },
     heuristicObservations: routeDataRaw ? heuristicAddresses(routeDataRaw) : [],
+  };
+}
+
+async function readExecutionStatePrerequisites(
+  config: AppConfig,
+  args: {
+    walletAddress: string;
+    tokenIn: string;
+    spender: string;
+    amountInRaw: string;
+    valueWei: string;
+    blockHex: string | null;
+  },
+): Promise<ExecutionLayerCertification["statePrerequisites"]> {
+  const [inputBalanceAvailableRaw, allowanceAvailableRaw, nativeGasAvailableWei] = await Promise.all([
+    readUintCall(config, args.tokenIn, balanceOfCallData(args.walletAddress), args.blockHex),
+    readUintCall(config, args.tokenIn, allowanceCallData(args.walletAddress, args.spender), args.blockHex),
+    readNativeBalanceAcrossRpcs(config, args.walletAddress, args.blockHex),
+  ]);
+  return {
+    inputBalanceRequiredRaw: args.amountInRaw,
+    inputBalanceAvailableRaw,
+    allowanceRequiredRaw: args.amountInRaw,
+    allowanceAvailableRaw,
+    nativeGasRequiredWei: args.valueWei === "0" ? null : args.valueWei,
+    nativeGasAvailableWei,
+  };
+}
+
+function statePrerequisitesInsufficient(
+  prerequisites: ExecutionLayerCertification["statePrerequisites"],
+): boolean {
+  const requiredBalance = bigintOrNull(prerequisites.inputBalanceRequiredRaw);
+  const availableBalance = bigintOrNull(prerequisites.inputBalanceAvailableRaw);
+  const requiredAllowance = bigintOrNull(prerequisites.allowanceRequiredRaw);
+  const availableAllowance = bigintOrNull(prerequisites.allowanceAvailableRaw);
+  const requiredNative = bigintOrNull(prerequisites.nativeGasRequiredWei);
+  const availableNative = bigintOrNull(prerequisites.nativeGasAvailableWei);
+  return (
+    (requiredBalance !== null && availableBalance !== null && availableBalance < requiredBalance) ||
+    (requiredAllowance !== null && availableAllowance !== null && availableAllowance < requiredAllowance) ||
+    (requiredNative !== null && availableNative !== null && availableNative < requiredNative)
+  );
+}
+
+async function readUintCall(
+  config: AppConfig,
+  to: string,
+  data: string,
+  blockHex: string | null,
+): Promise<string | null> {
+  const result = await readCallAcrossRpcs(config, to, data, blockHex);
+  if (!result || !/^0x[0-9a-fA-F]{64}$/.test(result)) return null;
+  try {
+    return BigInt(result).toString();
+  } catch {
+    return null;
+  }
+}
+
+async function readNativeBalanceAcrossRpcs(
+  config: AppConfig,
+  address: string,
+  blockHex: string | null,
+): Promise<string | null> {
+  for (const rpcUrl of rpcUrls(config)) {
+    try {
+      const result = await rpcCall<string>(
+        rpcUrl,
+        "eth_getBalance",
+        [address, blockHex ?? "latest"],
+        config.httpTimeoutMs,
+      );
+      return BigInt(result).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function balanceOfCallData(owner: string): string {
+  return `${ERC20_BALANCE_OF_SELECTOR}${addressWord(owner)}`;
+}
+
+function allowanceCallData(owner: string, spender: string): string {
+  return `${ERC20_ALLOWANCE_SELECTOR}${addressWord(owner)}${addressWord(spender)}`;
+}
+
+function addressWord(address: string): string {
+  return address.slice(2).toLowerCase().padStart(64, "0");
+}
+
+function bigintOrNull(value: string | null | undefined): bigint | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function diagnosticOverrideTraceFor(
+  prerequisites: ExecutionLayerCertification["statePrerequisites"],
+  traceStatus: ExecutionTraceStatus,
+  context: { token: string; owner: string; spender: string },
+): ExecutionLayerCertification["diagnosticOverrideTrace"] {
+  if (traceStatus !== "STATE_INSUFFICIENT") {
+    return {
+      status: "NOT_RUN",
+      stateOverridesUsed: false,
+      automaticExecutionQualifying: false,
+      overrideSpecification: null,
+      reason: "Diagnostic state override trace was not needed.",
+      traceBackend: null,
+    };
+  }
+  return {
+    status: "UNSUPPORTED",
+    stateOverridesUsed: false,
+    automaticExecutionQualifying: false,
+    overrideSpecification: {
+      token: context.token,
+      owner: context.owner,
+      spender: context.spender,
+      inputBalanceRaw: prerequisites.inputBalanceRequiredRaw,
+      allowanceRaw: prerequisites.allowanceRequiredRaw,
+      nativeBalanceWei: prerequisites.nativeGasRequiredWei,
+      storageOverridesUsed: false,
+      codeOverridesUsed: false,
+    },
+    reason:
+      "Actual wallet state is insufficient. ERC-20 balance and allowance storage slots are not proven here, so no diagnostic state override was sent.",
+    traceBackend: null,
   };
 }
 
@@ -775,15 +957,16 @@ async function traceExactPreparedTransaction(
         [tx, block, { tracer: "callTracer" }],
         config.httpTimeoutMs,
       );
+      const status = traceStatus(result);
       return {
-        status: traceStatus(result),
+        status,
         backend: {
           rpc: rpcUrl,
           method: "debug_traceCall",
           blockNumber: hexBlockToString(args.blockHex),
           stateOverridesUsed: false,
           supported: true,
-          failureReason: null,
+          failureReason: status === "PASSED" ? null : traceFailureReason(result),
         },
         root: result,
       };
@@ -799,15 +982,16 @@ async function traceExactPreparedTransaction(
         config.httpTimeoutMs,
       );
       const root = traceCallToCallTracer(result, args);
+      const status = traceStatus(root);
       return {
-        status: traceStatus(root),
+        status,
         backend: {
           rpc: rpcUrl,
           method: "trace_call",
           blockNumber: hexBlockToString(args.blockHex),
           stateOverridesUsed: false,
           supported: true,
-          failureReason: null,
+          failureReason: status === "PASSED" ? null : traceFailureReason(root),
         },
         root,
       };
@@ -1052,6 +1236,7 @@ function approvalEvidence(
 function failureCodesFor(args: {
   activeSwapManager: ActiveSwapManager;
   swapManagerIntegrity: SwapManagerIntegrity;
+  routeData: RouteDataCertification;
   binding: RouterManagerBinding;
   traceStatus: ExecutionTraceStatus;
   graph: Awaited<ReturnType<typeof analyzeExecutionTrace>>;
@@ -1089,9 +1274,22 @@ function failureCodesFor(args: {
   if (args.swapManagerIntegrity.address !== null && args.swapManagerIntegrity.codeHashesByRpc.every((row) => row.runtimeCodeHash === null)) {
     codes.push("SWAP_MANAGER_BYTECODE_UNAVAILABLE");
   }
-  if (args.traceStatus === "UNSUPPORTED") codes.push("EXECUTION_TRACE_UNSUPPORTED");
-  if (args.traceStatus === "STATE_INSUFFICIENT") codes.push("EXECUTION_TRACE_STATE_INSUFFICIENT");
-  if (args.traceStatus === "FAILED") codes.push("EXECUTION_TRACE_FAILED");
+  if (
+    args.routeData.routeEnvelopeDecode.status === "UNSUPPORTED_VERSION" ||
+    args.routeData.routeEnvelopeDecode.managerHashBinding.status === "MISMATCH"
+  ) {
+    codes.push("ROUTE_ENVELOPE_UNSUPPORTED");
+  }
+  if (
+    args.routeData.routeEnvelopeDecode.status === "MALFORMED" ||
+    args.routeData.routeEnvelopeDecode.status === "PARTIAL" ||
+    args.routeData.routeEnvelopeDecode.status === "FAILED"
+  ) {
+    codes.push("ROUTE_ENVELOPE_MALFORMED");
+  }
+  if (args.traceStatus === "UNSUPPORTED") codes.push("TRACE_BACKEND_UNAVAILABLE");
+  if (args.traceStatus === "STATE_INSUFFICIENT") codes.push("TRACE_STATE_INSUFFICIENT");
+  if (args.traceStatus === "FAILED") codes.push("TRACE_EXECUTION_REVERTED");
   if (args.graph.executionGraphStatus === "UNRESOLVED" || args.graph.executionGraphStatus === "PARTIALLY_RESOLVED") {
     codes.push("EXECUTION_GRAPH_UNRESOLVED");
   }
@@ -1102,6 +1300,8 @@ function failureCodesFor(args: {
 
 function messageForFailureCode(code: string): string {
   const messages: Record<string, string> = {
+    ROUTE_ENVELOPE_UNSUPPORTED: "Piteas route envelope decoder is not registered for the active SwapManager hash.",
+    ROUTE_ENVELOPE_MALFORMED: "Piteas route envelope is malformed or only partially consumed.",
     SWAP_MANAGER_LAYOUT_UNAVAILABLE: "Verified SwapManager storage layout was unavailable.",
     SWAP_MANAGER_ADDRESS_INVALID: "SwapManager address could not be decoded from the verified storage byte range.",
     SWAP_MANAGER_ZERO_ADDRESS: "SwapManager storage decoded to the zero address.",
@@ -1114,9 +1314,9 @@ function messageForFailureCode(code: string): string {
     SWAP_MANAGER_CODE_CHANGED: "SwapManager bytecode changed between quote certification and simulation.",
     SWAP_MANAGER_CODE_HASH_DISAGREEMENT: "SwapManager runtime code hash disagrees across RPCs.",
     SWAP_MANAGER_BYTECODE_UNAVAILABLE: "SwapManager bytecode is empty or unavailable.",
-    EXECUTION_TRACE_UNSUPPORTED: "No configured RPC supports debug_traceCall or trace_call.",
-    EXECUTION_TRACE_STATE_INSUFFICIENT: "Trace backend could not evaluate the wallet's actual state.",
-    EXECUTION_TRACE_FAILED: "Exact prepared transaction trace failed.",
+    TRACE_BACKEND_UNAVAILABLE: "No configured RPC supports debug_traceCall or trace_call.",
+    TRACE_STATE_INSUFFICIENT: "Exact prepared transaction trace is blocked by insufficient actual wallet balance or allowance.",
+    TRACE_EXECUTION_REVERTED: "Exact prepared transaction trace reverted for a non-state-prerequisite reason.",
     EXECUTION_GRAPH_UNRESOLVED: "Full state-changing execution graph is not resolved.",
     EXECUTION_GRAPH_FAILED: "Execution graph contains a prohibited operation.",
     TRUST_MANIFEST_REQUIRED: "Signed execution trust manifest is required for automatic execution eligibility.",
@@ -1145,10 +1345,13 @@ function warningsFor(
     warnings.push("Active SwapManager code hash requires structured operator approval before automation.");
   }
   if (!routeData.decoderMatchesManagerHash) {
-    warnings.push("Piteas route bytes are treated as manager-specific opaque data.");
+    warnings.push("Piteas route decoder is unavailable for the active SwapManager hash; route bytes are not authoritative.");
   }
   if (traceStatus === "UNSUPPORTED") {
     warnings.push("Use a trace-capable RPC or local PulseChain fork node to resolve the internal execution graph.");
+  }
+  if (traceStatus === "STATE_INSUFFICIENT") {
+    warnings.push("Actual wallet balance or allowance is insufficient, so the exact live route graph remains unresolved.");
   }
   return warnings;
 }
@@ -1722,12 +1925,18 @@ function traceStatus(root: TraceNode): ExecutionTraceStatus {
   return "PASSED";
 }
 
+function traceFailureReason(root: TraceNode): string | null {
+  const parts = [root.error, root.revertReason]
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 function isUnsupportedTraceError(message: string): boolean {
   return /method .*not found|unsupported|not available|does not exist|the method .* does not exist/i.test(message);
 }
 
 function isStateInsufficient(message: string | null): boolean {
-  return typeof message === "string" && /insufficient funds|allowance|balance|execution reverted/i.test(message);
+  return typeof message === "string" && /insufficient funds|allowance|balance|transfer amount exceeds/i.test(message);
 }
 
 function heuristicAddresses(data: string): RouteDataCertification["heuristicObservations"] {

@@ -143,12 +143,22 @@ export function validatePreparedAndDecodedIntent(args: {
     reasons,
     "route_data_decodable",
     decodedIntent.routeData?.decodable === true,
-    "Piteas route data envelope is not decodable",
+    routeDataFailureMessage(decodedIntent.routeData?.status),
     {
       routeDataFingerprint: decodedIntent.routeDataFingerprint,
       validationErrors: decodedIntent.routeData?.validationErrors ?? decodedIntent.validationErrors,
+      routeEnvelopeDecode: decodedIntent.routeData
+        ? {
+            status: decodedIntent.routeData.status ?? (decodedIntent.routeData.decodable ? "PASSED" : "FAILED"),
+            consumedBytes: decodedIntent.routeData.consumedBytes ?? null,
+            totalBytes: decodedIntent.routeData.totalBytes ?? null,
+            trailingBytes: decodedIntent.routeData.trailingBytes ?? null,
+            decoderVersion: decodedIntent.routeData.decoderVersion ?? null,
+            managerHashBinding: decodedIntent.routeData.managerHashBinding ?? null,
+          }
+        : null,
     },
-    { code: "ROUTE_DATA_NOT_DECODABLE", stage: "policy" },
+    { code: routeDataFailureCode(decodedIntent.routeData?.status), stage: "policy" },
   );
   requireCheck(
     policyChecks,
@@ -212,7 +222,13 @@ export function validatePreparedAndDecodedIntent(args: {
         ? "Decoded minimum output is weaker than retained candidate quote minimum"
         : "Decoded minimum-output semantics are unresolved",
       minimumOutputValidation as unknown as Record<string, unknown>,
-      { code: "DECODED_MINIMUM_OUTPUT_MISMATCH", stage: "policy" },
+      {
+        code:
+          minimumOutputValidation.relationship === "CALLDATA_WEAKER"
+            ? "MINIMUM_OUTPUT_CALLDATA_WEAKER"
+            : "MINIMUM_OUTPUT_SEMANTICS_UNRESOLVED",
+        stage: "policy",
+      },
     );
   }
   const expectedOut = stringToBigInt(decodedIntent.routeExpectedOutputRaw);
@@ -286,4 +302,19 @@ export function validatePreparedAndDecodedIntent(args: {
     candidateQuoteExpectedOutputRaw: quote.amountOut,
     note: "Supported swap calldata encodes minimum-output protection; expected output is retained from the exact candidate quote.",
   });
+}
+
+type RouteDataStatus = NonNullable<DecodedIntent["routeData"]>["status"];
+
+function routeDataFailureCode(status: RouteDataStatus): string {
+  if (status === "UNSUPPORTED_VERSION") return "ROUTE_ENVELOPE_UNSUPPORTED";
+  if (status === "PARTIAL") return "ROUTE_ENVELOPE_MALFORMED";
+  if (status === "MALFORMED") return "ROUTE_ENVELOPE_MALFORMED";
+  return "ROUTE_ENVELOPE_MALFORMED";
+}
+
+function routeDataFailureMessage(status: RouteDataStatus): string {
+  if (status === "UNSUPPORTED_VERSION") return "Piteas route data envelope version is unsupported";
+  if (status === "PARTIAL") return "Piteas route data envelope was only partially decoded";
+  return "Piteas route data envelope is malformed";
 }
