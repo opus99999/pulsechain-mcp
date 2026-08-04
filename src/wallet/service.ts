@@ -665,6 +665,38 @@ export async function proposeAgentTx(
   }
 
   const now = Date.now();
+  const requestedExpiresAt =
+    typeof req.proposalExpiresAt === "string"
+      ? Date.parse(req.proposalExpiresAt)
+      : NaN;
+  if (req.proposalExpiresAt !== undefined && !Number.isFinite(requestedExpiresAt)) {
+    throw new PolicyError("proposalExpiresAt must be a valid ISO timestamp");
+  }
+  if (req.proposalExpiresAt !== undefined && requestedExpiresAt <= now) {
+    throw new PolicyError("proposalExpiresAt must be in the future");
+  }
+  if (req.requireSimulationSuccess === true) {
+    if (!policyCheck.allowed) {
+      throw new PolicyError(
+        `Proposal simulation required but policy refused proposal: ${stripSecrets(
+          policyCheck.reasons.join("; ") || "policy denied",
+        )}`,
+      );
+    }
+    const strictSimulationPassed =
+      simulation.attempted === true &&
+      simulation.ok === true &&
+      simulation.error === undefined &&
+      typeof simulation.gasEstimate === "string" &&
+      simulation.gasEstimate !== "";
+    if (!strictSimulationPassed) {
+      throw new PolicyError(
+        `Proposal simulation required but failed: ${stripSecrets(
+          simulation.error ?? "simulation did not pass",
+        )}`,
+      );
+    }
+  }
   const proposal: TxProposal = {
     id: generateProposalId(),
     walletId: record.id,
@@ -674,10 +706,12 @@ export async function proposeAgentTx(
     valuePls,
     data,
     createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + PROPOSAL_TTL_MS).toISOString(),
+    expiresAt:
+      req.proposalExpiresAt ?? new Date(now + PROPOSAL_TTL_MS).toISOString(),
     simulation,
     policyCheck,
     status: policyCheck.allowed ? "pending" : "rejected",
+    ...(req.provenance ? { provenance: req.provenance } : {}),
   };
 
   saveProposal(config.agentWalletDir, proposal);

@@ -10,6 +10,7 @@ Quote and prepare tools are **advisory assists**. They do **not** broadcast. Exe
 |------|-----|------|
 | **`piteas_quote`** | None (keyless) | **Default** aggregator quote assist |
 | **`piteas_prepare_swap`** | None | Quote → reviewable intent (`to` / `data` / `value`) |
+| **`piteas_propose_agent_swap`** | Wallet mode | Fresh quote → strict decode → same-process proposal without returning raw calldata |
 | **`switch_quote`** | Operator `SWITCH_API_KEY` | Switch.win quote; public unauthenticated → 401 |
 | **`switch_prepare_swap`** | Needs successful keyed quote | Intent from **upstream `tx.to` / `tx.data` / `tx.value` only** |
 | `pulseswap_quote` | None | Multi-DEX advisory |
@@ -38,6 +39,8 @@ Neither Piteas nor Switch is a **best-price oracle**. Prefer addresses over symb
 ```
 
 **Stale-quote rule:** quotes expire; re-quote before send if delayed, market moved, prepare failed, or `quoteReady` is false. Never reuse old calldata.
+
+For long Piteas aggregator calldata, prefer `piteas_propose_agent_swap` when wallet mode is enabled. It obtains one fresh quote, keeps the exact calldata inside the MCP process, runs strict top-level Piteas decode plus native wallet inspection and same-block RPC simulation, then saves one pending proposal only if all checks pass. It does not expose raw calldata in normal output and does not sign, submit, broadcast, execute, or create approvals.
 
 See [AGENT_GUIDANCE.md](AGENT_GUIDANCE.md) for the durable checklist and [SECURITY.md](SECURITY.md) for wallet essentials.
 

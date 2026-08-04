@@ -47,6 +47,7 @@ import {
   requireConfirmOrInput,
 } from "../../utils/confirm.js";
 import { registerTool } from "../define.js";
+import { registerPiteasProposeAgentSwapTool } from "./piteasProposeAgentSwap.js";
 
 /** Extra security banner for every wallet write tool description. */
 export const WALLET_SECURITY_WARNING =
@@ -568,6 +569,8 @@ export function registerWalletTools(
       );
     },
   });
+
+  registerPiteasProposeAgentSwapTool(server, config);
 
   // -------------------------------------------------------------------------
   // execute_agent_tx / sign_and_send

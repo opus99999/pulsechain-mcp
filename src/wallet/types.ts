@@ -160,6 +160,18 @@ export interface TxProposalRequest {
   data?: `0x${string}`;
   /** Optional gas limit override */
   gas?: string;
+  /**
+   * Internal guard for proposal-only workflows that must fail before saving
+   * when the local proposal simulation does not pass.
+   */
+  requireSimulationSuccess?: boolean;
+  /**
+   * Optional short expiration for quote-bound proposals. Generic public tools
+   * keep the default PROPOSAL_TTL_MS behavior by leaving this unset.
+   */
+  proposalExpiresAt?: string;
+  /** Non-secret workflow provenance; must never contain raw calldata or secrets. */
+  provenance?: Record<string, unknown>;
 }
 
 export interface SimulationResult {
@@ -274,6 +286,8 @@ export interface TxProposal {
   txHash?: `0x${string}`;
   /** ISO time when broadcasting+txHash barrier was persisted (operator recovery). */
   broadcastAcceptedAt?: string;
+  /** Non-secret workflow provenance; raw signed txs, private keys, and full calldata are forbidden. */
+  provenance?: Record<string, unknown>;
 }
 
 export interface AuditEntry {

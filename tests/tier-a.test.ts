@@ -791,7 +791,7 @@ describe("Tier A tool registration", () => {
       expect(t?.category).toBe("analytics");
       expect(t?.write).toBe(false);
     }
-    // Prior inventory + standalone Piteas accumulation planner + signed trust manifest tools + live route readiness
-    expect(meta.length).toBe(101);
+    // Prior inventory + standalone Piteas accumulation planner + signed trust manifest tools + live route readiness + in-process Piteas wallet proposal
+    expect(meta.length).toBe(102);
   });
 });

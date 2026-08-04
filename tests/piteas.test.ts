@@ -443,6 +443,7 @@ describe("Piteas tool registration", () => {
     expect(names).toContain("phiat_shadow_buy");
     expect(names).toContain("phiat_live_route_readiness");
     expect(names).toContain("phiat_execution_trust_report");
+    expect(names).toContain("piteas_propose_agent_swap");
     const meta = getRegisteredTools();
     for (const n of [
       "piteas_quote",
@@ -457,6 +458,10 @@ describe("Piteas tool registration", () => {
     expect(meta.find((m) => m.name === "piteas_quote")?.description).toMatch(
       /best-price|oracle|Preferred aggregator/i,
     );
-    expect(meta.length).toBe(101);
+    const proposalTool = meta.find((m) => m.name === "piteas_propose_agent_swap");
+    expect(proposalTool?.category).toBe("wallet");
+    expect(proposalTool?.write).toBe(true);
+    expect(proposalTool?.description).toMatch(/never signs|raw calldata/i);
+    expect(meta.length).toBe(102);
   });
 });
