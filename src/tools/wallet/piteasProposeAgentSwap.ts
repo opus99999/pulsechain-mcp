@@ -425,7 +425,7 @@ export function assertCalldataHandoffIntegrity(
   return { ok: true };
 }
 
-function routeProtocols(quote: PiteasQuoteData): string[] {
+export function routeProtocols(quote: PiteasQuoteData): string[] {
   return Array.isArray(quote.route?.protocols)
     ? quote.route.protocols.filter((p): p is string => typeof p === "string")
     : [];
@@ -439,7 +439,7 @@ function sameDecimalString(a: string, b: string): boolean {
   }
 }
 
-function validateQuoteFields(
+export function validateQuoteFields(
   quote: PiteasQuoteData,
   input: {
     tokenIn: `0x${string}`;
@@ -475,7 +475,7 @@ function validateQuoteFields(
   return { ok: true };
 }
 
-function validateDecodedIntent(
+export function validateDecodedIntent(
   intent: PiteasTopLevelSwapIntent,
   input: {
     tokenIn: `0x${string}`;
@@ -527,7 +527,7 @@ function validateDecodedIntent(
   return { ok: true };
 }
 
-function validateWalletInspection(
+export function validateWalletInspection(
   review: AgentIntentView,
   decoded: PiteasTopLevelSwapIntent,
 ): { ok: true } | { ok: false; reason: string } {
@@ -577,7 +577,7 @@ function validateWalletInspection(
   return failed ? { ok: false, reason: `wallet inspection ${failed[1]}` } : { ok: true };
 }
 
-function maxGasEstimate(rows: RpcPinnedSimulationRow[]): bigint | null {
+export function maxGasEstimate(rows: RpcPinnedSimulationRow[]): bigint | null {
   let max: bigint | null = null;
   for (const row of rows) {
     if (!row.estimateGasPassed || row.gasEstimate === null) continue;
@@ -591,7 +591,7 @@ function weiCostToPls(costWei: bigint): string {
   return formatEther(costWei);
 }
 
-async function estimateGasCost(
+export async function estimateGasCost(
   deps: Pick<PiteasAgentSwapDeps, "getFeeData">,
   config: AppConfig,
   gasEstimate: bigint,
@@ -630,7 +630,7 @@ function simulationClassification(
   return "RPC_STATE_DISAGREEMENT";
 }
 
-function validateTwoRpcSimulation(
+export function validateTwoRpcSimulation(
   rows: RpcPinnedSimulationRow[],
   requireTwoRpcSimulation: boolean,
   minimumExecutableOutputRaw?: string,

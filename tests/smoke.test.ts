@@ -91,6 +91,12 @@ const WALLET_TOOLS = [
   "set_agent_policy",
   "propose_agent_tx",
   "piteas_propose_agent_swap",
+  "eusdc_rotation_scan",
+  "eusdc_rotation_propose_entry",
+  "eusdc_rotation_execute_entry",
+  "eusdc_rotation_position_status",
+  "eusdc_rotation_propose_exit",
+  "eusdc_rotation_execute_exit",
   "execute_agent_tx",
   "sign_and_send",
   "settle_interrupted_broadcast",
@@ -104,6 +110,10 @@ const WALLET_WRITE_TOOLS = [
   "set_agent_policy",
   "propose_agent_tx",
   "piteas_propose_agent_swap",
+  "eusdc_rotation_propose_entry",
+  "eusdc_rotation_execute_entry",
+  "eusdc_rotation_propose_exit",
+  "eusdc_rotation_execute_exit",
   "execute_agent_tx",
   "sign_and_send",
   "settle_interrupted_broadcast",
@@ -175,9 +185,9 @@ describe("smoke: tool registration (no live network)", () => {
     registerAllTools(server as never, smokeConfig);
 
     const meta = getRegisteredTools();
-    // 102 tools: 101 prior + in-process Piteas wallet proposal tool.
-    expect(meta.length).toBe(102);
-    expect(names.length).toBe(102);
+    // 108 tools: prior inventory + six guarded eUSDC rotation tools.
+    expect(meta.length).toBe(108);
+    expect(names.length).toBe(108);
     expect(names.length).toBe(meta.length);
 
     const byName = new Set(meta.map((t) => t.name));
@@ -239,11 +249,11 @@ describe("smoke: tool registration (no live network)", () => {
       expect(byName.has(n)).toBe(true);
     }
 
-    // Exact family counts: 3 health + 27 chain + 57 analytics + 15 wallet = 102
+    // Exact family counts: 3 health + 27 chain + 57 analytics + 21 wallet = 108
     const byCat = (c: string) => meta.filter((t) => t.category === c);
     expect(byCat("health").length).toBe(3);
     expect(byCat("chain").length).toBe(27);
-    expect(byCat("wallet").length).toBe(15);
+    expect(byCat("wallet").length).toBe(21);
     const analytics = byCat("analytics");
     // free + advanced + PulseX + DexScreener + Tier A (11) + Tier B
     // PulseX: 8 low-level + 3 Tier B factory/day/lp = 11 starting with pulsex_
@@ -251,7 +261,7 @@ describe("smoke: tool registration (no live network)", () => {
     expect(analytics.length).toBe(11 + 9 + 8 + 6 + 6 + 11 + 5 + 1);
     expect(FREE_ANALYTICS).toHaveLength(11);
     expect(ADVANCED_ANALYTICS).toHaveLength(9);
-    expect(WALLET_TOOLS).toHaveLength(15);
+    expect(WALLET_TOOLS).toHaveLength(21);
     const pulsexSubgraph = analytics.filter((t) =>
       t.name.startsWith("pulsex_"),
     );
@@ -303,7 +313,7 @@ describe("smoke: tool registration (no live network)", () => {
     expect(server).toBeTruthy();
 
     const tools = getRegisteredTools();
-    expect(tools.length).toBe(102);
+    expect(tools.length).toBe(108);
     expect(tools.some((t) => t.name === "get_rpc_health")).toBe(true);
     const names = tools.map((t) => t.name).sort();
     expect(names).toContain("pulsechain_health");

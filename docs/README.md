@@ -34,6 +34,7 @@ Do **not** treat other docs as a competing install path until bootstrap smoke pa
 | [AGENT_GUIDANCE.md](AGENT_GUIDANCE.md) | Research/swap workflows, hard rules, kill switch, trust/noise |
 | [TOKEN_IDENTITY.md](TOKEN_IDENTITY.md) | e*/p*, pHEX exception, ticker traps |
 | [AGGREGATORS.md](AGGREGATORS.md) | Piteas / Switch quote → prepare |
+| [EUSDC_ROTATION.md](EUSDC_ROTATION.md) | Five-candidate eUSDC rotation scans, guarded proposals, 1% net target |
 | [SECURITY.md](SECURITY.md) | Short essentials (first-run) |
 | [SECURITY_DEEP.md](SECURITY_DEEP.md) | Optional residual detail — not required for bootstrap |
 | [OPERATOR.md](OPERATOR.md) | Env table, multi-RPC, Docker |
