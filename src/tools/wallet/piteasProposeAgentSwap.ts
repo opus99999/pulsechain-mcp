@@ -45,6 +45,8 @@ const DEFAULT_ALLOWED_SLIPPAGE = 0.5;
 const DEFAULT_MAX_QUOTE_AGE_MS = 60_000;
 const RPC_SIMULATION_TIMEOUT_MS = 20_000;
 
+export type PiteasPhiatSwapDirection = "BUY_PHIAT" | "SELL_PHIAT";
+
 const erc20BalanceAbi = [
   {
     type: "function",
@@ -70,6 +72,12 @@ const erc20AllowanceAbi = [
 
 export type PiteasAgentSwapClassification =
   | "READY_FOR_HUMAN_CONFIRMATION"
+  | "UNSUPPORTED_TOKEN_PAIR"
+  | "SLIPPAGE_LIMIT_EXCEEDED"
+  | "MINIMUM_OUTPUT_BELOW_FLOOR"
+  | "GAS_COST_ABOVE_LIMIT"
+  | "INPUT_BALANCE_CHANGED"
+  | "NEEDS_BOUNDED_ALLOWANCE"
   | "INFRASTRUCTURE_REQUOTE_REQUIRED"
   | "PITEAS_MALFORMED_CALLDATA"
   | "CALLDATA_HANDOFF_MISMATCH"
@@ -88,6 +96,9 @@ export interface PiteasProposeAgentSwapInput {
   allowedSlippage?: number;
   maximumQuoteAgeMs?: number;
   requireTwoRpcSimulation?: boolean;
+  minimumExecutableOutputRaw?: string;
+  maximumEstimatedGasCostPls?: string;
+  requireInputAmountEqualsBalance?: boolean;
 }
 
 export interface CalldataCheckpoint {
@@ -119,10 +130,21 @@ export interface PiteasProposeAgentSwapOutput {
   reason?: string;
   walletId?: string;
   walletAddress?: `0x${string}`;
+  swapDirection?: PiteasPhiatSwapDirection;
+  tokenIn?: `0x${string}`;
+  tokenOut?: `0x${string}`;
+  inputAmountRaw?: string;
+  inputBalanceRaw?: string;
+  currentAllowanceRaw?: string;
+  verifiedSpender?: `0x${string}`;
+  requiredAllowanceRaw?: string;
+  unlimitedApproval?: boolean;
   quoteReceivedAt?: string;
   quoteResponseFingerprint?: string;
   expectedOutputRaw?: string;
   executableMinimumOutputRaw?: string;
+  minimumExecutableOutputFloorRaw?: string;
+  maximumEstimatedGasCostPls?: string;
   routeProtocols?: string[];
   methodParameterFingerprint?: `0x${string}`;
   upstreamCalldataFingerprint?: `0x${string}`;
@@ -145,6 +167,7 @@ export interface PiteasProposeAgentSwapOutput {
   proposalStatus?: TxProposal["status"];
   estimatedGas?: string;
   estimatedGasCostPls?: string;
+  everyCalldataFingerprintMatched?: boolean;
   readyForHumanConfirmation: boolean;
 }
 
@@ -268,6 +291,36 @@ function parseDecimalUint(value: string, label: string): bigint {
     throw new Error(`${label} must be a decimal unsigned integer string`);
   }
   return BigInt(value);
+}
+
+export function classifyPiteasPhiatSwapDirection(
+  tokenIn: string,
+  tokenOut: string,
+): PiteasPhiatSwapDirection | null {
+  if (sameAddress(tokenIn, EUSDC_TOKEN_ADDRESS) && sameAddress(tokenOut, PHIAT_TOKEN_ADDRESS)) {
+    return "BUY_PHIAT";
+  }
+  if (sameAddress(tokenIn, PHIAT_TOKEN_ADDRESS) && sameAddress(tokenOut, EUSDC_TOKEN_ADDRESS)) {
+    return "SELL_PHIAT";
+  }
+  return null;
+}
+
+function isPositivePlainDecimal(value: string): boolean {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return false;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) > 0n || /[1-9]/.test(fraction);
+}
+
+function parsePlainDecimalPlsToWei(value: string, label: string): bigint {
+  if (!isPositivePlainDecimal(value)) {
+    throw new Error(`${label} must be a positive plain decimal string`);
+  }
+  const [whole, fraction = ""] = value.split(".");
+  if (fraction.length > 18) {
+    throw new Error(`${label} cannot have more than 18 decimal places`);
+  }
+  return BigInt(whole) * 1_000_000_000_000_000_000n + BigInt(fraction.padEnd(18, "0"));
 }
 
 function quoteFailureClassification(result: Extract<PiteasQuoteResult, { ok: false }>) {
@@ -469,7 +522,7 @@ function validateDecodedIntent(
     return { ok: false, reason: "decoded native value does not match prepared value" };
   }
   if (BigInt(intent.nativeValueWei) !== 0n) {
-    return { ok: false, reason: "native value must be zero for this Piteas PHIAT swap" };
+    return { ok: false, reason: "native value must be zero for supported PHIAT/eUSDC swaps" };
   }
   return { ok: true };
 }
@@ -580,6 +633,7 @@ function simulationClassification(
 function validateTwoRpcSimulation(
   rows: RpcPinnedSimulationRow[],
   requireTwoRpcSimulation: boolean,
+  minimumExecutableOutputRaw?: string,
 ):
   | { ok: true }
   | {
@@ -621,12 +675,48 @@ function validateTwoRpcSimulation(
       reason: "RPC eth_call outputs disagree",
     };
   }
+  if (
+    minimumExecutableOutputRaw !== undefined &&
+    outputs.some((value) => BigInt(value) < BigInt(minimumExecutableOutputRaw))
+  ) {
+    return {
+      ok: false,
+      classification: "MINIMUM_OUTPUT_BELOW_FLOOR",
+      reason: "MINIMUM_OUTPUT_BELOW_FLOOR",
+    };
+  }
+  const gasEstimates = rows
+    .filter((row) => row.estimateGasPassed && row.gasEstimate !== null)
+    .map((row) => row.gasEstimate!);
+  if (gasEstimates.length < required) {
+    return {
+      ok: false,
+      classification: "RPC_STATE_DISAGREEMENT",
+      reason: "one or more gas estimates were missing or malformed",
+    };
+  }
+  const [firstGas] = gasEstimates;
+  if (gasEstimates.some((value) => value !== firstGas)) {
+    return {
+      ok: false,
+      classification: "RPC_STATE_DISAGREEMENT",
+      reason: "RPC gas estimates disagree",
+    };
+  }
   return { ok: true };
 }
 
 function selectedOutputFields(params: {
   walletId: string;
   walletAddress: `0x${string}`;
+  swapDirection: PiteasPhiatSwapDirection;
+  tokenIn: `0x${string}`;
+  tokenOut: `0x${string}`;
+  inputAmountRaw: string;
+  inputBalanceRaw?: string;
+  currentAllowanceRaw?: string;
+  minimumExecutableOutputFloorRaw?: string;
+  maximumEstimatedGasCostPls?: string;
   quoteReceivedAt: string;
   quoteResponseFingerprint: string;
   quote: PiteasQuoteData;
@@ -643,10 +733,18 @@ function selectedOutputFields(params: {
   return {
     walletId: params.walletId,
     walletAddress: params.walletAddress,
+    swapDirection: params.swapDirection,
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    inputAmountRaw: params.inputAmountRaw,
+    inputBalanceRaw: params.inputBalanceRaw,
+    currentAllowanceRaw: params.currentAllowanceRaw,
     quoteReceivedAt: params.quoteReceivedAt,
     quoteResponseFingerprint: params.quoteResponseFingerprint,
     expectedOutputRaw: params.quote.amountOut,
     executableMinimumOutputRaw: params.decoded.destinationMinimumAmountRaw,
+    minimumExecutableOutputFloorRaw: params.minimumExecutableOutputFloorRaw,
+    maximumEstimatedGasCostPls: params.maximumEstimatedGasCostPls,
     routeProtocols: routeProtocols(params.quote),
     methodParameterFingerprint: params.methodParameterFingerprint,
     upstreamCalldataFingerprint: params.checkpoints.upstream?.fingerprint,
@@ -669,6 +767,9 @@ function selectedOutputFields(params: {
     proposalStatus: params.proposal?.status,
     estimatedGas: params.estimatedGas,
     estimatedGasCostPls: params.estimatedGasCostPls,
+    everyCalldataFingerprintMatched: assertCalldataHandoffIntegrity(
+      Object.values(params.checkpoints),
+    ).ok,
   };
 }
 
@@ -686,15 +787,27 @@ export async function runPiteasProposeAgentSwap(
     if (BigInt(amountRaw) <= 0n) {
       return failure("UNKNOWN_FAIL_CLOSED", "input", "amountRaw must be positive");
     }
+    const minimumExecutableOutputFloorRaw =
+      input.minimumExecutableOutputRaw === undefined
+        ? undefined
+        : parseDecimalUint(
+            input.minimumExecutableOutputRaw,
+            "minimumExecutableOutputRaw",
+          ).toString();
+    const maximumEstimatedGasCostPls = input.maximumEstimatedGasCostPls;
+    const maximumEstimatedGasCostWei =
+      maximumEstimatedGasCostPls === undefined
+        ? undefined
+        : parsePlainDecimalPlsToWei(
+            maximumEstimatedGasCostPls,
+            "maximumEstimatedGasCostPls",
+          );
     if (config.network !== "mainnet") {
       return failure(
         "UNKNOWN_FAIL_CLOSED",
         "runtime",
         `Piteas wallet proposals require PulseChain mainnet chain ID ${PULSECHAIN_CHAIN_ID}`,
       );
-    }
-    if (!Number.isFinite(allowedSlippage) || allowedSlippage < 0 || allowedSlippage > 100) {
-      return failure("UNKNOWN_FAIL_CLOSED", "input", "allowedSlippage must be 0-100");
     }
     if (
       !Number.isFinite(maximumQuoteAgeMs) ||
@@ -710,11 +823,28 @@ export async function runPiteasProposeAgentSwap(
 
     const tokenIn = assertAddress(input.tokenIn);
     const tokenOut = assertAddress(input.tokenOut);
-    if (!sameAddress(tokenIn, EUSDC_TOKEN_ADDRESS)) {
-      return failure("UNKNOWN_FAIL_CLOSED", "input", "tokenIn must be exact eUSDC");
+    const swapDirection = classifyPiteasPhiatSwapDirection(tokenIn, tokenOut);
+    if (!swapDirection) {
+      return failure("UNSUPPORTED_TOKEN_PAIR", "input", "UNSUPPORTED_TOKEN_PAIR", {
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
+      });
     }
-    if (!sameAddress(tokenOut, PHIAT_TOKEN_ADDRESS)) {
-      return failure("UNKNOWN_FAIL_CLOSED", "input", "tokenOut must be exact PHIAT");
+    if (!Number.isFinite(allowedSlippage) || allowedSlippage < 0) {
+      return failure("UNKNOWN_FAIL_CLOSED", "input", "allowedSlippage must be between 0 and 0.5");
+    }
+    if (allowedSlippage > DEFAULT_ALLOWED_SLIPPAGE) {
+      return failure("SLIPPAGE_LIMIT_EXCEEDED", "input", "SLIPPAGE_LIMIT_EXCEEDED", {
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
+      });
     }
 
     const wallet: AgentWalletPublicInfo = await deps.getAgentWalletInfo(
@@ -727,12 +857,24 @@ export async function runPiteasProposeAgentSwap(
       return failure("UNKNOWN_FAIL_CLOSED", "wallet", "wallet is not enabled", {
         walletId: input.walletId,
         walletAddress,
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
       });
     }
     if (wallet.policy.killed) {
       return failure("UNKNOWN_FAIL_CLOSED", "wallet", "wallet is killed", {
         walletId: input.walletId,
         walletAddress,
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
       });
     }
 
@@ -742,19 +884,66 @@ export async function runPiteasProposeAgentSwap(
       deps.readTokenAllowance(config, tokenIn, walletAddress, VERIFIED_PITEAS_ROUTER),
     ]);
     const amount = BigInt(amountRaw);
-    if (parseDecimalUint(tokenBalanceRaw, "tokenBalanceRaw") < amount) {
+    const inputBalance = parseDecimalUint(tokenBalanceRaw, "tokenBalanceRaw");
+    const currentAllowance = parseDecimalUint(allowanceRaw, "allowanceRaw");
+    if (input.requireInputAmountEqualsBalance === true && inputBalance !== amount) {
+      return failure("INPUT_BALANCE_CHANGED", "wallet_state", "INPUT_BALANCE_CHANGED", {
+        walletId: input.walletId,
+        walletAddress,
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        inputBalanceRaw: inputBalance.toString(),
+        currentAllowanceRaw: currentAllowance.toString(),
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
+      });
+    }
+    if (inputBalance < amount) {
       return failure("UNKNOWN_FAIL_CLOSED", "wallet_state", "insufficient input-token balance", {
         walletId: input.walletId,
         walletAddress,
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        inputBalanceRaw: inputBalance.toString(),
+        currentAllowanceRaw: currentAllowance.toString(),
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
       });
     }
-    if (parseDecimalUint(allowanceRaw, "allowanceRaw") < amount) {
-      return failure("UNKNOWN_FAIL_CLOSED", "wallet_state", "insufficient existing allowance", {
+    if (currentAllowance < amount) {
+      return failure("NEEDS_BOUNDED_ALLOWANCE", "wallet_state", "NEEDS_BOUNDED_ALLOWANCE", {
         walletId: input.walletId,
         walletAddress,
+        swapDirection,
+        tokenIn,
+        tokenOut,
+        inputAmountRaw: amountRaw,
+        inputBalanceRaw: inputBalance.toString(),
+        currentAllowanceRaw: currentAllowance.toString(),
+        verifiedSpender: VERIFIED_PITEAS_ROUTER,
+        requiredAllowanceRaw: amountRaw,
+        unlimitedApproval: false,
+        minimumExecutableOutputFloorRaw,
+        maximumEstimatedGasCostPls,
       });
     }
     const nativeBalance = parseDecimalUint(nativeBalanceWei, "nativeBalanceWei");
+    const outputContext = {
+      walletId: input.walletId,
+      walletAddress,
+      swapDirection,
+      tokenIn,
+      tokenOut,
+      inputAmountRaw: amountRaw,
+      inputBalanceRaw: inputBalance.toString(),
+      currentAllowanceRaw: currentAllowance.toString(),
+      minimumExecutableOutputFloorRaw,
+      maximumEstimatedGasCostPls,
+    };
 
     const quote = await deps.getPiteasQuote(config, {
       tokenIn,
@@ -767,8 +956,7 @@ export async function runPiteasProposeAgentSwap(
     const quoteReceivedAt = new Date(quoteReceivedMs).toISOString();
     if (!quote.ok) {
       return failure(quoteFailureClassification(quote), "quote", quote.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
       });
     }
@@ -782,8 +970,7 @@ export async function runPiteasProposeAgentSwap(
     });
     if (!quoteFields.ok) {
       return failure("INFRASTRUCTURE_REQUOTE_REQUIRED", "quote_validation", quoteFields.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint: quoteData.responseFingerprint ?? fingerprint(quoteData),
       });
@@ -798,8 +985,7 @@ export async function runPiteasProposeAgentSwap(
     });
     if (!calldataValidation.ok) {
       return failure("PITEAS_MALFORMED_CALLDATA", "quote_calldata", calldataValidation.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint: quoteData.responseFingerprint ?? fingerprint(quoteData),
       });
@@ -822,8 +1008,7 @@ export async function runPiteasProposeAgentSwap(
     });
     if (!prepared.ok) {
       return failure("PITEAS_MALFORMED_CALLDATA", "prepare", prepared.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint,
       });
@@ -835,19 +1020,18 @@ export async function runPiteasProposeAgentSwap(
     ]);
     if (!preparedHandoff.ok) {
       return failure("CALLDATA_HANDOFF_MISMATCH", "prepare", preparedHandoff.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint,
         upstreamCalldataFingerprint: checkpoints.upstream.fingerprint,
         preparedCalldataFingerprint: checkpoints.prepared.fingerprint,
         calldataByteLength: checkpoints.upstream.byteLength,
+        everyCalldataFingerprintMatched: false,
       });
     }
     if (prepared.intent.to.toLowerCase() !== VERIFIED_PITEAS_ROUTER.toLowerCase()) {
       return failure("UNKNOWN_FAIL_CLOSED", "prepare", "prepared destination is not verified Piteas router", {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint,
       });
@@ -861,8 +1045,7 @@ export async function runPiteasProposeAgentSwap(
     });
     if (!decodedResult.ok) {
       return failure("PITEAS_MALFORMED_CALLDATA", "strict_decode", decodedResult.reason, {
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint,
         upstreamCalldataFingerprint: checkpoints.upstream.fingerprint,
@@ -881,8 +1064,23 @@ export async function runPiteasProposeAgentSwap(
     if (!decodedValidation.ok) {
       return failure("PITEAS_MALFORMED_CALLDATA", "strict_decode", decodedValidation.reason, {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
+          quoteReceivedAt,
+          quoteResponseFingerprint,
+          quote: quoteData,
+          methodParameterFingerprint,
+          checkpoints,
+          decoded,
+        }),
+      });
+    }
+    if (
+      minimumExecutableOutputFloorRaw !== undefined &&
+      BigInt(decoded.destinationMinimumAmountRaw) < BigInt(minimumExecutableOutputFloorRaw)
+    ) {
+      return failure("MINIMUM_OUTPUT_BELOW_FLOOR", "strict_decode", "MINIMUM_OUTPUT_BELOW_FLOOR", {
+        ...selectedOutputFields({
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -912,8 +1110,7 @@ export async function runPiteasProposeAgentSwap(
     if (!inspectionValidation.ok) {
       return failure("PITEAS_MALFORMED_CALLDATA", "wallet_inspection", inspectionValidation.reason, {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -939,8 +1136,7 @@ export async function runPiteasProposeAgentSwap(
         "pre_simulation_handoff",
         handoffBeforeSimulation.reason,
         selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -965,12 +1161,12 @@ export async function runPiteasProposeAgentSwap(
     const simulationValidation = validateTwoRpcSimulation(
       twoRpcSimulation,
       requireTwoRpcSimulation,
+      minimumExecutableOutputFloorRaw,
     );
     if (!simulationValidation.ok) {
       return failure(simulationValidation.classification, "same_block_simulation", simulationValidation.reason, {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -987,8 +1183,7 @@ export async function runPiteasProposeAgentSwap(
     if (gasEstimateBig === null) {
       return failure("UNKNOWN_FAIL_CLOSED", "gas", "missing gas estimate after simulation", {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1001,12 +1196,31 @@ export async function runPiteasProposeAgentSwap(
       });
     }
     const gasCost = await estimateGasCost(deps, config, gasEstimateBig);
+    if (
+      maximumEstimatedGasCostWei !== undefined &&
+      gasCost.costWei > maximumEstimatedGasCostWei
+    ) {
+      return failure("GAS_COST_ABOVE_LIMIT", "gas", "GAS_COST_ABOVE_LIMIT", {
+        ...selectedOutputFields({
+          ...outputContext,
+          quoteReceivedAt,
+          quoteResponseFingerprint,
+          quote: quoteData,
+          methodParameterFingerprint,
+          checkpoints,
+          decoded,
+          review,
+          twoRpcSimulation,
+          estimatedGas: gasEstimateBig.toString(),
+          estimatedGasCostPls: gasCost.costPls,
+        }),
+      });
+    }
     const nativeValue = parseDecimalUint(prepared.intent.valueWei, "prepared.valueWei");
     if (nativeBalance < gasCost.costWei + nativeValue) {
       return failure("UNKNOWN_FAIL_CLOSED", "wallet_state", "insufficient PLS for estimated gas", {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1036,8 +1250,7 @@ export async function runPiteasProposeAgentSwap(
         "pre_proposal_handoff",
         handoffBeforeProposal.reason,
         selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1056,8 +1269,7 @@ export async function runPiteasProposeAgentSwap(
     if (ageBeforeProposalMs > maximumQuoteAgeMs) {
       return failure("QUOTE_STALE", "quote_freshness", "quote stale before proposal creation", {
         ...selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1093,9 +1305,16 @@ export async function runPiteasProposeAgentSwap(
           calldataByteLength: checkpoints.upstream.byteLength,
           calldataFirst10: checkpoints.upstream.first10,
           calldataFinal10: checkpoints.upstream.final10,
+          swapDirection,
+          tokenIn,
+          tokenOut,
           expectedOutputRaw: quoteData.amountOut,
           executableMinimumOutputRaw: decoded.destinationMinimumAmountRaw,
+          minimumExecutableOutputFloorRaw,
+          maximumEstimatedGasCostPls,
           inputAmountRaw: amountRaw,
+          inputBalanceRaw: inputBalance.toString(),
+          currentAllowanceRaw: currentAllowance.toString(),
           router: VERIFIED_PITEAS_ROUTER,
           walletRecipient: walletAddress,
           routeProtocols: routeProtocols(quoteData),
@@ -1110,8 +1329,7 @@ export async function runPiteasProposeAgentSwap(
         "proposal_internal_simulation",
         reason,
         selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1128,6 +1346,7 @@ export async function runPiteasProposeAgentSwap(
 
     const saved = deps.loadProposal(config, proposal.id);
     const savedCheckpoint = buildCalldataCheckpoint("savedProposal", saved.data);
+    checkpoints.savedProposal = savedCheckpoint;
     const savedHandoff = assertCalldataHandoffIntegrity([
       checkpoints.upstream,
       checkpoints.proposal,
@@ -1149,8 +1368,7 @@ export async function runPiteasProposeAgentSwap(
         "saved_proposal_integrity",
         savedHandoff.ok ? "saved proposal fields do not match prepared transaction" : savedHandoff.reason,
         selectedOutputFields({
-          walletId: input.walletId,
-          walletAddress,
+          ...outputContext,
           quoteReceivedAt,
           quoteResponseFingerprint,
           quote: quoteData,
@@ -1179,8 +1397,7 @@ export async function runPiteasProposeAgentSwap(
       ok: true,
       classification: "READY_FOR_HUMAN_CONFIRMATION",
       ...selectedOutputFields({
-        walletId: input.walletId,
-        walletAddress,
+        ...outputContext,
         quoteReceivedAt,
         quoteResponseFingerprint,
         quote: quoteData,
@@ -1423,7 +1640,7 @@ export function registerPiteasProposeAgentSwapTool(
     description:
       "Fetch exactly one fresh Piteas quote and create one unsigned local agent-wallet " +
       "proposal entirely inside this MCP process. The caller supplies walletId, tokenIn, " +
-      "tokenOut, and amountRaw only; raw calldata is never supplied by or returned to the " +
+      "tokenOut, and amountRaw for the PHIAT/eUSDC pair only, in either direction; raw calldata is never supplied by or returned to the " +
       "model. The handler preserves exact calldata in memory through strict quote " +
       "validation, Piteas top-level decode, native wallet inspection, same-block multi-RPC " +
       "simulation, and propose_agent_tx with requireSimulationSuccess=true. It never signs, " +
@@ -1435,18 +1652,18 @@ export function registerPiteasProposeAgentSwapTool(
         .string()
         .regex(/^aw_[a-f0-9]{32}$/)
         .describe("Agent wallet id"),
-      tokenIn: addressSchema.describe("Input token address; PHIAT path currently requires eUSDC"),
-      tokenOut: addressSchema.describe("Output token address; PHIAT path currently requires PHIAT"),
+      tokenIn: addressSchema.describe("Input token address; supported pairs are eUSDC->PHIAT and PHIAT->eUSDC"),
+      tokenOut: addressSchema.describe("Output token address; supported pairs are eUSDC->PHIAT and PHIAT->eUSDC"),
       amountRaw: z
         .string()
-        .regex(/^\d+$/)
+        .regex(/^(?:0|[1-9]\d*)$/)
         .describe("Input token raw amount as a decimal integer string"),
       allowedSlippage: z
         .number()
         .min(0)
-        .max(100)
+        .max(DEFAULT_ALLOWED_SLIPPAGE)
         .default(DEFAULT_ALLOWED_SLIPPAGE)
-        .describe("Piteas allowed slippage percent; default 0.5"),
+        .describe("Piteas allowed slippage percent for PHIAT/eUSDC swaps; default and maximum 0.5"),
       maximumQuoteAgeMs: z
         .number()
         .int()
@@ -1458,6 +1675,20 @@ export function registerPiteasProposeAgentSwapTool(
         .boolean()
         .default(true)
         .describe("Require same-block eth_call and estimateGas to pass on two RPCs"),
+      minimumExecutableOutputRaw: z
+        .string()
+        .regex(/^(?:0|[1-9]\d*)$/)
+        .optional()
+        .describe("Optional raw output floor; decoded minOut and RPC outputs must be at least this amount"),
+      maximumEstimatedGasCostPls: z
+        .string()
+        .regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/)
+        .optional()
+        .describe("Optional positive plain-decimal PLS gas-cost ceiling compared to conservative estimated cost"),
+      requireInputAmountEqualsBalance: z
+        .boolean()
+        .optional()
+        .describe("When true, amountRaw must equal the live input-token balance exactly"),
     },
     handler: async (args, cfg) =>
       ok(
@@ -1473,6 +1704,10 @@ export function registerPiteasProposeAgentSwapTool(
               (args.maximumQuoteAgeMs as number | undefined) ?? DEFAULT_MAX_QUOTE_AGE_MS,
             requireTwoRpcSimulation:
               (args.requireTwoRpcSimulation as boolean | undefined) ?? true,
+            minimumExecutableOutputRaw: args.minimumExecutableOutputRaw as string | undefined,
+            maximumEstimatedGasCostPls: args.maximumEstimatedGasCostPls as string | undefined,
+            requireInputAmountEqualsBalance:
+              args.requireInputAmountEqualsBalance as boolean | undefined,
           }),
         ),
       ),

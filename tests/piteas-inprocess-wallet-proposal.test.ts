@@ -48,6 +48,8 @@ import * as rpc from "../src/data/rpc.js";
 const WALLET_ID = "aw_524fe256dc97aff6b28c1e6992c7a27c";
 const WALLET = "0x64443a931c6d6096c8de27711f2a525393c21133" as const;
 const RAW_INPUT = "5000000";
+const FULL_POSITION_PHIAT_RAW = "455179228309071536844";
+const FULL_POSITION_EUSDC_FLOOR_RAW = "5190107";
 const BASE_NOW = Date.parse("2026-08-04T12:00:00.000Z");
 const tempDirs: string[] = [];
 
@@ -92,20 +94,62 @@ function walletTestConfig(): AppConfig {
   };
 }
 
-function piteasCalldataForRecipient(recipient: `0x${string}`): Hex {
+function tokenMeta(address: `0x${string}`): PiteasQuoteData["srcToken"] {
+  if (address.toLowerCase() === EUSDC_TOKEN_ADDRESS.toLowerCase()) {
+    return {
+      address,
+      symbol: "eUSDC",
+      decimals: 6,
+      chainId: 369,
+    };
+  }
+  if (address.toLowerCase() === PHIAT_TOKEN_ADDRESS.toLowerCase()) {
+    return {
+      address,
+      symbol: "PHIAT",
+      decimals: 18,
+      chainId: 369,
+    };
+  }
+  return {
+    address,
+    symbol: "TEST",
+    decimals: 18,
+    chainId: 369,
+  };
+}
+
+function piteasCalldataFor(params: {
+  recipient: `0x${string}`;
+  srcToken: `0x${string}`;
+  destToken: `0x${string}`;
+  srcAmount: string;
+  destMinAmount: string;
+  routeData?: Hex;
+}): Hex {
   return encodeFunctionData({
     abi: piteasRouterSwapAbi,
     functionName: "swap",
     args: [
       {
-        srcToken: EUSDC_TOKEN_ADDRESS,
-        destToken: PHIAT_TOKEN_ADDRESS,
-        destAccount: recipient,
-        srcAmount: BigInt(RAW_INPUT),
-        destMinAmount: 1n,
+        srcToken: params.srcToken,
+        destToken: params.destToken,
+        destAccount: params.recipient,
+        srcAmount: BigInt(params.srcAmount),
+        destMinAmount: BigInt(params.destMinAmount),
       },
-      "0x12345678",
+      params.routeData ?? "0x12345678",
     ],
+  });
+}
+
+function piteasCalldataForRecipient(recipient: `0x${string}`): Hex {
+  return piteasCalldataFor({
+    recipient,
+    srcToken: EUSDC_TOKEN_ADDRESS,
+    destToken: PHIAT_TOKEN_ADDRESS,
+    srcAmount: RAW_INPUT,
+    destMinAmount: "1",
   });
 }
 
@@ -144,6 +188,28 @@ function largeLiveDerivedCalldata(): Hex {
   return calldata;
 }
 
+function largeLiveDerivedSellCalldata(): Hex {
+  const decoded = decodePiteasRouterSwapCalldata({
+    to: VERIFIED_PITEAS_ROUTER,
+    data: liveRouterFixtureCalldata(),
+    valueWei: "0",
+  });
+  if (!decoded.ok) throw new Error(decoded.reason);
+  const route = decoded.intent.routeDataRaw;
+  const enlargedRoute =
+    `${route}${route.slice(2)}${route.slice(2, 2 + 256)}` as Hex;
+  const calldata = piteasCalldataFor({
+    recipient: WALLET,
+    srcToken: PHIAT_TOKEN_ADDRESS,
+    destToken: EUSDC_TOKEN_ADDRESS,
+    srcAmount: FULL_POSITION_PHIAT_RAW,
+    destMinAmount: FULL_POSITION_EUSDC_FLOOR_RAW,
+    routeData: enlargedRoute,
+  });
+  expect(calldata.length - 2).toBeGreaterThan(7000);
+  return calldata;
+}
+
 function quoteFromCalldata(calldata: Hex, overrides: Partial<PiteasQuoteData> = {}): PiteasQuoteData {
   const decoded = decodePiteasRouterSwapCalldata({
     to: VERIFIED_PITEAS_ROUTER,
@@ -153,18 +219,8 @@ function quoteFromCalldata(calldata: Hex, overrides: Partial<PiteasQuoteData> = 
   if (!decoded.ok) throw new Error(decoded.reason);
   const amountOut = (BigInt(decoded.intent.destinationMinimumAmountRaw) + 1n).toString();
   return {
-    srcToken: {
-      address: EUSDC_TOKEN_ADDRESS,
-      symbol: "USDC",
-      decimals: 6,
-      chainId: 369,
-    },
-    destToken: {
-      address: PHIAT_TOKEN_ADDRESS,
-      symbol: "PHIAT",
-      decimals: 18,
-      chainId: 369,
-    },
+    srcToken: tokenMeta(decoded.intent.sourceToken),
+    destToken: tokenMeta(decoded.intent.destinationToken),
     amountIn: decoded.intent.sourceAmountRaw,
     amountOut,
     amountOutMin: decoded.intent.destinationMinimumAmountRaw,
@@ -196,8 +252,8 @@ function quoteFromCalldata(calldata: Hex, overrides: Partial<PiteasQuoteData> = 
       protocols: ["PulseX V2", "Phux"],
       signature: "test-large-live-derived",
     },
-    tokenInParam: EUSDC_TOKEN_ADDRESS,
-    tokenOutParam: PHIAT_TOKEN_ADDRESS,
+    tokenInParam: decoded.intent.sourceToken,
+    tokenOutParam: decoded.intent.destinationToken,
     allowedSlippage: 0.5,
     account: WALLET,
     chainId: 369,
@@ -208,7 +264,10 @@ function quoteFromCalldata(calldata: Hex, overrides: Partial<PiteasQuoteData> = 
   };
 }
 
-function simulationRows(outputRaw = "123456789000000000000"): RpcPinnedSimulationRow[] {
+function simulationRows(
+  outputRaw = "123456789000000000000",
+  gasEstimate = "1600000",
+): RpcPinnedSimulationRow[] {
   return [
     {
       rpc: "https://rpc-a.example",
@@ -218,7 +277,7 @@ function simulationRows(outputRaw = "123456789000000000000"): RpcPinnedSimulatio
       revertData: null,
       decodedRevert: null,
       estimateGasPassed: true,
-      gasEstimate: "1600000",
+      gasEstimate,
       error: null,
     },
     {
@@ -229,7 +288,7 @@ function simulationRows(outputRaw = "123456789000000000000"): RpcPinnedSimulatio
       revertData: null,
       decodedRevert: null,
       estimateGasPassed: true,
-      gasEstimate: "1610000",
+      gasEstimate,
       error: null,
     },
   ];
@@ -268,6 +327,8 @@ function successDeps(
   overrides: Partial<PiteasAgentSwapDeps> = {},
 ): PiteasAgentSwapDeps {
   let saved: TxProposal | null = null;
+  const defaultTokenSpendCapacity =
+    BigInt(quote.amountIn) > BigInt(RAW_INPUT) ? quote.amountIn : RAW_INPUT;
   const deps: PiteasAgentSwapDeps = {
     nowMs: vi.fn(() => BASE_NOW),
     getAgentWalletInfo: vi.fn(async () => ({
@@ -315,8 +376,8 @@ function successDeps(
     saveProposal: vi.fn((_config, proposal) => {
       saved = proposal;
     }),
-    readTokenBalance: vi.fn(async () => RAW_INPUT),
-    readTokenAllowance: vi.fn(async () => RAW_INPUT),
+    readTokenBalance: vi.fn(async () => defaultTokenSpendCapacity),
+    readTokenAllowance: vi.fn(async () => defaultTokenSpendCapacity),
     readNativeBalanceWei: vi.fn(async () => "100000000000000000000000"),
     getFeeData: vi.fn(async () => ({
       gasPriceWei: "1000000000",
@@ -437,6 +498,12 @@ describe("Piteas in-process wallet proposal boundary", () => {
 
     expect(result.ok).toBe(true);
     expect(result.classification).toBe("READY_FOR_HUMAN_CONFIRMATION");
+    expect(result.swapDirection).toBe("BUY_PHIAT");
+    expect(result.tokenIn).toBe(EUSDC_TOKEN_ADDRESS);
+    expect(result.tokenOut).toBe(PHIAT_TOKEN_ADDRESS);
+    expect(result.inputAmountRaw).toBe(RAW_INPUT);
+    expect(result.inputBalanceRaw).toBe(RAW_INPUT);
+    expect(result.currentAllowanceRaw).toBe(RAW_INPUT);
     expect(result.readyForHumanConfirmation).toBe(true);
     expect(result.proposalStatus).toBe("pending");
     expect(result.proposalId).toBe("prop_aaaaaaaaaaaaaaaaaaaaaaaa");
@@ -448,6 +515,7 @@ describe("Piteas in-process wallet proposal boundary", () => {
     expect(result.simulationInputFingerprint).toBe(result.upstreamCalldataFingerprint);
     expect(result.proposalInputFingerprint).toBe(result.upstreamCalldataFingerprint);
     expect(result.savedProposalCalldataFingerprint).toBe(result.upstreamCalldataFingerprint);
+    expect(result.everyCalldataFingerprintMatched).toBe(true);
     expect(result.topLevelDecodeStatus).toBe("PASSED_CANONICAL");
     expect(result.decodeKnowledge).toBe("known_top_level_with_opaque_route");
     expect(result.agentGuidance).toBe("review_carefully");
@@ -460,6 +528,293 @@ describe("Piteas in-process wallet proposal boundary", () => {
     expect(JSON.stringify(result)).not.toMatch(
       /privateKey|masterKey|seed|mnemonic|ciphertext|rawSigned|signedTransaction/i,
     );
+  });
+
+  it("creates one pending full-position PHIAT sell proposal with bounded output and gas constraints", async () => {
+    const calldata = largeLiveDerivedSellCalldata();
+    const expectedOutputRaw = (BigInt(FULL_POSITION_EUSDC_FLOOR_RAW) + 123n).toString();
+    const quote = quoteFromCalldata(calldata, {
+      amountOut: expectedOutputRaw,
+      amountOutMin: FULL_POSITION_EUSDC_FLOOR_RAW,
+      route: {
+        pathCount: 2,
+        swapCount: 4,
+        protocols: ["PulseX V2", "Phux"],
+        pools: ["0xpoola", "0xpoolb"],
+        tokenPath: [PHIAT_TOKEN_ADDRESS, "WPLS", EUSDC_TOKEN_ADDRESS],
+        allocations: [{ percent: 60 }, { percent: 40 }],
+        signature: "test-full-position-sell",
+      },
+    });
+    const deps = successDeps(quote, {
+      simulateSameBlock: vi.fn(async () => simulationRows(expectedOutputRaw, "1200000")),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      allowedSlippage: 0.5,
+      minimumExecutableOutputRaw: FULL_POSITION_EUSDC_FLOOR_RAW,
+      maximumEstimatedGasCostPls: "1500",
+      requireInputAmountEqualsBalance: true,
+    }, deps);
+
+    expect(result.ok).toBe(true);
+    expect(result.classification).toBe("READY_FOR_HUMAN_CONFIRMATION");
+    expect(result.swapDirection).toBe("SELL_PHIAT");
+    expect(result.tokenIn).toBe(PHIAT_TOKEN_ADDRESS);
+    expect(result.tokenOut).toBe(EUSDC_TOKEN_ADDRESS);
+    expect(result.inputAmountRaw).toBe(FULL_POSITION_PHIAT_RAW);
+    expect(result.inputBalanceRaw).toBe(FULL_POSITION_PHIAT_RAW);
+    expect(result.currentAllowanceRaw).toBe(FULL_POSITION_PHIAT_RAW);
+    expect(result.expectedOutputRaw).toBe(expectedOutputRaw);
+    expect(result.executableMinimumOutputRaw).toBe(FULL_POSITION_EUSDC_FLOOR_RAW);
+    expect(result.minimumExecutableOutputFloorRaw).toBe(FULL_POSITION_EUSDC_FLOOR_RAW);
+    expect(result.estimatedGas).toBe("1200000");
+    expect(Number(result.estimatedGasCostPls)).toBeLessThan(1500);
+    expect(result.proposalStatus).toBe("pending");
+    expect(result.readyForHumanConfirmation).toBe(true);
+    expect(result.everyCalldataFingerprintMatched).toBe(true);
+    expect(result.calldataHexCharacterCount).toBeGreaterThan(7000);
+    expect(result.upstreamCalldataFingerprint).toBe(fingerprint(calldata));
+    expect(result.savedProposalCalldataFingerprint).toBe(result.upstreamCalldataFingerprint);
+    expect(result.twoRpcSimulation?.map((row) => row.outputRaw)).toEqual([
+      expectedOutputRaw,
+      expectedOutputRaw,
+    ]);
+    expect(deps.readTokenBalance).toHaveBeenCalledWith(expect.anything(), PHIAT_TOKEN_ADDRESS, WALLET);
+    expect(deps.readTokenAllowance).toHaveBeenCalledWith(
+      expect.anything(),
+      PHIAT_TOKEN_ADDRESS,
+      WALLET,
+      VERIFIED_PITEAS_ROUTER,
+    );
+    expect(deps.getPiteasQuote).toHaveBeenCalledTimes(1);
+    expect(deps.proposeAgentTx).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).not.toContain(calldata);
+  });
+
+  it.each([
+    [
+      "arbitrary third token pair",
+      "0x1111111111111111111111111111111111111111" as const,
+      PHIAT_TOKEN_ADDRESS,
+    ],
+    ["PHIAT to PHIAT", PHIAT_TOKEN_ADDRESS, PHIAT_TOKEN_ADDRESS],
+    ["eUSDC to eUSDC", EUSDC_TOKEN_ADDRESS, EUSDC_TOKEN_ADDRESS],
+  ])("rejects unsupported pair: %s", async (_name, tokenIn, tokenOut) => {
+    const deps = successDeps(quoteFromCalldata(liveRouterFixtureCalldata()));
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn,
+      tokenOut,
+      amountRaw: RAW_INPUT,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("UNSUPPORTED_TOKEN_PAIR");
+    expect(result.reason).toBe("UNSUPPORTED_TOKEN_PAIR");
+    expect(deps.getAgentWalletInfo).not.toHaveBeenCalled();
+    expect(deps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("returns bounded-allowance guidance without creating approvals when PHIAT allowance is insufficient", async () => {
+    const calldata = largeLiveDerivedSellCalldata();
+    const quote = quoteFromCalldata(calldata);
+    const deps = successDeps(quote, {
+      readTokenAllowance: vi.fn(async () => "0"),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("NEEDS_BOUNDED_ALLOWANCE");
+    expect(result.tokenIn).toBe(PHIAT_TOKEN_ADDRESS);
+    expect(result.currentAllowanceRaw).toBe("0");
+    expect(result.requiredAllowanceRaw).toBe(FULL_POSITION_PHIAT_RAW);
+    expect(result.verifiedSpender).toBe(VERIFIED_PITEAS_ROUTER);
+    expect(result.unlimitedApproval).toBe(false);
+    expect(deps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(deps.preparePiteasSwap).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["amount below balance", (BigInt(FULL_POSITION_PHIAT_RAW) - 1n).toString()],
+    ["amount above balance", (BigInt(FULL_POSITION_PHIAT_RAW) + 1n).toString()],
+  ])("rejects %s when full-balance equality is required", async (_name, amountRaw) => {
+    const quote = quoteFromCalldata(largeLiveDerivedSellCalldata());
+    const deps = successDeps(quote, {
+      readTokenBalance: vi.fn(async () => FULL_POSITION_PHIAT_RAW),
+      readTokenAllowance: vi.fn(async () => FULL_POSITION_PHIAT_RAW),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw,
+      requireInputAmountEqualsBalance: true,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("INPUT_BALANCE_CHANGED");
+    expect(result.reason).toBe("INPUT_BALANCE_CHANGED");
+    expect(result.inputBalanceRaw).toBe(FULL_POSITION_PHIAT_RAW);
+    expect(deps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects amount above live input balance without requesting a quote", async () => {
+    const deps = successDeps(quoteFromCalldata(largeLiveDerivedSellCalldata()), {
+      readTokenBalance: vi.fn(async () => FULL_POSITION_PHIAT_RAW),
+      readTokenAllowance: vi.fn(async () => (BigInt(FULL_POSITION_PHIAT_RAW) + 1n).toString()),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: (BigInt(FULL_POSITION_PHIAT_RAW) + 1n).toString(),
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.failureStage).toBe("wallet_state");
+    expect(result.reason).toMatch(/insufficient input-token balance/);
+    expect(deps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects decoded executable minimum one raw unit below the output floor", async () => {
+    const floor = BigInt(FULL_POSITION_EUSDC_FLOOR_RAW);
+    const calldata = piteasCalldataFor({
+      recipient: WALLET,
+      srcToken: PHIAT_TOKEN_ADDRESS,
+      destToken: EUSDC_TOKEN_ADDRESS,
+      srcAmount: FULL_POSITION_PHIAT_RAW,
+      destMinAmount: (floor - 1n).toString(),
+    });
+    const deps = successDeps(quoteFromCalldata(calldata, { amountOut: (floor + 10n).toString() }));
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      minimumExecutableOutputRaw: FULL_POSITION_EUSDC_FLOOR_RAW,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("MINIMUM_OUTPUT_BELOW_FLOOR");
+    expect(result.failureStage).toBe("strict_decode");
+    expect(deps.simulateSameBlock).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects same-block RPC output below the output floor", async () => {
+    const calldata = piteasCalldataFor({
+      recipient: WALLET,
+      srcToken: PHIAT_TOKEN_ADDRESS,
+      destToken: EUSDC_TOKEN_ADDRESS,
+      srcAmount: FULL_POSITION_PHIAT_RAW,
+      destMinAmount: FULL_POSITION_EUSDC_FLOOR_RAW,
+    });
+    const belowFloor = (BigInt(FULL_POSITION_EUSDC_FLOOR_RAW) - 1n).toString();
+    const deps = successDeps(quoteFromCalldata(calldata), {
+      simulateSameBlock: vi.fn(async () => simulationRows(belowFloor)),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      minimumExecutableOutputRaw: FULL_POSITION_EUSDC_FLOOR_RAW,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("MINIMUM_OUTPUT_BELOW_FLOOR");
+    expect(result.failureStage).toBe("same_block_simulation");
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects slippage above 0.5 before wallet or quote work", async () => {
+    const deps = successDeps(quoteFromCalldata(liveRouterFixtureCalldata()));
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      allowedSlippage: 0.5001,
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("SLIPPAGE_LIMIT_EXCEEDED");
+    expect(result.reason).toBe("SLIPPAGE_LIMIT_EXCEEDED");
+    expect(deps.getAgentWalletInfo).not.toHaveBeenCalled();
+    expect(deps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
+  });
+
+  it("accepts gas cost exactly at the configured limit", async () => {
+    const calldata = piteasCalldataFor({
+      recipient: WALLET,
+      srcToken: PHIAT_TOKEN_ADDRESS,
+      destToken: EUSDC_TOKEN_ADDRESS,
+      srcAmount: FULL_POSITION_PHIAT_RAW,
+      destMinAmount: FULL_POSITION_EUSDC_FLOOR_RAW,
+    });
+    const deps = successDeps(quoteFromCalldata(calldata), {
+      simulateSameBlock: vi.fn(async () => simulationRows(FULL_POSITION_EUSDC_FLOOR_RAW, "1600000")),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      maximumEstimatedGasCostPls: "0.0016",
+    }, deps);
+
+    expect(result.ok).toBe(true);
+    expect(result.estimatedGasCostPls).toBe("0.0016");
+    expect(deps.proposeAgentTx).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects gas cost above the configured limit before proposal creation", async () => {
+    const calldata = piteasCalldataFor({
+      recipient: WALLET,
+      srcToken: PHIAT_TOKEN_ADDRESS,
+      destToken: EUSDC_TOKEN_ADDRESS,
+      srcAmount: FULL_POSITION_PHIAT_RAW,
+      destMinAmount: FULL_POSITION_EUSDC_FLOOR_RAW,
+    });
+    const deps = successDeps(quoteFromCalldata(calldata), {
+      simulateSameBlock: vi.fn(async () => simulationRows(FULL_POSITION_EUSDC_FLOOR_RAW, "1600001")),
+    });
+
+    const result = await runPiteasProposeAgentSwap(testConfig(), {
+      walletId: WALLET_ID,
+      tokenIn: PHIAT_TOKEN_ADDRESS,
+      tokenOut: EUSDC_TOKEN_ADDRESS,
+      amountRaw: FULL_POSITION_PHIAT_RAW,
+      maximumEstimatedGasCostPls: "0.0016",
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.classification).toBe("GAS_COST_ABOVE_LIMIT");
+    expect(result.reason).toBe("GAS_COST_ABOVE_LIMIT");
+    expect(deps.proposeAgentTx).not.toHaveBeenCalled();
   });
 
   it("rejects a one-character handoff truncation before proposal creation", async () => {
@@ -671,6 +1026,13 @@ describe("Piteas in-process wallet proposal boundary", () => {
       [
         ...simulationRows("100"),
       ].map((row, index) => ({ ...row, outputRaw: index === 0 ? "100" : "101" })),
+      "RPC_STATE_DISAGREEMENT",
+    ],
+    [
+      "two-RPC gas-estimate disagreement",
+      [
+        ...simulationRows("100"),
+      ].map((row, index) => ({ ...row, gasEstimate: index === 0 ? "1600000" : "1600001" })),
       "RPC_STATE_DISAGREEMENT",
     ],
     [
