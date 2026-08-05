@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,7 +40,11 @@ import {
   mergeRotationHistoryRecords,
   normalizeTokenAmount,
   priceObservationFromSwap,
+  rangeFullyScanned,
   reduceLogChunkAfterRangeError,
+  resolveTimestampBlockRange,
+  swapQueryPlanForSourcePool,
+  dedupeSourcePools,
   legacyCwdDerivedHistoryStorePath,
   readRotationHistoryStore,
   resetEusdcRotationForTests,
@@ -57,6 +61,7 @@ import {
   type RotationCandidateId,
   type RotationDeps,
   type RotationHistoryRecord,
+  type RotationHistorySourcePoolRef,
   type RotationMarketEvidence,
   type RotationTokenValidation,
 } from "../src/tools/wallet/eusdcRotation.js";
@@ -226,6 +231,29 @@ function swapFixture(input: {
     amount1Out: input.amount1Out ?? "0",
     amountUSD: input.amountUSD ?? "0",
     transaction: { id: input.tx ?? `0xtx${input.id}` },
+  };
+}
+
+function sourcePoolFixture(input: {
+  pair: SubgraphPair;
+  sourceVersion: "PULSEX_V1" | "PULSEX_V2";
+  endpoint?: string;
+  liquidityEusdc?: number;
+  recentVolumeEusdc?: number;
+}): RotationHistorySourcePoolRef {
+  const subgraphVersion = input.sourceVersion === "PULSEX_V1" ? "v1" : "v2";
+  return {
+    pair: input.pair,
+    protocol: input.sourceVersion === "PULSEX_V1" ? "PulseX V1" : "PulseX V2",
+    sourceVersion: input.sourceVersion,
+    subgraphVersion,
+    subgraphEndpoint: input.endpoint ?? `https://example.com/${subgraphVersion}`,
+    eventAdapter: "PULSEX_V2_STYLE_SWAP",
+    factoryAddress: null,
+    classification: "REQUIRED_PRICE_POOL",
+    contributesToConsolidatedPrice: true,
+    liquidityEusdc: input.liquidityEusdc ?? 10_000,
+    recentVolumeEusdc: input.recentVolumeEusdc ?? 1_000,
   };
 }
 
@@ -1413,6 +1441,35 @@ describe("eUSDC rotation public history sync primitives", () => {
     expect(result.crossProcessLockStatus).toBe("busy_live_owner");
   });
 
+  it("returns PARTIAL_PROGRESS with a checkpoint and releases the public-history lock when maximumRuntimeMs is exhausted", async () => {
+    const cfg = testConfig();
+    const historyDir = join(mkdtempSync(join(tmpdir(), "eusdc-history-partial-")), "history");
+    tempDirs.push(dirname(historyDir));
+    const withOverride: AppConfig = { ...cfg, eusdcRotationHistoryDir: historyDir };
+    writeHistoryFixture(historyDir, [historyRecord({ timestamp: Math.floor(BASE_NOW / 1000), logIndex: 11 })]);
+
+    const result = await runEusdcRotationHistorySync(withOverride, {
+      lookbackMinutes: 10080,
+      maximumRuntimeMs: 1,
+      maximumBlocksPerChunk: 100,
+      maximumPagesPerSource: 1,
+      forceRecentBlockRecheck: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe("PARTIAL_PROGRESS");
+    expect(result.resumeToken).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(result.quoteCallCount).toBe(0);
+    expect(result.noWalletWrite).toBe(true);
+    expect(result.noLiveTransaction).toBe(true);
+    expect(existsSync(join(historyDir, "market-history.lock"))).toBe(false);
+    expect(existsSync(join(historyDir, "sync-checkpoint.json"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(historyDir, "market-history.json"), "utf8")).records).toHaveLength(1);
+    const checkpoint = JSON.parse(readFileSync(join(historyDir, "sync-checkpoint.json"), "utf8"));
+    expect(checkpoint.resumeToken).toBe(result.resumeToken);
+    expect(checkpoint.completedBlockRanges).toEqual([]);
+  });
+
   it("plans block-log fallback when subgraph pagination truncates and reduces RPC chunks after range errors", () => {
     expect(shouldUseRpcLogFallback({
       candidateId: "PLSX",
@@ -1438,7 +1495,168 @@ describe("eUSDC rotation public history sync primitives", () => {
     expect(reduceLogChunkAfterRangeError(120)).toBe(100);
   });
 
-  it("deduplicates records, replaces recent reorg rows, retains seven days, and keeps public-only fields", () => {
+  it("retains V1 and V2 pool source identity and plans V1 queries against V1", () => {
+    const pair = pairFixture({
+      id: "0x1000000000000000000000000000000000000001",
+      token0: EUSDC_TOKEN_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "1000",
+      reserve1: "100000000",
+      reserveUSD: "2000",
+    });
+    const v1 = sourcePoolFixture({ pair, sourceVersion: "PULSEX_V1", endpoint: "https://example.com/v1" });
+    const v2 = sourcePoolFixture({ pair, sourceVersion: "PULSEX_V2", endpoint: "https://example.com/v2" });
+    const deduped = dedupeSourcePools([v1, v2]);
+    expect(deduped.pools.map((row) => row.sourceVersion).sort()).toEqual(["PULSEX_V1", "PULSEX_V2"]);
+    expect(deduped.sourceDisagreements[0]).toMatch(/multiple source versions/i);
+    expect(swapQueryPlanForSourcePool(v1)).toMatchObject({
+      pair: pair.id.toLowerCase(),
+      version: "v1",
+      endpoint: "https://example.com/v1",
+      sourceVersion: "PULSEX_V1",
+    });
+    expect(swapQueryPlanForSourcePool(v1).version).not.toBe("v2");
+  });
+
+  it("proves complete empty-trade ranges from scanned block boundaries, not observed swaps", () => {
+    expect(rangeFullyScanned({
+      resolvedStartBlock: 100n,
+      resolvedEndBlock: 200n,
+      scannedFromBlock: 100n,
+      scannedToBlock: 200n,
+      unresolvedRpcRangeError: false,
+    })).toBe(true);
+    expect(rangeFullyScanned({
+      resolvedStartBlock: 100n,
+      resolvedEndBlock: 200n,
+      scannedFromBlock: 101n,
+      scannedToBlock: 200n,
+      unresolvedRpcRangeError: false,
+    })).toBe(false);
+  });
+
+  it("resolves timestamp boundaries with actual block timestamps", async () => {
+    const timestamps = [1000, 1012, 1024, 1036, 1048, 1060, 1072, 1084];
+    const calls: bigint[] = [];
+    const client = {
+      getBlockNumber: vi.fn(async () => BigInt(timestamps.length - 1)),
+      getBlock: vi.fn(async ({ blockNumber }: { blockNumber: bigint }) => {
+        calls.push(blockNumber);
+        return {
+          timestamp: BigInt(timestamps[Number(blockNumber)]!),
+          hash: `0x${String(Number(blockNumber) + 1).padStart(64, "0")}` as const,
+        };
+      }),
+      getLogs: vi.fn(),
+    };
+    const resolved = await resolveTimestampBlockRange({
+      client,
+      startTimestamp: 1025,
+      endTimestamp: 1061,
+    });
+    expect(resolved.resolvedStartBlock).toBe(3n);
+    expect(resolved.resolvedEndBlock).toBe(5n);
+    expect(resolved.resolvedStartBlockTimestamp).toBe(1036);
+    expect(resolved.resolvedEndBlockTimestamp).toBe(1060);
+    expect(resolved.maximumTimestampResolutionErrorSeconds).toBe(11);
+    expect(calls.length).toBeLessThanOrEqual(20);
+  });
+
+  it("stops timestamp-to-block search when the history runtime deadline is reached", async () => {
+    const client = {
+      getBlockNumber: vi.fn(async () => 100n),
+      getBlock: vi.fn(async () => ({
+        timestamp: 1000n,
+        hash: "0x1111111111111111111111111111111111111111111111111111111111111111" as const,
+      })),
+      getLogs: vi.fn(),
+    };
+    await expect(resolveTimestampBlockRange({
+      client,
+      startTimestamp: 1000,
+      endTimestamp: 1100,
+      deadlineMs: Date.now() - 1,
+    })).rejects.toThrow(/HISTORY_RUNTIME_DEADLINE_REACHED/);
+    expect(client.getBlockNumber).not.toHaveBeenCalled();
+  });
+
+  it("prices direct eUSDC, WPLS/eUSDC anchor, and candidate/WPLS anchored swaps", () => {
+    const directPair = pairFixture({
+      id: "0x2000000000000000000000000000000000000001",
+      token0: EUSDC_TOKEN_ADDRESS,
+      token1: PLSX_ADDRESS,
+      reserve0: "1000",
+      reserve1: "500000",
+    });
+    const direct = priceObservationFromSwap({
+      candidate: getRotationCandidate("PLSX"),
+      swap: swapFixture({
+        id: "direct",
+        timestamp: 1000,
+        pair: directPair,
+        amount0In: "20",
+        amount1Out: "10000",
+        amountUSD: "20",
+      }),
+    });
+    expect(direct?.priceEusdc).toBeCloseTo(0.002, 8);
+
+    const wplsAnchor = observation(1000, 0.000008, "anchor", 100);
+    const candidateWplsPair = pairFixture({
+      id: "0x2000000000000000000000000000000000000002",
+      token0: PLSX_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "100000",
+      reserve1: "25000",
+    });
+    const anchored = priceObservationFromSwap({
+      candidate: getRotationCandidate("PLSX"),
+      anchorObservations: [{ ...wplsAnchor, blockNumber: "10", poolAddress: directPair.id as `0x${string}` }],
+      blockNumber: "10",
+      swap: swapFixture({
+        id: "anchored",
+        timestamp: 1000,
+        pair: candidateWplsPair,
+        amount0In: "1000",
+        amount1Out: "250",
+        amountUSD: "0",
+      }),
+    });
+    expect(anchored?.priceEusdc).toBeCloseTo(0.000002, 12);
+    expect(anchored?.anchorAgeSeconds).toBe(0);
+    expect(anchored?.anchorPoolAddress).toBe(directPair.id);
+  });
+
+  it("rejects missing and stale WPLS anchors for candidate/WPLS observations", () => {
+    const candidateWplsPair = pairFixture({
+      id: "0x2000000000000000000000000000000000000003",
+      token0: INC_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "100000",
+      reserve1: "25000",
+    });
+    const swap = swapFixture({
+      id: "inc-wpls",
+      timestamp: 10_000,
+      pair: candidateWplsPair,
+      amount0In: "1000",
+      amount1Out: "250",
+      amountUSD: "0",
+    });
+    expect(priceObservationFromSwap({
+      candidate: getRotationCandidate("INC"),
+      swap,
+      anchorObservations: [],
+    })).toBeNull();
+    expect(priceObservationFromSwap({
+      candidate: getRotationCandidate("INC"),
+      swap,
+      anchorObservations: [observation(8_000, 0.000008, "stale")],
+      maxAnchorAgeSeconds: 300,
+    })).toBeNull();
+  });
+
+  it("deduplicates records, preserves existing rows, excludes old incoming rows, and keeps public-only fields", () => {
     const old = historyRecord({
       timestamp: Math.floor(BASE_NOW / 1000) - 9 * 24 * 60 * 60,
       tx: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1464,9 +1682,14 @@ describe("eUSDC rotation public history sync primitives", () => {
       blockNumber: "1000",
       blockHash: "0x3333333333333333333333333333333333333333333333333333333333333333",
     });
+    const oldIncoming = historyRecord({
+      timestamp: Math.floor(BASE_NOW / 1000) - 9 * 24 * 60 * 60,
+      tx: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      logIndex: 3,
+    });
     const merged = mergeRotationHistoryRecords({
       existing: [old, existing],
-      incoming: [replacement, fresh, fresh],
+      incoming: [replacement, fresh, fresh, oldIncoming],
       nowMs: BASE_NOW,
       retentionDays: 7,
       forceRecentBlockRecheck: true,
@@ -1475,8 +1698,36 @@ describe("eUSDC rotation public history sync primitives", () => {
     expect(merged.added).toBe(1);
     expect(merged.updated).toBe(1);
     expect(merged.duplicates).toBe(1);
-    expect(merged.records.some((record) => record.transactionHash === old.transactionHash)).toBe(false);
+    expect(merged.records.some((record) => record.transactionHash === old.transactionHash)).toBe(true);
+    expect(merged.records.some((record) => record.transactionHash === oldIncoming.transactionHash)).toBe(false);
     expect(JSON.stringify(merged.records)).not.toMatch(/private_key|master_key|wallet_secret|raw_signed/i);
+  });
+
+  it("preserves existing record timestamps when corrected timestamp evidence arrives for the same tx/log", () => {
+    const existing = historyRecord({
+      timestamp: Math.floor(BASE_NOW / 1000) - 60,
+      tx: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      logIndex: 7,
+      blockNumber: "1000",
+      blockHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+      price: 1,
+    });
+    const corrected = {
+      ...existing,
+      timestamp: existing.timestamp + 25,
+      candidatePriceEusdc: 1.02,
+    };
+    const merged = mergeRotationHistoryRecords({
+      existing: [existing],
+      incoming: [corrected],
+      nowMs: BASE_NOW,
+      retentionDays: 7,
+      forceRecentBlockRecheck: true,
+      latestBlockNumber: 1000n,
+    });
+    expect(merged.duplicates).toBe(1);
+    expect(merged.records[0]?.timestamp).toBe(existing.timestamp);
+    expect(merged.records[0]?.candidatePriceEusdc).toBe(existing.candidatePriceEusdc);
   });
 
   it("separates source completeness, active candle coverage, and price continuity", () => {

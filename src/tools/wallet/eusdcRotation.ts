@@ -293,8 +293,17 @@ const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 const DEFAULT_HISTORY_PAGE_SIZE = 100;
 const DEFAULT_HISTORY_MAX_PAGES = 32;
 const DEFAULT_LOG_CHUNK_BLOCKS = 25_000;
+const DEFAULT_HISTORY_MAX_RUNTIME_MS = 180_000;
+const MAX_HISTORY_MAX_RUNTIME_MS = 220_000;
+const HISTORY_RUNTIME_GUARD_MS = 10_000;
+const HISTORY_SOURCE_REQUEST_TIMEOUT_MS = 5_000;
+const HISTORY_MIN_REQUEST_TIMEOUT_MS = 1_000;
+const HISTORY_CHECKPOINT_SCHEMA_VERSION = 1;
 const HISTORY_STORE_SCHEMA_VERSION = 1;
 const HISTORY_RECENT_REORG_BLOCKS = 64n;
+const ANCHOR_MAX_AGE_SECONDS = 15 * 60;
+const REQUIRED_POOL_MIN_LIQUIDITY_EUSDC = 1_000;
+const REQUIRED_POOL_MIN_RECENT_VOLUME_EUSDC = 10;
 const SPARSE_MIN_ACTUAL_SWAPS = 20;
 const SPARSE_MAX_GAP_MINUTES = 360;
 const FRESH_TRADE_MAX_AGE_MINUTES = 30;
@@ -604,6 +613,10 @@ export interface RotationHistoryRecord {
   poolAddress: `0x${string}`;
   factoryAddress: `0x${string}` | null;
   protocol: string;
+  sourceVersion?: RotationHistorySourceVersion;
+  eventAdapter?: RotationHistoryEventAdapter;
+  anchorPoolAddress?: `0x${string}`;
+  anchorAgeSeconds?: number;
   blockNumber: string | null;
   blockHash: `0x${string}` | null;
   transactionHash: `0x${string}`;
@@ -619,14 +632,84 @@ export interface RotationHistoryRecord {
   fetchedAt: string;
 }
 
+export type RotationHistorySourceVersion =
+  | "PULSEX_V1"
+  | "PULSEX_V2"
+  | "VERIFIED_V3"
+  | "VERIFIED_STABLE"
+  | "UNKNOWN";
+
+export type RotationHistoryEventAdapter =
+  | "PULSEX_V2_STYLE_SWAP"
+  | "VERIFIED_V3_SWAP"
+  | "VERIFIED_STABLE_SWAP"
+  | "UNSUPPORTED";
+
+export type RotationHistoryPoolClassification =
+  | "REQUIRED_PRICE_POOL"
+  | "OPTIONAL_DIAGNOSTIC_POOL"
+  | "EXCLUDED_POOL";
+
+export type RotationHistorySyncCode =
+  | "COMPLETE"
+  | "PARTIAL_PROGRESS"
+  | "HISTORY_SYNC_BUSY"
+  | "SOURCE_ERROR"
+  | RotationHistoryStoreReviewCode;
+
+export interface RotationHistorySourcePoolRef {
+  pair: SubgraphPair;
+  protocol: string;
+  sourceVersion: RotationHistorySourceVersion;
+  subgraphVersion?: "v1" | "v2";
+  subgraphEndpoint: string;
+  eventAdapter: RotationHistoryEventAdapter;
+  factoryAddress: `0x${string}` | null;
+  classification: RotationHistoryPoolClassification;
+  contributesToConsolidatedPrice: boolean;
+  liquidityEusdc: number;
+  recentVolumeEusdc: number;
+  exclusionReason?: string;
+}
+
 export interface RotationHistoryPoolSyncStatus {
   candidateId: RotationCandidateId;
   poolAddress: `0x${string}`;
+  token0?: `0x${string}`;
+  token1?: `0x${string}`;
+  token0Decimals?: number;
+  token1Decimals?: number;
+  factoryAddress?: `0x${string}` | null;
+  protocol?: string;
+  sourceVersion?: RotationHistorySourceVersion;
+  eventAdapter?: RotationHistoryEventAdapter;
   sourceEndpoint: string;
   queryType: string;
   pageSize: number;
   maximumPageCount: number;
   cursorMechanism: string;
+  resolvedStartBlock?: string | null;
+  resolvedEndBlock?: string | null;
+  scannedFromBlock?: string | null;
+  scannedToBlock?: string | null;
+  rangeFullyScanned?: boolean;
+  firstObservedTradeTimestamp?: string | null;
+  lastObservedTradeTimestamp?: string | null;
+  contributesToConsolidatedPrice?: boolean;
+  classification?: RotationHistoryPoolClassification;
+  liquidityEusdc?: number;
+  recentVolumeEusdc?: number;
+  exclusionReason?: string;
+  exactRemainingTruncationCause?: string;
+  retrievalCompletenessPercent?: number;
+  signalWindowCompletenessPercent?: number;
+  timestampResolutionMaxErrorSeconds?: number;
+  rpcRecordsRetrieved?: number;
+  anchorRecordsUsed?: number;
+  unsupportedLogs?: number;
+  errors?: string[];
+  nextResumeBlock?: string | null;
+  elapsedMs?: number;
   oldestReturnedRecord: string | null;
   newestReturnedRecord: string | null;
   requestedStartTime: string;
@@ -644,6 +727,7 @@ export interface RotationHistoryPoolSyncStatus {
     | "FAILED_BLOCK_TO_TIME_CONVERSION"
     | "UNSUPPORTED_EVENT_ABI"
     | "RPC_LOG_RANGE_LIMITATION"
+    | "PARTIAL_PROGRESS"
     | "SOURCE_ERROR";
   sourceRepeatsOrCapsRecords: boolean;
   historicalPaginationReliable: boolean;
@@ -661,6 +745,9 @@ export interface RotationHistoryCandidateSyncStatus {
   latestTimestamp: string | null;
   boundaryCrossed: boolean;
   sourceCompletenessPercent: number;
+  retrievalCompletenessPercent?: number;
+  signalWindowCompletenessPercent?: number;
+  sevenDayCompletenessPercent?: number;
   unresolvedGaps: string[];
   pools: RotationHistoryPoolSyncStatus[];
 }
@@ -699,6 +786,37 @@ export interface RotationHistoryPathDiagnostics {
   crossProcessLockStatus: RotationHistoryCrossProcessLockStatus;
 }
 
+export interface RotationHistorySyncCheckpoint {
+  schemaVersion: 1;
+  resumeToken: string;
+  requestedWindow: {
+    startTime: string;
+    endTime: string;
+    lookbackMinutes: number;
+  };
+  candidateId?: RotationCandidateId;
+  poolAddress?: `0x${string}`;
+  nextBlock?: string;
+  completedBlockRanges: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    sourceVersion: RotationHistorySourceVersion;
+    fromBlock: string;
+    toBlock: string;
+  }>;
+  completedPools: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    sourceVersion: RotationHistorySourceVersion;
+  }>;
+  sourceCursor?: {
+    candidateIndex: number;
+    poolIndex: number;
+  };
+  storeFingerprintBeforeRun: `0x${string}`;
+  updatedAt: string;
+}
+
 export interface RotationHistoryFile {
   schemaVersion: 1;
   chainId: number;
@@ -718,12 +836,20 @@ export interface RotationHistorySyncInput {
   maximumBlocksPerChunk?: number;
   maximumPagesPerSource?: number;
   forceRecentBlockRecheck?: boolean;
+  maximumRuntimeMs?: number;
+  candidateIds?: RotationCandidateId[];
+  resumeToken?: string;
+  maximumPoolsPerRun?: number;
 }
 
 export interface RotationHistorySyncResult {
   ok: boolean;
-  code?: "HISTORY_SYNC_BUSY" | RotationHistoryStoreReviewCode;
+  code?: RotationHistorySyncCode;
   reason?: string;
+  resumeToken?: string;
+  checkpointPath?: string;
+  checkpointUpdatedAt?: string;
+  maximumRuntimeMs?: number;
   lookbackMinutes: number;
   requestedStartTime: string;
   requestedEndTime: string;
@@ -1385,6 +1511,9 @@ export interface RotationPriceObservation {
   volumeEusdc: number;
   swapId: string;
   source: string;
+  blockNumber?: string | null;
+  poolAddress?: `0x${string}`;
+  anchorPoolAddress?: `0x${string}`;
   anchorAgeSeconds?: number;
 }
 
@@ -1392,7 +1521,12 @@ function nearestAnchorPrice(
   anchors: RotationPriceObservation[],
   timestamp: number,
   maxAgeSeconds: number,
-): { price: number; age: number } | null {
+  blockNumber?: string | null,
+): { price: number; age: number; poolAddress?: `0x${string}` } | null {
+  if (blockNumber) {
+    const exact = anchors.find((anchor) => anchor.blockNumber === blockNumber);
+    if (exact) return { price: exact.priceEusdc, age: 0, poolAddress: exact.poolAddress };
+  }
   let best: RotationPriceObservation | null = null;
   let bestAge = Number.POSITIVE_INFINITY;
   for (const anchor of anchors) {
@@ -1402,7 +1536,9 @@ function nearestAnchorPrice(
       bestAge = age;
     }
   }
-  return best && bestAge <= maxAgeSeconds ? { price: best.priceEusdc, age: bestAge } : null;
+  return best && bestAge <= maxAgeSeconds
+    ? { price: best.priceEusdc, age: bestAge, poolAddress: best.poolAddress }
+    : null;
 }
 
 export function priceObservationFromSwap(input: {
@@ -1410,6 +1546,7 @@ export function priceObservationFromSwap(input: {
   candidate: RotationCandidateRegistryEntry;
   anchorObservations?: RotationPriceObservation[];
   maxAnchorAgeSeconds?: number;
+  blockNumber?: string | null;
 }): RotationPriceObservation | null {
   const swap = input.swap;
   const ts = Number(swap.timestamp);
@@ -1422,6 +1559,7 @@ export function priceObservationFromSwap(input: {
   let volumeEusdc = num(swap.amountUSD);
   let source = "direct";
   let anchorAgeSeconds: number | undefined;
+  let anchorPoolAddress: `0x${string}` | undefined;
   if (candidateAmount > 0 && eusdcAmount > 0 && swapPairMatches(swap, candidateToken, EUSDC_ADDRESS)) {
     price = eusdcAmount / candidateAmount;
     volumeEusdc = Math.max(volumeEusdc, eusdcAmount);
@@ -1435,12 +1573,18 @@ export function priceObservationFromSwap(input: {
     volumeEusdc = Math.max(volumeEusdc, eusdcAmount);
     source = "wpls/eusdc";
   } else if (candidateAmount > 0 && wplsAmount > 0 && swapPairMatches(swap, candidateToken, WPLS_ADDRESS)) {
-    const anchor = nearestAnchorPrice(input.anchorObservations ?? [], ts, input.maxAnchorAgeSeconds ?? 900);
+    const anchor = nearestAnchorPrice(
+      input.anchorObservations ?? [],
+      ts,
+      input.maxAnchorAgeSeconds ?? 900,
+      input.blockNumber,
+    );
     if (!anchor) return null;
     price = (wplsAmount / candidateAmount) * anchor.price;
     volumeEusdc = Math.max(volumeEusdc, wplsAmount * anchor.price);
     source = "candidate/wpls*historical-wpls/eusdc";
     anchorAgeSeconds = anchor.age;
+    anchorPoolAddress = anchor.poolAddress;
   }
   if (price === null || price <= 0 || !Number.isFinite(price)) return null;
   return {
@@ -1449,6 +1593,8 @@ export function priceObservationFromSwap(input: {
     volumeEusdc: Math.max(0, volumeEusdc),
     swapId: `${swap.transaction?.id ?? ""}:${swap.id}`,
     source,
+    ...(input.blockNumber !== undefined ? { blockNumber: input.blockNumber } : {}),
+    ...(anchorPoolAddress !== undefined ? { anchorPoolAddress } : {}),
     ...(anchorAgeSeconds !== undefined ? { anchorAgeSeconds } : {}),
   };
 }
@@ -1912,6 +2058,43 @@ function historyStoreDirectory(config?: AppConfig): string {
   return resolveEusdcRotationHistoryStorePath(config).directory;
 }
 
+function historySyncCheckpointPath(config?: AppConfig): string {
+  return normalize(join(historyStoreDirectory(config), "sync-checkpoint.json"));
+}
+
+function readHistorySyncCheckpoint(config?: AppConfig): RotationHistorySyncCheckpoint | null {
+  const file = historySyncCheckpointPath(config);
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RotationHistorySyncCheckpoint>;
+    if (
+      parsed.schemaVersion === HISTORY_CHECKPOINT_SCHEMA_VERSION &&
+      typeof parsed.resumeToken === "string" &&
+      parsed.requestedWindow &&
+      Array.isArray(parsed.completedBlockRanges) &&
+      Array.isArray(parsed.completedPools)
+    ) {
+      return parsed as RotationHistorySyncCheckpoint;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function writeHistorySyncCheckpoint(config: AppConfig, checkpoint: RotationHistorySyncCheckpoint): void {
+  mkdirSync(historyStoreDirectory(config), { recursive: true });
+  atomicWriteJson(historySyncCheckpointPath(config), checkpoint, { fsync: true });
+}
+
+function clearHistorySyncCheckpoint(config: AppConfig): void {
+  try {
+    unlinkSync(historySyncCheckpointPath(config));
+  } catch {
+    // ignore absent or already-cleared checkpoint files
+  }
+}
+
 function historyStoreReviewCode(config?: AppConfig): RotationHistoryStoreReviewCode {
   const resolved = resolveEusdcRotationHistoryStorePath(config);
   if (resolved.source === "CONFIG_OVERRIDE") return "OK";
@@ -2040,7 +2223,6 @@ export function mergeRotationHistoryRecords(input: {
   const floor = Math.min(retentionFloor, protectedFloor);
   const byKey = new Map<string, RotationHistoryRecord>();
   for (const record of input.existing) {
-    if (record.timestamp < floor) continue;
     byKey.set(historyRecordKey(record), record);
   }
   let added = 0;
@@ -2061,13 +2243,8 @@ export function mergeRotationHistoryRecords(input: {
     if (!prior) {
       byKey.set(key, record);
       added += 1;
-    } else if (
-      recent &&
-      (prior.blockHash !== record.blockHash ||
-        prior.candidatePriceEusdc !== record.candidatePriceEusdc ||
-        prior.eusdcNotionalRaw !== record.eusdcNotionalRaw)
-    ) {
-      byKey.set(key, record);
+    } else if (recent && prior.blockHash !== record.blockHash) {
+      byKey.set(key, { ...record, timestamp: prior.timestamp });
       updated += 1;
     } else {
       duplicates += 1;
@@ -2257,6 +2434,7 @@ function historyRecordFromSubgraphSwap(input: {
   chainId: number;
   candidate: RotationCandidateRegistryEntry;
   pair: SubgraphPair;
+  sourcePool?: RotationHistorySourcePoolRef;
   swap: SubgraphSwap;
   observation: RotationPriceObservation;
   fetchedAt: string;
@@ -2272,8 +2450,12 @@ function historyRecordFromSubgraphSwap(input: {
     chainId: input.chainId,
     candidateId: input.candidate.candidateId,
     poolAddress: pair.id.toLowerCase() as `0x${string}`,
-    factoryAddress: null,
-    protocol: "PulseX V2",
+    factoryAddress: input.sourcePool?.factoryAddress ?? null,
+    protocol: input.sourcePool?.protocol ?? "PulseX V2",
+    sourceVersion: input.sourcePool?.sourceVersion,
+    eventAdapter: input.sourcePool?.eventAdapter,
+    anchorPoolAddress: input.observation.anchorPoolAddress,
+    anchorAgeSeconds: input.observation.anchorAgeSeconds,
     blockNumber: null,
     blockHash: null,
     transactionHash: txHash,
@@ -2286,8 +2468,8 @@ function historyRecordFromSubgraphSwap(input: {
     candidatePriceEusdc: round(input.observation.priceEusdc, 18),
     eusdcNotionalRaw: decimalHumanToRaw(String(input.observation.volumeEusdc), 6),
     source: input.observation.source.includes("historical")
-      ? "pulsex-v2-subgraph-time-aligned-anchor"
-      : "pulsex-v2-subgraph",
+      ? `${(input.sourcePool?.sourceVersion ?? "PULSEX_V2").toLowerCase()}-subgraph-time-aligned-anchor`
+      : `${(input.sourcePool?.sourceVersion ?? "PULSEX_V2").toLowerCase()}-subgraph`,
     fetchedAt: input.fetchedAt,
   };
 }
@@ -2316,6 +2498,10 @@ function observationsFromHistory(records: RotationHistoryRecord[]): RotationPric
     volumeEusdc: Number(formatUnits(BigInt(record.eusdcNotionalRaw), 6)),
     swapId: `${record.transactionHash}:${record.logIndex}`,
     source: record.source,
+    blockNumber: record.blockNumber,
+    poolAddress: record.poolAddress,
+    anchorPoolAddress: record.anchorPoolAddress,
+    anchorAgeSeconds: record.anchorAgeSeconds,
   }));
 }
 
@@ -2399,21 +2585,44 @@ function sourceCompletenessForRecords(input: {
   const coveredStart = Math.max(input.startTimestamp, earliest);
   const coveredEnd = Math.min(input.endTimestamp, latest);
   const spanPercent = Math.max(0, Math.min(100, (coveredEnd - coveredStart) / window * 100));
-  const statusPercent = input.syncStatus && input.syncStatus.pools.length > 0
-    ? round(input.syncStatus.pools.filter((report) =>
+  const requiredPools = input.syncStatus?.pools.filter((pool) =>
+    pool.classification === "REQUIRED_PRICE_POOL" || pool.classification === undefined,
+  ) ?? [];
+  const completenessPools = requiredPools.length > 0 ? requiredPools : input.syncStatus?.pools ?? [];
+  const statusPercent = input.syncStatus && completenessPools.length > 0
+    ? round(completenessPools.filter((report) =>
+      report.rangeFullyScanned ||
       report.boundaryCrossed ||
       report.truncationReason === "NONE" ||
       report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
       report.truncationReason === "STALE_POOL",
-    ).length / input.syncStatus.pools.length * 100, 4)
+    ).length / completenessPools.length * 100, 4)
     : input.syncStatus?.sourceCompletenessPercent;
-  const percent = input.syncStatus?.boundaryCrossed ? 100 : round(Math.max(spanPercent, statusPercent ?? 0), 4);
-  const truncated =
-    input.syncStatus?.pools.some((pool) => pool.truncationReason !== "NONE" && pool.truncationReason !== "SPARSE_ACTUAL_TRADING") ??
-    percent < 95;
-  if (earliest > input.startTimestamp) unresolved.push("oldest stored record does not cross requested start boundary");
+  const requiredRangeComplete = completenessPools.length > 0 && completenessPools.every((pool) =>
+    pool.rangeFullyScanned ||
+    pool.boundaryCrossed ||
+    pool.truncationReason === "NONE" ||
+    pool.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+    pool.truncationReason === "STALE_POOL"
+  );
+  const percent = input.syncStatus?.boundaryCrossed || requiredRangeComplete
+    ? 100
+    : round(Math.max(spanPercent, statusPercent ?? 0), 4);
+  const truncated = completenessPools.length > 0
+    ? completenessPools.some((pool) =>
+      pool.truncationReason !== "NONE" &&
+      pool.truncationReason !== "SPARSE_ACTUAL_TRADING" &&
+      pool.truncationReason !== "STALE_POOL"
+    )
+    : percent < 95;
+  if (earliest > input.startTimestamp && !requiredRangeComplete) {
+    unresolved.push("oldest stored record does not cross requested start boundary");
+  }
   if (latest < input.endTimestamp - FRESH_TRADE_MAX_AGE_MINUTES * 60) unresolved.push("latest stored record is stale");
-  for (const gap of input.syncStatus?.unresolvedGaps ?? []) unresolved.push(gap);
+  for (const gap of input.syncStatus?.unresolvedGaps ?? []) {
+    const requiredGap = completenessPools.some((pool) => gap.includes(pool.poolAddress));
+    if (requiredGap || completenessPools.length === 0) unresolved.push(gap);
+  }
   return { percent, unresolvedGaps: [...new Set(unresolved)], truncated };
 }
 
@@ -3017,25 +3226,253 @@ function swapsVolume(swaps: SubgraphSwap[]): number {
   return swaps.reduce((sum, swap) => sum + num(swap.amountUSD), 0);
 }
 
+function historyRuntimeDeadlineReached(deadlineMs: number | undefined): boolean {
+  return deadlineMs !== undefined && Date.now() + HISTORY_RUNTIME_GUARD_MS >= deadlineMs;
+}
+
+function remainingHistoryRuntimeMs(deadlineMs: number | undefined): number | null {
+  if (deadlineMs === undefined) return null;
+  return Math.max(0, deadlineMs - Date.now() - HISTORY_RUNTIME_GUARD_MS);
+}
+
+function historyRuntimeDeadlineError(): Error {
+  return new Error("HISTORY_RUNTIME_DEADLINE_REACHED");
+}
+
+function isHistoryRuntimeDeadlineError(err: unknown): boolean {
+  return err instanceof Error && err.message === "HISTORY_RUNTIME_DEADLINE_REACHED";
+}
+
+function boundedHistoryRequestConfig(config: AppConfig, deadlineMs: number | undefined): AppConfig {
+  const remaining = remainingHistoryRuntimeMs(deadlineMs);
+  const boundedTimeout =
+    remaining === null
+      ? Math.min(config.httpTimeoutMs, HISTORY_SOURCE_REQUEST_TIMEOUT_MS)
+      : Math.max(
+        HISTORY_MIN_REQUEST_TIMEOUT_MS,
+        Math.min(config.httpTimeoutMs, HISTORY_SOURCE_REQUEST_TIMEOUT_MS, remaining),
+      );
+  return { ...config, httpTimeoutMs: boundedTimeout };
+}
+
 async function fetchPairsForCandidate(
   config: AppConfig,
   candidate: RotationCandidateRegistryEntry,
 ): Promise<{ pairs: SubgraphPair[]; errors: string[] }> {
+  const sourced = await fetchSourcePoolsForCandidate(config, candidate);
+  const byId = new Map<string, SubgraphPair>();
+  for (const ref of sourced.pools) {
+    if (!byId.has(ref.pair.id.toLowerCase())) byId.set(ref.pair.id.toLowerCase(), ref.pair);
+  }
+  return { pairs: [...byId.values()], errors: sourced.errors };
+}
+
+function sourceVersionForSubgraph(version: "v1" | "v2"): RotationHistorySourceVersion {
+  return version === "v1" ? "PULSEX_V1" : "PULSEX_V2";
+}
+
+function subgraphEndpointForVersion(config: AppConfig, version: "v1" | "v2"): string {
+  return version === "v1" ? config.pulseXSubgraphV1 : config.pulseXSubgraphV2;
+}
+
+function protocolForSourceVersion(sourceVersion: RotationHistorySourceVersion): string {
+  if (sourceVersion === "PULSEX_V1") return "PulseX V1";
+  if (sourceVersion === "PULSEX_V2") return "PulseX V2";
+  if (sourceVersion === "VERIFIED_V3") return "Verified V3";
+  if (sourceVersion === "VERIFIED_STABLE") return "Verified stable";
+  return "Unknown";
+}
+
+function pairSupportsCandidatePrice(
+  candidate: RotationCandidateRegistryEntry,
+  pair: SubgraphPair,
+): boolean {
+  const candidateToken = candidate.executionTokenAddress.toLowerCase();
+  return (
+    pairMatches(pair, candidateToken, EUSDC_ADDRESS) ||
+    pairMatches(pair, candidateToken, WPLS_ADDRESS) ||
+    (candidate.candidateId === "PLS" && pairMatches(pair, WPLS_ADDRESS, EUSDC_ADDRESS))
+  );
+}
+
+function classifySourcePool(input: {
+  candidate: RotationCandidateRegistryEntry;
+  pair: SubgraphPair;
+  priceMap: Map<string, number>;
+}): {
+  classification: RotationHistoryPoolClassification;
+  contributesToConsolidatedPrice: boolean;
+  liquidityEusdc: number;
+  recentVolumeEusdc: number;
+  exclusionReason?: string;
+} {
+  const liquidityEusdc = calculatePairLiquidityEusdc(input.pair, input.priceMap);
+  const recentVolumeEusdc = Math.max(0, num(input.pair.volumeUSD));
+  if (!pairSupportsCandidatePrice(input.candidate, input.pair)) {
+    return {
+      classification: "OPTIONAL_DIAGNOSTIC_POOL",
+      contributesToConsolidatedPrice: false,
+      liquidityEusdc,
+      recentVolumeEusdc,
+      exclusionReason: "pool is route diagnostic but not a candidate/eUSDC or candidate/WPLS price source",
+    };
+  }
+  if (liquidityEusdc <= 0) {
+    return {
+      classification: "EXCLUDED_POOL",
+      contributesToConsolidatedPrice: false,
+      liquidityEusdc,
+      recentVolumeEusdc,
+      exclusionReason: "non-positive eUSDC-priced liquidity",
+    };
+  }
+  if (liquidityEusdc < REQUIRED_POOL_MIN_LIQUIDITY_EUSDC) {
+    return {
+      classification: "OPTIONAL_DIAGNOSTIC_POOL",
+      contributesToConsolidatedPrice: false,
+      liquidityEusdc,
+      recentVolumeEusdc,
+      exclusionReason: "below required price-pool liquidity floor",
+    };
+  }
+  if (recentVolumeEusdc < REQUIRED_POOL_MIN_RECENT_VOLUME_EUSDC) {
+    return {
+      classification: "OPTIONAL_DIAGNOSTIC_POOL",
+      contributesToConsolidatedPrice: false,
+      liquidityEusdc,
+      recentVolumeEusdc,
+      exclusionReason: "below required price-pool recent-volume floor",
+    };
+  }
+  return {
+    classification: "REQUIRED_PRICE_POOL",
+    contributesToConsolidatedPrice: true,
+    liquidityEusdc,
+    recentVolumeEusdc,
+  };
+}
+
+export function dedupeSourcePools(
+  refs: RotationHistorySourcePoolRef[],
+): { pools: RotationHistorySourcePoolRef[]; sourceDisagreements: string[] } {
+  const byKey = new Map<string, RotationHistorySourcePoolRef>();
+  const sourceDisagreements: string[] = [];
+  for (const ref of refs) {
+    const key = `${ref.sourceVersion}:${ref.pair.id.toLowerCase()}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, ref);
+      continue;
+    }
+    if (
+      existing.subgraphEndpoint !== ref.subgraphEndpoint ||
+      existing.eventAdapter !== ref.eventAdapter ||
+      existing.protocol !== ref.protocol
+    ) {
+      sourceDisagreements.push(
+        `${ref.pair.id.toLowerCase()}: conflicting ${existing.sourceVersion} source metadata`,
+      );
+    }
+    if (pairLiquidityUsd(ref.pair) > pairLiquidityUsd(existing.pair)) byKey.set(key, ref);
+  }
+  const byPool = new Map<string, RotationHistorySourcePoolRef[]>();
+  for (const ref of byKey.values()) {
+    const key = ref.pair.id.toLowerCase();
+    const rows = byPool.get(key) ?? [];
+    rows.push(ref);
+    byPool.set(key, rows);
+  }
+  for (const [pool, rows] of byPool) {
+    if (rows.length > 1) {
+      sourceDisagreements.push(
+        `${pool}: present in multiple source versions (${rows.map((row) => row.sourceVersion).join(", ")})`,
+      );
+    }
+  }
+  return { pools: [...byKey.values()], sourceDisagreements };
+}
+
+export function swapQueryPlanForSourcePool(ref: RotationHistorySourcePoolRef): {
+  pair: string;
+  version: "v1" | "v2" | undefined;
+  endpoint: string;
+  sourceVersion: RotationHistorySourceVersion;
+  eventAdapter: RotationHistoryEventAdapter;
+} {
+  return {
+    pair: ref.pair.id.toLowerCase(),
+    version: ref.subgraphVersion,
+    endpoint: ref.subgraphEndpoint,
+    sourceVersion: ref.sourceVersion,
+    eventAdapter: ref.eventAdapter,
+  };
+}
+
+async function fetchSourcePoolsForCandidate(
+  config: AppConfig,
+  candidate: RotationCandidateRegistryEntry,
+  deadlineMs?: number,
+): Promise<{ pools: RotationHistorySourcePoolRef[]; errors: string[]; partial: boolean }> {
   const errors: string[] = [];
-  const pairs: SubgraphPair[] = [];
+  let partial = false;
+  const discovered: Array<{
+    pair: SubgraphPair;
+    protocol: string;
+    sourceVersion: RotationHistorySourceVersion;
+    subgraphVersion: "v1" | "v2";
+    subgraphEndpoint: string;
+    eventAdapter: RotationHistoryEventAdapter;
+    factoryAddress: `0x${string}` | null;
+  }> = [];
   const tokens = [candidate.executionTokenAddress, WPLS_ADDRESS, EUSDC_ADDRESS];
   for (const version of ["v1", "v2"] as const) {
     for (const token of tokens) {
+      if (historyRuntimeDeadlineReached(deadlineMs)) {
+        partial = true;
+        errors.push(`${version} pairs ${token}: HISTORY_RUNTIME_DEADLINE_REACHED`);
+        break;
+      }
       try {
-        pairs.push(...(await fetchPairsForToken(config, token, 20, version)));
+        const pairs = await fetchPairsForToken(boundedHistoryRequestConfig(config, deadlineMs), token, 20, version);
+        const sourceVersion = sourceVersionForSubgraph(version);
+        const endpoint = subgraphEndpointForVersion(config, version);
+        for (const pair of pairs) {
+          discovered.push({
+            pair,
+            protocol: protocolForSourceVersion(sourceVersion),
+            sourceVersion,
+            subgraphVersion: version,
+            subgraphEndpoint: endpoint,
+            eventAdapter: "PULSEX_V2_STYLE_SWAP",
+            factoryAddress: null,
+          });
+        }
       } catch (err) {
         errors.push(`${version} pairs ${token}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    if (partial) break;
   }
-  const byId = new Map<string, SubgraphPair>();
-  for (const pair of pairs) byId.set(pair.id.toLowerCase(), pair);
-  return { pairs: [...byId.values()], errors };
+  const allPairs = discovered.map((row) => row.pair);
+  const anchor = findAnchorWplsEusdcPair(allPairs);
+  const wplsPrice = deriveWplsEusdcPrice(anchor);
+  const priceMap = new Map<string, number>([
+    [EUSDC_ADDRESS.toLowerCase(), 1],
+    ...(wplsPrice ? ([[WPLS_ADDRESS.toLowerCase(), wplsPrice]] as Array<[string, number]>) : []),
+  ]);
+  for (const pair of allPairs) {
+    const p0 = pairPriceEusdc(pair, tokenId(pair.token0), priceMap);
+    if (p0 && !priceMap.has(tokenId(pair.token0))) priceMap.set(tokenId(pair.token0), p0);
+    const p1 = pairPriceEusdc(pair, tokenId(pair.token1), priceMap);
+    if (p1 && !priceMap.has(tokenId(pair.token1))) priceMap.set(tokenId(pair.token1), p1);
+  }
+  const refs = discovered.map((row) => ({
+    ...row,
+    ...classifySourcePool({ candidate, pair: row.pair, priceMap }),
+  }));
+  const deduped = dedupeSourcePools(refs);
+  errors.push(...deduped.sourceDisagreements.map((msg) => `source disagreement: ${msg}`));
+  return { pools: deduped.pools, errors, partial };
 }
 
 function selectedSwapPairIds(
@@ -3053,6 +3490,25 @@ function selectedSwapPairIds(
     .sort((a, b) => pairLiquidityUsd(b) - pairLiquidityUsd(a))
     .slice(0, 4)
     .map((pair) => pair.id.toLowerCase());
+}
+
+function selectedSourcePools(
+  candidate: RotationCandidateRegistryEntry,
+  refs: RotationHistorySourcePoolRef[],
+): RotationHistorySourcePoolRef[] {
+  const candidateToken = candidate.executionTokenAddress.toLowerCase();
+  const relevant = refs.filter((ref) =>
+    pairMatches(ref.pair, candidateToken, EUSDC_ADDRESS) ||
+    pairMatches(ref.pair, candidateToken, WPLS_ADDRESS) ||
+    pairMatches(ref.pair, WPLS_ADDRESS, EUSDC_ADDRESS),
+  );
+  const required = relevant
+    .filter((ref) => ref.classification === "REQUIRED_PRICE_POOL")
+    .sort((a, b) => b.liquidityEusdc - a.liquidityEusdc);
+  const optional = relevant
+    .filter((ref) => ref.classification !== "REQUIRED_PRICE_POOL")
+    .sort((a, b) => b.liquidityEusdc - a.liquidityEusdc);
+  return [...required, ...optional].slice(0, 6);
 }
 
 async function verifyPoolBytecode(
@@ -3076,13 +3532,20 @@ async function verifyPoolBytecode(
 async function fetchPairSwapsPaginated(input: {
   config: AppConfig;
   candidateId?: RotationCandidateId;
-  pairIds: string[];
+  pairIds?: string[];
+  sourcePools?: RotationHistorySourcePoolRef[];
   startTimestamp: number;
   endTimestamp?: number;
   maxPagesPerPair?: number;
   pageSize?: number;
+  deadlineMs?: number;
 }): Promise<{
   swaps: SubgraphSwap[];
+  poolSwaps: Array<{
+    pairId: string;
+    sourcePool?: RotationHistorySourcePoolRef;
+    swaps: SubgraphSwap[];
+  }>;
   pageCount: number;
   truncated: boolean;
   errors: string[];
@@ -3096,18 +3559,72 @@ async function fetchPairSwapsPaginated(input: {
   const byId = new Map<string, SubgraphSwap>();
   let pageCount = 0;
   let truncated = false;
-  const tasks = input.pairIds.map(async (pairId) => {
+  type NormalizedPoolInput = {
+    pairId: string;
+    sourceVersion: RotationHistorySourceVersion;
+    subgraphVersion: "v1" | "v2";
+    sourceEndpoint: string;
+    protocol: string;
+    eventAdapter: RotationHistoryEventAdapter;
+    factoryAddress: `0x${string}` | null;
+    classification: RotationHistoryPoolClassification;
+    contributesToConsolidatedPrice: boolean;
+    liquidityEusdc: number;
+    recentVolumeEusdc: number;
+    exclusionReason?: string;
+    pair?: SubgraphPair;
+  };
+  const poolInputs: NormalizedPoolInput[] = input.sourcePools
+    ? input.sourcePools.map((row) => ({
+      pairId: row.pair.id.toLowerCase(),
+      sourceVersion: row.sourceVersion,
+      subgraphVersion: row.subgraphVersion ?? "v2",
+      sourceEndpoint: row.subgraphEndpoint,
+      protocol: row.protocol,
+      eventAdapter: row.eventAdapter,
+      factoryAddress: row.factoryAddress,
+      classification: row.classification,
+      contributesToConsolidatedPrice: row.contributesToConsolidatedPrice,
+      liquidityEusdc: row.liquidityEusdc,
+      recentVolumeEusdc: row.recentVolumeEusdc,
+      exclusionReason: row.exclusionReason,
+      pair: row.pair,
+    }))
+    : (input.pairIds ?? []).map((pairId) => ({
+    pairId: pairId.toLowerCase(),
+    sourceVersion: "PULSEX_V2" as RotationHistorySourceVersion,
+    subgraphVersion: "v2" as const,
+    sourceEndpoint: input.config.pulseXSubgraphV2,
+    protocol: "PulseX V2",
+    eventAdapter: "PULSEX_V2_STYLE_SWAP" as RotationHistoryEventAdapter,
+    factoryAddress: null,
+    classification: "REQUIRED_PRICE_POOL" as RotationHistoryPoolClassification,
+    contributesToConsolidatedPrice: true,
+    liquidityEusdc: 0,
+    recentVolumeEusdc: 0,
+    exclusionReason: undefined as string | undefined,
+    pair: undefined as SubgraphPair | undefined,
+  }));
+  const tasks = poolInputs.map(async (poolInput) => {
+    const pairId = poolInput.pairId;
+    const started = Date.now();
     const local: SubgraphSwap[] = [];
     let localPages = 0;
     let localTruncated = false;
     let repeatedCursor = false;
+    let stoppedForDeadline = false;
     let previousFirstId: string | undefined;
     for (let page = 0; page < maxPages; page += 1) {
-      const result = await fetchSwapsAdvanced(input.config, {
+      if (historyRuntimeDeadlineReached(input.deadlineMs)) {
+        stoppedForDeadline = true;
+        localTruncated = true;
+        break;
+      }
+      const result = await fetchSwapsAdvanced(boundedHistoryRequestConfig(input.config, input.deadlineMs), {
         pair: pairId,
         first: pageSize,
         skip: page * pageSize,
-        version: "v2",
+        version: poolInput.subgraphVersion,
       });
       localPages += 1;
       const swaps = result.swaps ?? [];
@@ -3135,7 +3652,8 @@ async function fetchPairSwapsPaginated(input: {
     const newest = timestamps.length > 0 ? Math.max(...timestamps) : null;
     const boundaryCrossed = oldest !== null && oldest <= input.startTimestamp;
     let truncationReason: RotationHistoryPoolSyncStatus["truncationReason"] = "NONE";
-    if (repeatedCursor) truncationReason = "PAGINATION_BUG_OR_REPEATED_CURSOR";
+    if (stoppedForDeadline) truncationReason = "PARTIAL_PROGRESS";
+    else if (repeatedCursor) truncationReason = "PAGINATION_BUG_OR_REPEATED_CURSOR";
     else if (localTruncated && !boundaryCrossed) truncationReason = "SOURCE_ROW_LIMIT";
     else if (local.length === 0) truncationReason = "SPARSE_ACTUAL_TRADING";
     else if (newest !== null && newest < endTimestamp - FRESH_TRADE_MAX_AGE_MINUTES * 60) {
@@ -3144,8 +3662,16 @@ async function fetchPairSwapsPaginated(input: {
     const report: RotationHistoryPoolSyncStatus = {
       candidateId: input.candidateId ?? "PLS",
       poolAddress: pairId.toLowerCase() as `0x${string}`,
-      sourceEndpoint: input.config.pulseXSubgraphV2,
-      queryType: "PulseX V2 swaps(pair, first, skip)",
+      token0: poolInput.pair ? pairTokenAddress(poolInput.pair, 0) : undefined,
+      token1: poolInput.pair ? pairTokenAddress(poolInput.pair, 1) : undefined,
+      token0Decimals: poolInput.pair ? pairTokenDecimals(poolInput.pair, poolInput.pair.token0.id, 18) : undefined,
+      token1Decimals: poolInput.pair ? pairTokenDecimals(poolInput.pair, poolInput.pair.token1.id, 18) : undefined,
+      factoryAddress: poolInput.factoryAddress,
+      protocol: poolInput.protocol,
+      sourceVersion: poolInput.sourceVersion,
+      eventAdapter: poolInput.eventAdapter,
+      sourceEndpoint: poolInput.sourceEndpoint,
+      queryType: `${poolInput.protocol} swaps(pair, first, skip)`,
       pageSize,
       maximumPageCount: maxPages,
       cursorMechanism: "skip",
@@ -3157,14 +3683,47 @@ async function fetchPairSwapsPaginated(input: {
       deduplicatedRecords: unique.size,
       boundaryCrossed,
       truncationReason,
-      sourceRepeatsOrCapsRecords: repeatedCursor || (localTruncated && !boundaryCrossed),
-      historicalPaginationReliable: (boundaryCrossed || local.length < pageSize) && !repeatedCursor,
+      contributesToConsolidatedPrice: poolInput.contributesToConsolidatedPrice,
+      classification: poolInput.classification,
+      liquidityEusdc: round(poolInput.liquidityEusdc, 6),
+      recentVolumeEusdc: round(poolInput.recentVolumeEusdc, 6),
+      exclusionReason: poolInput.exclusionReason,
+      exactRemainingTruncationCause: truncationReason === "NONE" ? undefined : truncationReason,
+      retrievalCompletenessPercent:
+        !stoppedForDeadline &&
+          (boundaryCrossed || truncationReason === "SPARSE_ACTUAL_TRADING" || truncationReason === "STALE_POOL")
+          ? 100
+          : 0,
+      signalWindowCompletenessPercent: newest !== null && newest >= endTimestamp - 24 * 60 * 60 ? 100 : 0,
+      rpcRecordsRetrieved: 0,
+      anchorRecordsUsed: 0,
+      unsupportedLogs: 0,
+      errors: [],
+      nextResumeBlock: null,
+      elapsedMs: Date.now() - started,
+      sourceRepeatsOrCapsRecords: repeatedCursor || (localTruncated && !boundaryCrossed && !stoppedForDeadline),
+      historicalPaginationReliable: !stoppedForDeadline && (boundaryCrossed || local.length < pageSize) && !repeatedCursor,
       fallbackUsed: "NONE",
     };
-    return { pairId, swaps: [...unique.values()], pageCount: localPages, truncated: localTruncated, report };
+    return {
+      pairId,
+      sourcePool: input.sourcePools?.find((ref) =>
+        ref.pair.id.toLowerCase() === pairId &&
+        ref.sourceVersion === poolInput.sourceVersion
+      ),
+      swaps: [...unique.values()],
+      pageCount: localPages,
+      truncated: localTruncated,
+      report,
+    };
   });
   const settled = await Promise.allSettled(tasks);
   const poolReports: RotationHistoryPoolSyncStatus[] = [];
+  const poolSwaps: Array<{
+    pairId: string;
+    sourcePool?: RotationHistorySourcePoolRef;
+    swaps: SubgraphSwap[];
+  }> = [];
   for (const row of settled) {
     if (row.status === "rejected") {
       errors.push(row.reason instanceof Error ? row.reason.message : String(row.reason));
@@ -3173,6 +3732,11 @@ async function fetchPairSwapsPaginated(input: {
     pageCount += row.value.pageCount;
     truncated = truncated || row.value.truncated;
     poolReports.push(row.value.report);
+    poolSwaps.push({
+      pairId: row.value.pairId,
+      sourcePool: row.value.sourcePool,
+      swaps: row.value.swaps,
+    });
     for (const swap of row.value.swaps) {
       const key = `${swap.transaction?.id ?? ""}:${swap.id}`;
       byId.set(key, swap);
@@ -3180,10 +3744,11 @@ async function fetchPairSwapsPaginated(input: {
   }
   return {
     swaps: [...byId.values()].sort((a, b) => Number(a.timestamp) - Number(b.timestamp)),
+    poolSwaps,
     pageCount,
     truncated,
     errors,
-    pairsUsed: input.pairIds,
+    pairsUsed: poolInputs.map((row) => row.pairId),
     poolReports,
   };
 }
@@ -3222,6 +3787,141 @@ export function reduceLogChunkAfterRangeError(currentBlocks: number): number {
   return Math.max(100, Math.floor(currentBlocks / 2));
 }
 
+type HistoryPublicClient = {
+  getBlockNumber: () => Promise<bigint>;
+  getBlock: (args: { blockNumber: bigint }) => Promise<{
+    timestamp: bigint | number;
+    hash?: `0x${string}` | string | null;
+  }>;
+  getLogs: (args: {
+    address: `0x${string}`;
+    event: typeof v2SwapEventAbi;
+    fromBlock: bigint;
+    toBlock: bigint;
+  }) => Promise<Array<{
+    blockNumber?: bigint;
+    blockHash?: `0x${string}` | string | null;
+    transactionHash?: `0x${string}` | string;
+    logIndex?: bigint | number;
+    data: `0x${string}`;
+    topics: readonly `0x${string}`[];
+  }>>;
+};
+
+export interface TimestampBlockRangeResolution {
+  requestedStartTimestamp: number;
+  requestedEndTimestamp: number;
+  resolvedStartBlock: bigint;
+  resolvedEndBlock: bigint;
+  resolvedStartBlockTimestamp: number;
+  resolvedEndBlockTimestamp: number;
+  maximumTimestampResolutionErrorSeconds: number;
+  blockTimestampCache: Map<bigint, { timestamp: number; hash: `0x${string}` | null }>;
+  searchCalls: number;
+}
+
+async function cachedBlockInfo(
+  client: HistoryPublicClient,
+  blockNumber: bigint,
+  cache: Map<bigint, { timestamp: number; hash: `0x${string}` | null }>,
+): Promise<{ timestamp: number; hash: `0x${string}` | null }> {
+  const cached = cache.get(blockNumber);
+  if (cached) return cached;
+  const block = await client.getBlock({ blockNumber });
+  const info = {
+    timestamp: Number(block.timestamp),
+    hash: typeof block.hash === "string" ? (block.hash as `0x${string}`) : null,
+  };
+  cache.set(blockNumber, info);
+  return info;
+}
+
+export async function resolveTimestampBlockRange(input: {
+  client: HistoryPublicClient;
+  startTimestamp: number;
+  endTimestamp: number;
+  latestBlock?: bigint;
+  maximumSearchCalls?: number;
+  deadlineMs?: number;
+}): Promise<TimestampBlockRangeResolution> {
+  if (historyRuntimeDeadlineReached(input.deadlineMs)) throw historyRuntimeDeadlineError();
+  const latestBlock = input.latestBlock ?? await input.client.getBlockNumber();
+  const cache = new Map<bigint, { timestamp: number; hash: `0x${string}` | null }>();
+  const maxCalls = input.maximumSearchCalls ?? 96;
+  let searchCalls = 0;
+  const timestampAt = async (block: bigint): Promise<number> => {
+    if (historyRuntimeDeadlineReached(input.deadlineMs)) throw historyRuntimeDeadlineError();
+    searchCalls += 1;
+    if (searchCalls > maxCalls) {
+      throw new Error(`timestamp-to-block search exceeded ${maxCalls} block timestamp reads`);
+    }
+    return (await cachedBlockInfo(input.client, block, cache)).timestamp;
+  };
+
+  const firstAtOrAfter = async (target: number): Promise<bigint> => {
+    let lo = 0n;
+    let hi = latestBlock;
+    while (lo < hi) {
+      const mid = (lo + hi) / 2n;
+      if (await timestampAt(mid) >= target) hi = mid;
+      else lo = mid + 1n;
+    }
+    return lo;
+  };
+
+  const lastAtOrBefore = async (target: number): Promise<bigint> => {
+    let lo = 0n;
+    let hi = latestBlock;
+    while (lo < hi) {
+      const mid = (lo + hi + 1n) / 2n;
+      if (await timestampAt(mid) <= target) lo = mid;
+      else hi = mid - 1n;
+    }
+    return lo;
+  };
+
+  const startBlock = await firstAtOrAfter(input.startTimestamp);
+  const endBlock = await lastAtOrBefore(input.endTimestamp);
+  const startInfo = await cachedBlockInfo(input.client, startBlock, cache);
+  const endInfo = await cachedBlockInfo(input.client, endBlock, cache);
+  return {
+    requestedStartTimestamp: input.startTimestamp,
+    requestedEndTimestamp: input.endTimestamp,
+    resolvedStartBlock: startBlock,
+    resolvedEndBlock: endBlock < startBlock ? startBlock : endBlock,
+    resolvedStartBlockTimestamp: startInfo.timestamp,
+    resolvedEndBlockTimestamp: endInfo.timestamp,
+    maximumTimestampResolutionErrorSeconds: Math.max(
+      Math.abs(startInfo.timestamp - input.startTimestamp),
+      Math.abs(endInfo.timestamp - input.endTimestamp),
+    ),
+    blockTimestampCache: cache,
+    searchCalls,
+  };
+}
+
+export function rangeFullyScanned(input: {
+  resolvedStartBlock?: bigint | null;
+  resolvedEndBlock?: bigint | null;
+  scannedFromBlock?: bigint | null;
+  scannedToBlock?: bigint | null;
+  unresolvedRpcRangeError?: boolean;
+}): boolean {
+  return (
+    input.unresolvedRpcRangeError !== true &&
+    input.resolvedStartBlock !== undefined &&
+    input.resolvedStartBlock !== null &&
+    input.resolvedEndBlock !== undefined &&
+    input.resolvedEndBlock !== null &&
+    input.scannedFromBlock !== undefined &&
+    input.scannedFromBlock !== null &&
+    input.scannedToBlock !== undefined &&
+    input.scannedToBlock !== null &&
+    input.scannedFromBlock <= input.resolvedStartBlock &&
+    input.scannedToBlock >= input.resolvedEndBlock
+  );
+}
+
 export function shouldUseRpcLogFallback(report: RotationHistoryPoolSyncStatus): boolean {
   return (
     report.truncationReason === "SOURCE_ROW_LIMIT" ||
@@ -3230,75 +3930,98 @@ export function shouldUseRpcLogFallback(report: RotationHistoryPoolSyncStatus): 
   );
 }
 
-async function approximateStartBlock(
-  config: AppConfig,
-  lookbackMinutes: number,
-): Promise<{ latestBlock: bigint; startBlock: bigint }> {
-  const client = getPublicClient(config);
-  const latestBlock = await client.getBlockNumber();
-  const estimatedBlocks = BigInt(Math.ceil((lookbackMinutes * 60) / 10) + 1_000);
-  return {
-    latestBlock,
-    startBlock: latestBlock > estimatedBlocks ? latestBlock - estimatedBlocks : 0n,
-  };
-}
-
 async function fetchV2SwapLogsFallback(input: {
   config: AppConfig;
   candidate: RotationCandidateRegistryEntry;
-  pair: SubgraphPair;
+  sourcePool: RotationHistorySourcePoolRef;
   startTimestamp: number;
-  lookbackMinutes: number;
+  endTimestamp: number;
   maximumBlocksPerChunk: number;
   fetchedAt: string;
-}): Promise<{ records: RotationHistoryRecord[]; reportPatch: Partial<RotationHistoryPoolSyncStatus>; errors: string[] }> {
+  anchorObservations?: RotationPriceObservation[];
+  resumeFromBlock?: bigint;
+  deadlineMs?: number;
+}): Promise<{
+  records: RotationHistoryRecord[];
+  reportPatch: Partial<RotationHistoryPoolSyncStatus>;
+  errors: string[];
+  partial: boolean;
+}> {
   const errors: string[] = [];
   const records: RotationHistoryRecord[] = [];
-  const client = getPublicClient(input.config);
+  const pair = input.sourcePool.pair;
+  const client = getPublicClient(boundedHistoryRequestConfig(input.config, input.deadlineMs)) as unknown as HistoryPublicClient;
   let chunk = Math.max(100, input.maximumBlocksPerChunk);
-  let bounds: { latestBlock: bigint; startBlock: bigint };
+  let range: TimestampBlockRangeResolution;
   try {
-    bounds = await approximateStartBlock(input.config, input.lookbackMinutes);
+    range = await resolveTimestampBlockRange({
+      client,
+      startTimestamp: input.startTimestamp,
+      endTimestamp: input.endTimestamp,
+      deadlineMs: input.deadlineMs,
+    });
   } catch (err) {
+    if (isHistoryRuntimeDeadlineError(err)) {
+      return {
+        records,
+        reportPatch: {
+          fallbackUsed: "RPC_ETH_GETLOGS",
+          truncationReason: "PARTIAL_PROGRESS",
+          exactRemainingTruncationCause: "PARTIAL_PROGRESS",
+          nextResumeBlock: input.resumeFromBlock?.toString() ?? null,
+          error: "HISTORY_RUNTIME_DEADLINE_REACHED",
+          errors: ["HISTORY_RUNTIME_DEADLINE_REACHED"],
+        },
+        errors: [],
+        partial: true,
+      };
+    }
     return {
       records,
       reportPatch: {
         fallbackUsed: "RPC_ETH_GETLOGS",
         truncationReason: "FAILED_BLOCK_TO_TIME_CONVERSION",
+        exactRemainingTruncationCause: "FAILED_BLOCK_TO_TIME_CONVERSION",
         error: err instanceof Error ? err.message : String(err),
       },
       errors: [err instanceof Error ? err.message : String(err)],
+      partial: false,
     };
   }
-  const blockTimestampCache = new Map<bigint, { timestamp: number; hash: `0x${string}` | null }>();
-  const latestBlock = await client.getBlock({ blockNumber: bounds.latestBlock });
-  const latestTimestamp = Number(latestBlock.timestamp);
-  function blockInfo(blockNumber: bigint, blockHash: `0x${string}` | null): { timestamp: number; hash: `0x${string}` | null } {
-    const cached = blockTimestampCache.get(blockNumber);
-    if (cached) return cached;
-    const approximateSeconds = Number(bounds.latestBlock - blockNumber) * 10;
-    const info = { timestamp: latestTimestamp - approximateSeconds, hash: blockHash };
-    blockTimestampCache.set(blockNumber, info);
-    return info;
-  }
-  let from = bounds.startBlock;
-  while (from <= bounds.latestBlock) {
-    const to = from + BigInt(chunk) > bounds.latestBlock ? bounds.latestBlock : from + BigInt(chunk);
+  let from = input.resumeFromBlock ?? range.resolvedStartBlock;
+  let scannedFromBlock: bigint | null = null;
+  let scannedToBlock: bigint | null = null;
+  let partial = false;
+  let unsupportedLogs = 0;
+  let anchorRecordsUsed = 0;
+  const started = Date.now();
+  while (from <= range.resolvedEndBlock) {
+    if (historyRuntimeDeadlineReached(input.deadlineMs)) {
+      partial = true;
+      break;
+    }
+    const to = from + BigInt(chunk - 1) > range.resolvedEndBlock ? range.resolvedEndBlock : from + BigInt(chunk - 1);
     try {
       const logs = await client.getLogs({
-        address: input.pair.id.toLowerCase() as `0x${string}`,
+        address: pair.id.toLowerCase() as `0x${string}`,
         event: v2SwapEventAbi,
         fromBlock: from,
         toBlock: to,
       });
+      scannedFromBlock = scannedFromBlock === null ? from : scannedFromBlock < from ? scannedFromBlock : from;
+      scannedToBlock = scannedToBlock === null ? to : scannedToBlock > to ? scannedToBlock : to;
       for (const log of logs) {
-        const info = blockInfo(log.blockNumber!, log.blockHash as `0x${string}` | null);
-        if (info.timestamp < input.startTimestamp) continue;
-        const decoded = decodeEventLog({
-          abi: [v2SwapEventAbi],
-          data: log.data,
-          topics: log.topics,
-        }) as {
+        if (historyRuntimeDeadlineReached(input.deadlineMs)) {
+          partial = true;
+          break;
+        }
+        if (log.blockNumber === undefined) {
+          unsupportedLogs += 1;
+          continue;
+        }
+        const info = await cachedBlockInfo(client, log.blockNumber, range.blockTimestampCache);
+        if (info.timestamp < input.startTimestamp || info.timestamp > input.endTimestamp) continue;
+        let decoded: {
           args: {
             amount0In: bigint;
             amount1In: bigint;
@@ -3306,12 +4029,29 @@ async function fetchV2SwapLogsFallback(input: {
             amount1Out: bigint;
           };
         };
+        try {
+          decoded = decodeEventLog({
+            abi: [v2SwapEventAbi],
+            data: log.data,
+            topics: [...log.topics] as [`0x${string}`, ...`0x${string}`[]],
+          }) as {
+            args: {
+              amount0In: bigint;
+              amount1In: bigint;
+              amount0Out: bigint;
+              amount1Out: bigint;
+            };
+          };
+        } catch {
+          unsupportedLogs += 1;
+          continue;
+        }
         const amount0Raw = (decoded.args.amount0In + decoded.args.amount0Out).toString();
         const amount1Raw = (decoded.args.amount1In + decoded.args.amount1Out).toString();
-        const amount0Human = Number(formatUnits(BigInt(amount0Raw), pairTokenDecimals(input.pair, input.pair.token0.id, 18)));
-        const amount1Human = Number(formatUnits(BigInt(amount1Raw), pairTokenDecimals(input.pair, input.pair.token1.id, 18)));
-        const token0 = pairTokenAddress(input.pair, 0);
-        const token1 = pairTokenAddress(input.pair, 1);
+        const amount0Human = Number(formatUnits(BigInt(amount0Raw), pairTokenDecimals(pair, pair.token0.id, 18)));
+        const amount1Human = Number(formatUnits(BigInt(amount1Raw), pairTokenDecimals(pair, pair.token1.id, 18)));
+        const token0 = pairTokenAddress(pair, 0);
+        const token1 = pairTokenAddress(pair, 1);
         const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
         const candidateAmount =
           sameAddress(token0, candidateToken) ? amount0Human :
@@ -3321,15 +4061,41 @@ async function fetchV2SwapLogsFallback(input: {
         const eusdcAmount =
           sameAddress(token0, EUSDC_ADDRESS) ? amount0Human :
             sameAddress(token1, EUSDC_ADDRESS) ? amount1Human : 0;
-        if (candidateAmount <= 0 || eusdcAmount <= 0) continue;
+        const wplsAmount =
+          sameAddress(token0, WPLS_ADDRESS) ? amount0Human :
+            sameAddress(token1, WPLS_ADDRESS) ? amount1Human : 0;
+        let price: number | null = null;
+        let volumeEusdc = eusdcAmount;
+        let source = `${input.sourcePool.sourceVersion.toLowerCase()}-rpc-v2-style-swap`;
+        let anchor: { price: number; age: number; poolAddress?: `0x${string}` } | null = null;
+        if (candidateAmount > 0 && eusdcAmount > 0) {
+          price = eusdcAmount / candidateAmount;
+        } else if (candidateAmount > 0 && wplsAmount > 0) {
+          anchor = nearestAnchorPrice(
+            input.anchorObservations ?? [],
+            info.timestamp,
+            ANCHOR_MAX_AGE_SECONDS,
+            log.blockNumber.toString(),
+          );
+          if (!anchor) continue;
+          price = (wplsAmount / candidateAmount) * anchor.price;
+          volumeEusdc = wplsAmount * anchor.price;
+          source = `${input.sourcePool.sourceVersion.toLowerCase()}-rpc-v2-style-swap-anchored-wpls-eusdc`;
+          anchorRecordsUsed += 1;
+        }
+        if (price === null || price <= 0 || !Number.isFinite(price) || volumeEusdc <= 0) continue;
         records.push({
           chainId: PULSECHAIN_CHAIN_ID,
           candidateId: input.candidate.candidateId,
-          poolAddress: input.pair.id.toLowerCase() as `0x${string}`,
-          factoryAddress: null,
-          protocol: "PulseX V2",
+          poolAddress: pair.id.toLowerCase() as `0x${string}`,
+          factoryAddress: input.sourcePool.factoryAddress,
+          protocol: input.sourcePool.protocol,
+          sourceVersion: input.sourcePool.sourceVersion,
+          eventAdapter: input.sourcePool.eventAdapter,
+          anchorPoolAddress: anchor?.poolAddress,
+          anchorAgeSeconds: anchor?.age,
           blockNumber: log.blockNumber?.toString() ?? null,
-          blockHash: info.hash,
+          blockHash: (log.blockHash as `0x${string}` | null) ?? info.hash,
           transactionHash: log.transactionHash as `0x${string}`,
           logIndex: Number(log.logIndex ?? 0n),
           timestamp: info.timestamp,
@@ -3337,12 +4103,13 @@ async function fetchV2SwapLogsFallback(input: {
           token1,
           amount0Raw,
           amount1Raw,
-          candidatePriceEusdc: round(eusdcAmount / candidateAmount, 18),
-          eusdcNotionalRaw: decimalHumanToRaw(String(eusdcAmount), 6),
-          source: "rpc-eth_getLogs-v2-swap",
+          candidatePriceEusdc: round(price, 18),
+          eusdcNotionalRaw: decimalHumanToRaw(String(volumeEusdc), 6),
+          source,
           fetchedAt: input.fetchedAt,
         });
       }
+      if (partial) break;
       from = to + 1n;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -3357,28 +4124,73 @@ async function fetchV2SwapLogsFallback(input: {
   const timestamps = records.map((record) => record.timestamp);
   const oldest = timestamps.length > 0 ? Math.min(...timestamps) : null;
   const newest = timestamps.length > 0 ? Math.max(...timestamps) : null;
-  const boundaryCrossed = oldest !== null && oldest <= input.startTimestamp;
+  const completeRange = rangeFullyScanned({
+    resolvedStartBlock: range.resolvedStartBlock,
+    resolvedEndBlock: range.resolvedEndBlock,
+    scannedFromBlock,
+    scannedToBlock,
+    unresolvedRpcRangeError: errors.length > 0 || partial,
+  });
+  const boundaryCrossed = completeRange;
   return {
     records,
     reportPatch: {
       fallbackUsed: "RPC_ETH_GETLOGS",
       fallbackRecords: records.length,
+      rpcRecordsRetrieved: records.length,
+      anchorRecordsUsed,
+      unsupportedLogs,
       oldestReturnedRecord: oldest !== null ? isoFromSeconds(oldest) : undefined,
       newestReturnedRecord: newest !== null ? isoFromSeconds(newest) : undefined,
+      firstObservedTradeTimestamp: oldest !== null ? isoFromSeconds(oldest) : null,
+      lastObservedTradeTimestamp: newest !== null ? isoFromSeconds(newest) : null,
+      resolvedStartBlock: range.resolvedStartBlock.toString(),
+      resolvedEndBlock: range.resolvedEndBlock.toString(),
+      scannedFromBlock: scannedFromBlock?.toString() ?? null,
+      scannedToBlock: scannedToBlock?.toString() ?? null,
+      rangeFullyScanned: completeRange,
+      timestampResolutionMaxErrorSeconds: range.maximumTimestampResolutionErrorSeconds,
+      retrievalCompletenessPercent: completeRange ? 100 : 0,
+      signalWindowCompletenessPercent:
+        completeRange && newest !== null && newest >= input.endTimestamp - 24 * 60 * 60 ? 100 : 0,
       boundaryCrossed,
-      ...(boundaryCrossed ? { truncationReason: "NONE" as const } : {}),
+      exactRemainingTruncationCause: completeRange ? undefined : partial ? "PARTIAL_PROGRESS" : "RPC_LOG_RANGE_LIMITATION",
+      nextResumeBlock: partial ? from.toString() : null,
+      elapsedMs: Date.now() - started,
+      ...(partial ? { truncationReason: "PARTIAL_PROGRESS" as const } : {}),
+      ...(completeRange ? { truncationReason: "NONE" as const } : {}),
       ...(errors.length > 0 ? { truncationReason: "RPC_LOG_RANGE_LIMITATION", error: errors.join("; ") } : {}),
     },
     errors,
+    partial,
   };
 }
 
-function normalizeHistorySyncInput(input: RotationHistorySyncInput): Required<RotationHistorySyncInput> {
+type NormalizedHistorySyncInput = {
+  lookbackMinutes: number;
+  maximumBlocksPerChunk: number;
+  maximumPagesPerSource: number;
+  forceRecentBlockRecheck: boolean;
+  maximumRuntimeMs: number;
+  candidateIds?: RotationCandidateId[];
+  resumeToken?: string;
+  maximumPoolsPerRun?: number;
+};
+
+function normalizeHistorySyncInput(input: RotationHistorySyncInput): NormalizedHistorySyncInput {
+  const maximumRuntimeMs = Math.min(
+    Math.max(1_000, input.maximumRuntimeMs ?? DEFAULT_HISTORY_MAX_RUNTIME_MS),
+    MAX_HISTORY_MAX_RUNTIME_MS,
+  );
   return {
     lookbackMinutes: input.lookbackMinutes ?? DEFAULT_HISTORY_LOOKBACK_MINUTES,
     maximumBlocksPerChunk: input.maximumBlocksPerChunk ?? DEFAULT_LOG_CHUNK_BLOCKS,
     maximumPagesPerSource: input.maximumPagesPerSource ?? DEFAULT_HISTORY_MAX_PAGES,
     forceRecentBlockRecheck: input.forceRecentBlockRecheck ?? true,
+    maximumRuntimeMs,
+    ...(input.candidateIds ? { candidateIds: [...new Set(input.candidateIds)] } : {}),
+    ...(input.resumeToken ? { resumeToken: input.resumeToken } : {}),
+    ...(input.maximumPoolsPerRun !== undefined ? { maximumPoolsPerRun: input.maximumPoolsPerRun } : {}),
   };
 }
 
@@ -3412,13 +4224,26 @@ function summarizeCandidateSync(input: {
   }
   const timestamps = [...incoming.values()].map((record) => record.timestamp);
   const completeReports = input.reports.filter((report) =>
+    report.rangeFullyScanned ||
     report.boundaryCrossed ||
     report.truncationReason === "NONE" ||
     report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
     report.truncationReason === "STALE_POOL",
   );
+  const requiredReports = input.reports.filter((report) =>
+    report.classification === "REQUIRED_PRICE_POOL" || report.classification === undefined,
+  );
+  const completenessReports = requiredReports.length > 0 ? requiredReports : input.reports;
+  const completeRequired = completenessReports.filter((report) =>
+    report.rangeFullyScanned ||
+    report.boundaryCrossed ||
+    report.truncationReason === "NONE" ||
+    report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+    report.truncationReason === "STALE_POOL"
+  );
   const unresolved = input.reports
     .filter((report) =>
+      (report.classification === "REQUIRED_PRICE_POOL" || report.classification === undefined) &&
       report.truncationReason !== "NONE" &&
       report.truncationReason !== "SPARSE_ACTUAL_TRADING" &&
       report.truncationReason !== "STALE_POOL",
@@ -3431,12 +4256,24 @@ function summarizeCandidateSync(input: {
     duplicateRecordsIgnored: duplicates,
     earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
     latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
-    boundaryCrossed: input.reports.length > 0 && input.reports.every((report) =>
+    boundaryCrossed: completenessReports.length > 0 && completenessReports.every((report) =>
+      report.rangeFullyScanned ||
       report.boundaryCrossed ||
       report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
       report.truncationReason === "STALE_POOL",
     ),
-    sourceCompletenessPercent: input.reports.length > 0
+    sourceCompletenessPercent: completenessReports.length > 0
+      ? round(completeRequired.length / completenessReports.length * 100, 4)
+      : 0,
+    retrievalCompletenessPercent: completenessReports.length > 0
+      ? round(completeRequired.length / completenessReports.length * 100, 4)
+      : 0,
+    signalWindowCompletenessPercent: completenessReports.length > 0
+      ? round(completenessReports.filter((report) =>
+        (report.signalWindowCompletenessPercent ?? 0) >= 95
+      ).length / completenessReports.length * 100, 4)
+      : 0,
+    sevenDayCompletenessPercent: input.reports.length > 0
       ? round(completeReports.length / input.reports.length * 100, 4)
       : 0,
     unresolvedGaps: unresolved,
@@ -3452,19 +4289,28 @@ async function syncHistoryForCandidate(input: {
   endTimestamp: number;
   maximumBlocksPerChunk: number;
   maximumPagesPerSource: number;
-  lookbackMinutes: number;
   fetchedAt: string;
+  existingStore: RotationHistoryFile;
+  deadlineMs?: number;
+  maximumPoolsPerRun?: number;
+  resumeCheckpoint?: RotationHistorySyncCheckpoint | null;
 }): Promise<{
   records: RotationHistoryRecord[];
   reports: RotationHistoryPoolSyncStatus[];
   errors: string[];
+  partial: boolean;
+  nextPoolIndex: number;
+  attemptedPools: number;
 }> {
   const errors: string[] = [];
-  const { pairs, errors: pairErrors } = await fetchPairsForCandidate(input.config, input.candidate);
+  const {
+    pools: sourcePools,
+    errors: pairErrors,
+    partial: sourceDiscoveryPartial,
+  } = await fetchSourcePoolsForCandidate(input.config, input.candidate, input.deadlineMs);
   errors.push(...pairErrors);
-  const pairIds = selectedSwapPairIds(input.candidate, pairs);
-  const pairMap = new Map(pairs.map((pair) => [pair.id.toLowerCase(), pair]));
-  if (pairIds.length === 0) {
+  const selectedPools = selectedSourcePools(input.candidate, sourcePools);
+  if (selectedPools.length === 0) {
     return {
       records: [],
       errors: [...errors, "missing pool discovery"],
@@ -3488,33 +4334,70 @@ async function syncHistoryForCandidate(input: {
         historicalPaginationReliable: false,
         fallbackUsed: "NONE",
       }],
+      partial: sourceDiscoveryPartial,
+      nextPoolIndex: 0,
+      attemptedPools: 0,
     };
   }
-  let paged: Awaited<ReturnType<typeof fetchPairSwapsPaginated>>;
-  try {
-    paged = await fetchPairSwapsPaginated({
-      config: input.config,
-      candidateId: input.candidate.candidateId,
-      pairIds,
-      startTimestamp: input.startTimestamp,
-      endTimestamp: input.endTimestamp,
-      maxPagesPerPair: input.maximumPagesPerSource,
-      pageSize: DEFAULT_HISTORY_PAGE_SIZE,
-    });
-    errors.push(...paged.errors);
-  } catch (err) {
-    errors.push(err instanceof Error ? err.message : String(err));
-    paged = {
-      swaps: [],
-      pageCount: 0,
-      truncated: true,
-      errors,
-      pairsUsed: pairIds,
-      poolReports: pairIds.map((pairId) => ({
+  const records: RotationHistoryRecord[] = [];
+  let fallbackRecords: RotationHistoryRecord[] = [];
+  const reports: RotationHistoryPoolSyncStatus[] = [];
+  const currentCandidateIndex = EUSDC_ROTATION_CANDIDATES.findIndex((row) =>
+    row.candidateId === input.candidate.candidateId
+  );
+  const startPoolIndex = input.resumeCheckpoint?.sourceCursor?.candidateIndex === currentCandidateIndex
+    ? input.resumeCheckpoint.sourceCursor.poolIndex
+    : 0;
+  let partial = sourceDiscoveryPartial;
+  let attemptedPools = 0;
+  let nextPoolIndex = startPoolIndex;
+  const existingAnchors = observationsFromHistory(
+    recordsForCandidate(input.existingStore, getRotationCandidate("PLS"), input.startTimestamp, input.endTimestamp),
+  ).filter((obs) => obs.priceEusdc > 0);
+
+  for (let poolIndex = startPoolIndex; poolIndex < selectedPools.length; poolIndex += 1) {
+    if (partial) break;
+    if (input.maximumPoolsPerRun !== undefined && attemptedPools >= input.maximumPoolsPerRun) {
+      partial = true;
+      nextPoolIndex = poolIndex;
+      break;
+    }
+    if (historyRuntimeDeadlineReached(input.deadlineMs)) {
+      partial = true;
+      nextPoolIndex = poolIndex;
+      break;
+    }
+    const sourcePool = selectedPools[poolIndex]!;
+    attemptedPools += 1;
+    let paged: Awaited<ReturnType<typeof fetchPairSwapsPaginated>>;
+    try {
+      paged = await fetchPairSwapsPaginated({
+        config: input.config,
         candidateId: input.candidate.candidateId,
-        poolAddress: pairId.toLowerCase() as `0x${string}`,
-        sourceEndpoint: input.config.pulseXSubgraphV2,
-        queryType: "PulseX V2 swaps(pair, first, skip)",
+        sourcePools: [sourcePool],
+        startTimestamp: input.startTimestamp,
+        endTimestamp: input.endTimestamp,
+        maxPagesPerPair: input.maximumPagesPerSource,
+        pageSize: DEFAULT_HISTORY_PAGE_SIZE,
+        deadlineMs: input.deadlineMs,
+      });
+      errors.push(...paged.errors);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(message);
+      reports.push({
+        candidateId: input.candidate.candidateId,
+        poolAddress: sourcePool.pair.id.toLowerCase() as `0x${string}`,
+        token0: pairTokenAddress(sourcePool.pair, 0),
+        token1: pairTokenAddress(sourcePool.pair, 1),
+        token0Decimals: pairTokenDecimals(sourcePool.pair, sourcePool.pair.token0.id, 18),
+        token1Decimals: pairTokenDecimals(sourcePool.pair, sourcePool.pair.token1.id, 18),
+        factoryAddress: sourcePool.factoryAddress,
+        protocol: sourcePool.protocol,
+        sourceVersion: sourcePool.sourceVersion,
+        eventAdapter: sourcePool.eventAdapter,
+        sourceEndpoint: sourcePool.subgraphEndpoint,
+        queryType: `${sourcePool.protocol} swaps(pair, first, skip)`,
         pageSize: DEFAULT_HISTORY_PAGE_SIZE,
         maximumPageCount: input.maximumPagesPerSource,
         cursorMechanism: "skip",
@@ -3529,71 +4412,133 @@ async function syncHistoryForCandidate(input: {
         sourceRepeatsOrCapsRecords: false,
         historicalPaginationReliable: false,
         fallbackUsed: "NONE",
-        error: err instanceof Error ? err.message : String(err),
-      })),
-    };
-  }
-  const anchorObservations = buildAnchorObservations(paged.swaps);
-  const records: RotationHistoryRecord[] = [];
-  let fallbackRecords: RotationHistoryRecord[] = [];
-  let fallbackReports = paged.poolReports;
-  for (const [index, swap] of paged.swaps.entries()) {
-    const pair = swap.pair?.id ? pairMap.get(swap.pair.id.toLowerCase()) : undefined;
-    if (!pair) continue;
-    const observation = priceObservationFromSwap({
-      swap,
-      candidate: input.candidate,
-      anchorObservations,
-      maxAnchorAgeSeconds: 15 * 60,
-    });
-    if (!observation) continue;
-    records.push(historyRecordFromSubgraphSwap({
-      chainId: input.chainId,
-      candidate: input.candidate,
-      pair,
-      swap,
-      observation,
-      fetchedAt: input.fetchedAt,
-      fallbackLogIndex: index,
-    }));
-  }
-  for (const report of paged.poolReports) {
-    if (!shouldUseRpcLogFallback(report)) continue;
-    const pair = pairMap.get(report.poolAddress.toLowerCase());
-    if (!pair) continue;
-    try {
-      const fallback = await fetchV2SwapLogsFallback({
-        config: input.config,
-        candidate: input.candidate,
-        pair,
-        startTimestamp: input.startTimestamp,
-        lookbackMinutes: input.lookbackMinutes,
-        maximumBlocksPerChunk: input.maximumBlocksPerChunk,
-        fetchedAt: input.fetchedAt,
+        contributesToConsolidatedPrice: sourcePool.contributesToConsolidatedPrice,
+        classification: sourcePool.classification,
+        liquidityEusdc: sourcePool.liquidityEusdc,
+        recentVolumeEusdc: sourcePool.recentVolumeEusdc,
+        exclusionReason: sourcePool.exclusionReason,
+        exactRemainingTruncationCause: "SOURCE_ERROR",
+        error: message,
+        errors: [message],
       });
-      fallbackRecords = fallbackRecords.concat(fallback.records);
-      errors.push(...fallback.errors);
-      fallbackReports = fallbackReports.map((row) =>
-        sameAddress(row.poolAddress, report.poolAddress)
-          ? { ...row, ...fallback.reportPatch, historicalPaginationReliable: fallback.errors.length === 0 }
-          : row,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push(message);
-      fallbackReports = fallbackReports.map((row) =>
-        sameAddress(row.poolAddress, report.poolAddress)
-          ? { ...row, fallbackUsed: "RPC_ETH_GETLOGS", truncationReason: "RPC_LOG_RANGE_LIMITATION", error: message }
-          : row,
-      );
+      continue;
     }
+    const subgraphPartial = paged.poolReports.some((report) => report.truncationReason === "PARTIAL_PROGRESS");
+
+    const poolSubgraphRecords: RotationHistoryRecord[] = [];
+    const anchorObservations = [
+      ...existingAnchors,
+      ...buildAnchorObservations(paged.swaps).map((obs) => ({
+        ...obs,
+        poolAddress: sourcePool.pair.id.toLowerCase() as `0x${string}`,
+      })),
+      ...observationsFromHistory(records.filter((record) => record.candidateId === "PLS")),
+    ];
+    for (const row of paged.poolSwaps) {
+      const rowSourcePool = row.sourcePool ?? sourcePool;
+      for (const [index, swap] of row.swaps.entries()) {
+        const observation = priceObservationFromSwap({
+          swap,
+          candidate: input.candidate,
+          anchorObservations,
+          maxAnchorAgeSeconds: ANCHOR_MAX_AGE_SECONDS,
+        });
+        if (!observation) continue;
+        const record = historyRecordFromSubgraphSwap({
+          chainId: input.chainId,
+          candidate: input.candidate,
+          pair: rowSourcePool.pair,
+          sourcePool: rowSourcePool,
+          swap,
+          observation,
+          fetchedAt: input.fetchedAt,
+          fallbackLogIndex: index,
+        });
+        records.push(record);
+        poolSubgraphRecords.push(record);
+      }
+    }
+    let fallbackReports = paged.poolReports;
+    if (subgraphPartial) {
+      partial = true;
+      nextPoolIndex = poolIndex;
+    }
+    for (const report of paged.poolReports) {
+      if (partial && report.truncationReason === "PARTIAL_PROGRESS") continue;
+      if (!shouldUseRpcLogFallback(report)) continue;
+      if (sourcePool.classification === "EXCLUDED_POOL" || sourcePool.eventAdapter !== "PULSEX_V2_STYLE_SWAP") continue;
+      try {
+        const fallback = await fetchV2SwapLogsFallback({
+          config: input.config,
+          candidate: input.candidate,
+          sourcePool,
+          startTimestamp: input.startTimestamp,
+          endTimestamp: input.endTimestamp,
+          maximumBlocksPerChunk: input.maximumBlocksPerChunk,
+          fetchedAt: input.fetchedAt,
+          anchorObservations: [
+            ...existingAnchors,
+            ...observationsFromHistory(records.filter((record) => record.candidateId === "PLS")),
+          ],
+          resumeFromBlock:
+            input.resumeCheckpoint?.sourceCursor?.candidateIndex === currentCandidateIndex &&
+              input.resumeCheckpoint.sourceCursor.poolIndex === poolIndex &&
+              input.resumeCheckpoint.nextBlock
+              ? BigInt(input.resumeCheckpoint.nextBlock)
+              : undefined,
+          deadlineMs: input.deadlineMs,
+        });
+        fallbackRecords = fallbackRecords.concat(fallback.records);
+        errors.push(...fallback.errors);
+        if (fallback.partial) {
+          partial = true;
+          nextPoolIndex = poolIndex;
+        }
+        fallbackReports = fallbackReports.map((row) =>
+          sameAddress(row.poolAddress, report.poolAddress)
+            ? { ...row, ...fallback.reportPatch, historicalPaginationReliable: fallback.errors.length === 0 }
+            : row,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(message);
+        fallbackReports = fallbackReports.map((row) =>
+          sameAddress(row.poolAddress, report.poolAddress)
+            ? { ...row, fallbackUsed: "RPC_ETH_GETLOGS", truncationReason: "RPC_LOG_RANGE_LIMITATION", error: message }
+            : row,
+        );
+      }
+      if (partial) break;
+    }
+    reports.push(...fallbackReports.map((report) => {
+      const poolRecords = [...poolSubgraphRecords, ...fallbackRecords].filter((record) =>
+        sameAddress(record.poolAddress, report.poolAddress)
+      );
+      return {
+        ...report,
+        rpcRecordsRetrieved: report.rpcRecordsRetrieved ?? report.fallbackRecords ?? 0,
+        firstObservedTradeTimestamp: report.firstObservedTradeTimestamp ?? report.oldestReturnedRecord,
+        lastObservedTradeTimestamp: report.lastObservedTradeTimestamp ?? report.newestReturnedRecord,
+        retrievalCompletenessPercent:
+          report.classification === "REQUIRED_PRICE_POOL"
+            ? report.rangeFullyScanned || report.boundaryCrossed || report.truncationReason === "NONE" ? 100 : 0
+            : 100,
+        signalWindowCompletenessPercent:
+          poolRecords.some((record) => record.timestamp >= input.endTimestamp - 24 * 60 * 60) ? 100 : 0,
+      };
+    }));
+    if (partial) break;
+    nextPoolIndex = poolIndex + 1;
   }
   const byKey = new Map<string, RotationHistoryRecord>();
   for (const record of [...records, ...fallbackRecords]) byKey.set(historyRecordKey(record), record);
   return {
     records: [...byKey.values()],
-    reports: fallbackReports,
+    reports,
     errors,
+    partial,
+    nextPoolIndex,
+    attemptedPools,
   };
 }
 
@@ -3603,6 +4548,7 @@ export async function runEusdcRotationHistorySync(
 ): Promise<RotationHistorySyncResult> {
   const normalized = normalizeHistorySyncInput(input);
   const nowMs = Date.now();
+  const deadlineMs = nowMs + normalized.maximumRuntimeMs;
   const endTimestamp = Math.floor(nowMs / 1000);
   const startTimestamp = endTimestamp - normalized.lookbackMinutes * 60;
   const requestedStartTime = new Date(startTimestamp * 1000).toISOString();
@@ -3621,6 +4567,7 @@ export async function runEusdcRotationHistorySync(
       ok: okValue,
       code,
       reason,
+      maximumRuntimeMs: normalized.maximumRuntimeMs,
       lookbackMinutes: normalized.lookbackMinutes,
       requestedStartTime,
       requestedEndTime,
@@ -3657,18 +4604,110 @@ export async function runEusdcRotationHistorySync(
     try {
       const lock = acquireHistoryWriteLock(config);
       release = lock.release;
-      const chainId = await getChainId(config);
+      if (historyRuntimeDeadlineReached(deadlineMs)) {
+        const existing = readRotationHistoryStore(config);
+        const historyStoreFingerprint = rotationHistoryFingerprint(existing);
+        const resumeToken = fingerprint({
+          requestedStartTime,
+          requestedEndTime,
+          nextCandidateIndex: 0,
+          nextPoolIndex: 0,
+          historyStoreFingerprint,
+        });
+        const checkpointUpdatedAt = new Date().toISOString();
+        writeHistorySyncCheckpoint(config, {
+          schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
+          resumeToken,
+          requestedWindow: {
+            startTime: requestedStartTime,
+            endTime: requestedEndTime,
+            lookbackMinutes: normalized.lookbackMinutes,
+          },
+          candidateId: EUSDC_ROTATION_CANDIDATES[0]?.candidateId,
+          sourceCursor: {
+            candidateIndex: 0,
+            poolIndex: 0,
+          },
+          completedBlockRanges: [],
+          completedPools: [],
+          storeFingerprintBeforeRun: historyStoreFingerprint,
+          updatedAt: checkpointUpdatedAt,
+        });
+        const released = release();
+        release = null;
+        const diagnostics = historyPathDiagnostics(config, released);
+        const timestamps = existing.records.map((record) => record.timestamp);
+        return {
+          ok: true,
+          code: "PARTIAL_PROGRESS",
+          reason: "maximumRuntimeMs reached before public history sync work started",
+          resumeToken,
+          checkpointPath: historySyncCheckpointPath(config),
+          checkpointUpdatedAt,
+          maximumRuntimeMs: normalized.maximumRuntimeMs,
+          lookbackMinutes: normalized.lookbackMinutes,
+          requestedStartTime,
+          requestedEndTime,
+          recordsAdded: 0,
+          recordsUpdated: 0,
+          duplicateRecordsIgnored: 0,
+          earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
+          latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
+          sourceCompleteness: [],
+          unresolvedGaps: [],
+          repositoryRoot: diagnostics.repositoryRoot,
+          currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+          historyStoreDirectory: diagnostics.historyStoreDirectory,
+          historyStorePath: diagnostics.historyStorePath,
+          historyStorePathSource: diagnostics.historyStorePathSource,
+          pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+          legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+          legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+          legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+          activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+          crossProcessLockStatus: diagnostics.crossProcessLockStatus,
+          historyStoreFingerprint,
+          quoteCallCount: 0,
+          noPiteasQuoteUsed: true,
+          noWalletWrite: true,
+          noLiveTransaction: true,
+        };
+      }
+      const runtimeConfig = boundedHistoryRequestConfig(config, deadlineMs);
+      const chainId = await getChainId(runtimeConfig);
       let latestBlockNumber: bigint | undefined;
       try {
-        latestBlockNumber = await getPublicClient(config).getBlockNumber();
+        latestBlockNumber = await getPublicClient(boundedHistoryRequestConfig(config, deadlineMs)).getBlockNumber();
       } catch {
         latestBlockNumber = undefined;
       }
       const existing = readRotationHistoryStore(config);
+      const checkpointBefore = readHistorySyncCheckpoint(config);
+      const resumeCheckpoint =
+        normalized.resumeToken && checkpointBefore?.resumeToken === normalized.resumeToken
+          ? checkpointBefore
+          : null;
+      const candidateSet = normalized.candidateIds
+        ? new Set(normalized.candidateIds)
+        : null;
+      const candidates = EUSDC_ROTATION_CANDIDATES
+        .map((candidate, index) => ({ candidate, index }))
+        .filter((row) => candidateSet === null || candidateSet.has(row.candidate.candidateId));
+      const resumeCandidateIndex = resumeCheckpoint?.sourceCursor?.candidateIndex ?? 0;
       const incoming: RotationHistoryRecord[] = [];
       const sourceCompleteness: RotationHistoryCandidateSyncStatus[] = [];
       const unresolvedGaps: string[] = [];
-      for (const candidate of EUSDC_ROTATION_CANDIDATES) {
+      let partial = false;
+      let nextCandidateIndex = 0;
+      let nextPoolIndex = 0;
+      for (const { candidate, index: candidateIndex } of candidates) {
+        if (candidateIndex < resumeCandidateIndex) continue;
+        if (historyRuntimeDeadlineReached(deadlineMs)) {
+          partial = true;
+          nextCandidateIndex = candidateIndex;
+          nextPoolIndex = 0;
+          break;
+        }
         const synced = await syncHistoryForCandidate({
           config,
           chainId,
@@ -3677,8 +4716,11 @@ export async function runEusdcRotationHistorySync(
           endTimestamp,
           maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
           maximumPagesPerSource: normalized.maximumPagesPerSource,
-          lookbackMinutes: normalized.lookbackMinutes,
           fetchedAt,
+          existingStore: existing,
+          deadlineMs,
+          maximumPoolsPerRun: normalized.maximumPoolsPerRun,
+          resumeCheckpoint,
         });
         incoming.push(...synced.records);
         const summary = summarizeCandidateSync({
@@ -3694,6 +4736,14 @@ export async function runEusdcRotationHistorySync(
         sourceCompleteness.push(summary);
         unresolvedGaps.push(...summary.unresolvedGaps.map((gap) => `${candidate.candidateId}: ${gap}`));
         for (const err of synced.errors) unresolvedGaps.push(`${candidate.candidateId}: ${err}`);
+        if (synced.partial) {
+          partial = true;
+          nextCandidateIndex = candidateIndex;
+          nextPoolIndex = synced.nextPoolIndex;
+          break;
+        }
+        nextCandidateIndex = candidateIndex + 1;
+        nextPoolIndex = 0;
       }
       const merged = mergeRotationHistoryRecords({
         existing: existing.records,
@@ -3720,12 +4770,84 @@ export async function runEusdcRotationHistorySync(
       const historyStoreFingerprint = rotationHistoryFingerprint(next);
       next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
       writeRotationHistoryStore(config, next);
+      let resumeToken: string | undefined;
+      let checkpointUpdatedAt: string | undefined;
+      if (partial) {
+        const pendingCandidate = sourceCompleteness.find((candidate) =>
+          candidate.candidateId === EUSDC_ROTATION_CANDIDATES[nextCandidateIndex]?.candidateId
+        );
+        const pendingPool =
+          pendingCandidate?.pools[nextPoolIndex] ??
+          pendingCandidate?.pools.find((pool) => pool.truncationReason === "PARTIAL_PROGRESS") ??
+          pendingCandidate?.pools.find((pool) => pool.nextResumeBlock) ??
+          null;
+        resumeToken = fingerprint({
+          requestedStartTime,
+          requestedEndTime,
+          nextCandidateIndex,
+          nextPoolIndex,
+          historyStoreFingerprint,
+        });
+        checkpointUpdatedAt = new Date().toISOString();
+        writeHistorySyncCheckpoint(config, {
+          schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
+          resumeToken,
+          requestedWindow: {
+            startTime: requestedStartTime,
+            endTime: requestedEndTime,
+            lookbackMinutes: normalized.lookbackMinutes,
+          },
+          candidateId: EUSDC_ROTATION_CANDIDATES[nextCandidateIndex]?.candidateId,
+          ...(pendingPool ? { poolAddress: pendingPool.poolAddress } : {}),
+          ...(pendingPool?.nextResumeBlock ? { nextBlock: pendingPool.nextResumeBlock } : {}),
+          sourceCursor: {
+            candidateIndex: nextCandidateIndex,
+            poolIndex: nextPoolIndex,
+          },
+          completedBlockRanges: [
+            ...(resumeCheckpoint?.completedBlockRanges ?? []),
+            ...sourceCompleteness.flatMap((candidate) =>
+              candidate.pools
+                .filter((pool) => pool.scannedFromBlock && pool.scannedToBlock)
+                .map((pool) => ({
+                  candidateId: candidate.candidateId,
+                  poolAddress: pool.poolAddress,
+                  sourceVersion: pool.sourceVersion ?? ("UNKNOWN" as RotationHistorySourceVersion),
+                  fromBlock: String(pool.scannedFromBlock),
+                  toBlock: String(pool.scannedToBlock),
+                })),
+            ),
+          ],
+          completedPools: [
+            ...(resumeCheckpoint?.completedPools ?? []),
+            ...sourceCompleteness.flatMap((candidate) =>
+              candidate.pools
+                .filter((pool) => pool.rangeFullyScanned || pool.truncationReason === "NONE")
+                .map((pool) => ({
+                  candidateId: candidate.candidateId,
+                  poolAddress: pool.poolAddress,
+                  sourceVersion: pool.sourceVersion ?? ("UNKNOWN" as RotationHistorySourceVersion),
+                })),
+            ),
+          ],
+          storeFingerprintBeforeRun: rotationHistoryFingerprint(existing),
+          updatedAt: checkpointUpdatedAt,
+        });
+      } else {
+        clearHistorySyncCheckpoint(config);
+      }
       const released = release();
       release = null;
       const diagnostics = historyPathDiagnostics(config, released);
       const timestamps = next.records.map((record) => record.timestamp);
       return {
         ok: true,
+        code: partial ? "PARTIAL_PROGRESS" : "COMPLETE",
+        ...(partial ? { reason: "maximumRuntimeMs reached before all public history pools completed" } : {}),
+        ...(resumeToken ? { resumeToken } : {}),
+        checkpointPath: historySyncCheckpointPath(config),
+        ...(checkpointUpdatedAt ? { checkpointUpdatedAt } : {}),
+        maximumRuntimeMs: normalized.maximumRuntimeMs,
         lookbackMinutes: normalized.lookbackMinutes,
         requestedStartTime,
         requestedEndTime,
@@ -5528,6 +6650,10 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
       maximumBlocksPerChunk: z.number().int().positive().optional().default(DEFAULT_LOG_CHUNK_BLOCKS),
       maximumPagesPerSource: z.number().int().positive().optional().default(DEFAULT_HISTORY_MAX_PAGES),
       forceRecentBlockRecheck: z.boolean().optional().default(true),
+      maximumRuntimeMs: z.number().int().positive().max(MAX_HISTORY_MAX_RUNTIME_MS).optional().default(DEFAULT_HISTORY_MAX_RUNTIME_MS),
+      candidateIds: z.array(candidateIdSchema).optional(),
+      resumeToken: z.string().optional(),
+      maximumPoolsPerRun: z.number().int().positive().optional(),
     },
     handler: async (args, cfg) =>
       ok(
@@ -5537,6 +6663,10 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
             maximumBlocksPerChunk: args.maximumBlocksPerChunk as number | undefined,
             maximumPagesPerSource: args.maximumPagesPerSource as number | undefined,
             forceRecentBlockRecheck: args.forceRecentBlockRecheck as boolean | undefined,
+            maximumRuntimeMs: args.maximumRuntimeMs as number | undefined,
+            candidateIds: args.candidateIds as RotationCandidateId[] | undefined,
+            resumeToken: args.resumeToken as string | undefined,
+            maximumPoolsPerRun: args.maximumPoolsPerRun as number | undefined,
           }),
         ),
       ),

@@ -20,6 +20,16 @@ eusdc_rotation_scan
 
 `eusdc_rotation_history_sync` backfills public market history into `data/eusdc-rotation-history/`. The store contains only normalized public chain data: chain id, candidate id, pool address, protocol, block/transaction/log identifiers, timestamp, token addresses, raw swap amounts, candidate/eUSDC price, eUSDC notional, source, and fetch timestamp. It must not contain wallet keys, wallet records, `.env.wallet` contents, credentials, signed transactions, approvals, proposals, or execution state.
 
+History sync is bounded and resumable. The sync input accepts `maximumRuntimeMs` (default `180000`, capped below the Codex host tool timeout), optional `candidateIds`, optional `maximumPoolsPerRun`, and optional `resumeToken`. If the runtime budget is nearly exhausted, the tool returns `PARTIAL_PROGRESS`, releases `market-history.lock`, writes any idempotently merged public records, and persists a public checkpoint at:
+
+```text
+<resolved history directory>/sync-checkpoint.json
+```
+
+The checkpoint contains only public metadata: schema version, requested window, candidate/pool cursor, next block when applicable, completed block ranges, source cursor, the pre-run store fingerprint, and update time. A later sync with the returned `resumeToken` resumes from the checkpoint instead of restarting completed work. There is no hidden continuation after the tool response ends.
+
+Existing public history records are preserved during sync. The retention window is applied to newly fetched records before insertion, but an older record already present in the authoritative store is not pruned or moved by routine synchronization.
+
 The default history store path is deterministic and repository-local:
 
 ```text
@@ -44,19 +54,29 @@ The lock contains only public metadata: PID, hostname, creation time, and resolv
 
 Each live metric carries a data-quality envelope: value, unit, source, source time, window start/end, sample count, page count, truncation state, coverage percentage, stale flag, confidence, and warnings. Units are explicit (`token_raw`, `token_human`, `eusdc`, `usd`, `percent`, `bps`, `count`, or `minutes`). The scanner must not label raw reserves or raw token quantities as USD/eUSDC liquidity.
 
-The history sync diagnoses each source by endpoint, query type, page size, maximum page count, cursor mechanism, oldest/newest returned record, requested time window, record counts, boundary status, truncation reason, repeated/capped cursor evidence, and pagination reliability. It distinguishes source row limits, pagination bugs, sparse actual trading, stale pools, missing pool discovery, failed block-time conversion, unsupported event ABIs, and RPC log-range limitations. When subgraph pagination cannot prove completeness, the sync can fall back to chunked `eth_getLogs` for supported V2-style swap events.
+The history sync discovers pools with source provenance. Pair records are carried as `{ pair, protocol, subgraphVersion, subgraphEndpoint, eventAdapter, factoryAddress }`, so a PulseX V1 pair is queried through the V1 subgraph and a PulseX V2 pair through the V2 subgraph. Deduplication retains both source identity and pool address; source disagreement is reported instead of silently overwritten.
+
+The history sync diagnoses each source by endpoint, protocol, event adapter, source version, query type, page size, maximum page count, cursor mechanism, oldest/newest returned record, requested time window, token addresses/decimals, record counts, boundary status, truncation reason, repeated/capped cursor evidence, and pagination reliability. It distinguishes source row limits, pagination bugs, sparse actual trading, stale pools, missing pool discovery, failed block-time conversion, unsupported event ABIs, and RPC log-range limitations. When subgraph pagination cannot prove completeness, the sync can fall back to chunked `eth_getLogs` for supported V2-style swap events on PulseX V1 and V2.
+
+Source-boundary proof is based on the queried block interval, not the timestamp of the oldest retained trade. Sync resolves the requested start/end timestamps to actual PulseChain blocks with cached `getBlock` reads and bounded binary search. Each RPC log record uses the actual block timestamp. A pool range is complete when `scannedFromBlock <= resolvedStartBlock`, `scannedToBlock >= resolvedEndBlock`, and no unresolved RPC range error exists. A pool can therefore be complete even when no swap occurs exactly at the requested start boundary.
+
+Supported price-history shapes are direct candidate/eUSDC, WPLS/eUSDC anchor, and candidate/WPLS anchored pricing. Candidate/WPLS RPC logs do not require eUSDC in the same pool: sync retrieves WPLS/eUSDC anchor observations, aligns by block number when possible, otherwise uses a bounded timestamp distance, rejects stale or missing anchors, and stores anchored RPC provenance plus anchor age.
 
 The scanner builds five-minute candles over the requested lookback from persisted public history when available. Swaps are deduplicated by chain id, transaction hash, and log index, sorted chronologically, converted into candidate/eUSDC observations, and aggregated into OHLCV candles. Direct candidate/eUSDC swaps are preferred. Candidate/WPLS prices are multiplied by historical WPLS/eUSDC anchor observations only when the anchor is within a bounded timestamp window; stale anchors are rejected.
 
-Coverage has three separate meanings:
+Coverage has separate meanings:
 
 ```text
-sourceCompletenessPercent   = whether retrieval covered the requested source window
-activeTradeCandlePercent    = five-minute buckets with actual observed swaps
-priceContinuityPercent      = buckets with a usable bounded carry-forward price
+retrievalCompletenessPercent      = required price-pool retrieval over the requested source window
+signalWindowCompletenessPercent   = required price-pool retrieval over the current signal window
+sourceCompletenessPercent         = compatibility summary of required source retrieval
+activeTradeCandlePercent          = five-minute buckets with actual observed swaps
+priceContinuityPercent            = buckets with a usable bounded carry-forward price
 ```
 
 Sparse carry-forward may support chart continuity and elapsed-time calculations, but it is not counted as a trade, volume, new high, new low, dip, or rebound.
+
+Pools are classified as `REQUIRED_PRICE_POOL`, `OPTIONAL_DIAGNOSTIC_POOL`, or `EXCLUDED_POOL`. Required price pools must have supported bytecode/factory/adapter semantics, positive priced reserves, fresh activity, enough liquidity/volume contribution, and bounded price dispersion. Optional diagnostic pools and tiny/stale/unsupported pools are still reported, but they do not permanently poison candidate source completeness. Current 24-hour signal readiness is evaluated separately from seven-day reversion-statistics readiness.
 
 Pool liquidity is consolidated from human-unit reserves and independently derived token prices:
 
