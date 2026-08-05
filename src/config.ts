@@ -51,6 +51,7 @@ const envSchema = z.object({
   HTTP_TRANSPORT_PORT: z.string().optional(),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional(),
   HTTP_TIMEOUT_MS: z.string().optional(),
+  EUSDC_ROTATION_HISTORY_DIR: z.string().optional(),
   /**
    * Comma/newline-separated public-key pins:
    *   key-id=base64-spki-der
@@ -471,6 +472,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const agentWalletMultiprocStrict = parseBool(
     e.AGENT_WALLET_MULTIPROC_STRICT,
   );
+  const historyDirRaw = e.EUSDC_ROTATION_HISTORY_DIR;
+  const eusdcRotationHistoryDir =
+    historyDirRaw === undefined ? undefined : historyDirRaw.trim();
+  if (historyDirRaw !== undefined && eusdcRotationHistoryDir === "") {
+    throw new ConfigError(
+      "EUSDC_ROTATION_HISTORY_DIR must not be blank. Omit it to use the repository-local default.",
+    );
+  }
 
   // Loud, fail-closed posture reminder when signing is enabled
   if (agentWalletEnabled) {
@@ -501,6 +510,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     httpTransportPort,
     logLevel: (e.LOG_LEVEL ?? DEFAULT_LOG_LEVEL) as LogLevel,
     httpTimeoutMs,
+    ...(eusdcRotationHistoryDir ? { eusdcRotationHistoryDir } : {}),
     phiatTrustOperatorPublicKeys: parsePublicKeyPins(e.PHIAT_TRUST_OPERATOR_PUBLIC_KEYS),
     phiatTrustOperatorKeyRegistry: parseOperatorKeyRegistry(e.PHIAT_TRUST_OPERATOR_KEY_REGISTRY),
     phiatTrustRevocations: parseTrustRevocations(e.PHIAT_TRUST_REVOCATIONS),

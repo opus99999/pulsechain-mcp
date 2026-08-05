@@ -20,6 +20,26 @@ eusdc_rotation_scan
 
 `eusdc_rotation_history_sync` backfills public market history into `data/eusdc-rotation-history/`. The store contains only normalized public chain data: chain id, candidate id, pool address, protocol, block/transaction/log identifiers, timestamp, token addresses, raw swap amounts, candidate/eUSDC price, eUSDC notional, source, and fetch timestamp. It must not contain wallet keys, wallet records, `.env.wallet` contents, credentials, signed transactions, approvals, proposals, or execution state.
 
+The default history store path is deterministic and repository-local:
+
+```text
+<pulsechain-mcp repository root>/data/eusdc-rotation-history/market-history.json
+```
+
+The resolver derives the repository root from the rotation module location, so the path is the same when launched by direct CLI, Codex remote control, Codex CLI with `-C`, source execution, or compiled `dist` execution. It no longer depends on the terminal working directory. An optional non-secret `EUSDC_ROTATION_HISTORY_DIR` override may be used for tests or deliberately separate public stores, but it must be an absolute normalized path and must not be equal to or nested under `AGENT_WALLET_DIR`.
+
+Status and sync responses report path diagnostics: repository root, current working directory, active history directory/path, path source (`MODULE_ROOT_DEFAULT` or `CONFIG_OVERRIDE`), whether the active path matches the repository-local default, the legacy cwd-derived path, legacy store existence/count, active store count, and cross-process lock status. The legacy cwd-derived path is diagnostic only and is never used for normal history reads, writes, status, sync, or scans.
+
+If a nonempty legacy public store is discovered without a repository-local store, sync returns `LEGACY_PUBLIC_HISTORY_MIGRATION_REQUIRED` instead of silently migrating. If both stores are nonempty, sync returns `MULTIPLE_PUBLIC_HISTORY_STORES_REQUIRE_REVIEW` and preserves both files for review. When the repository-local store exists and the legacy store is empty or absent, the repository-local store remains authoritative.
+
+Sync writes are serialized by both an in-process lock keyed by the resolved absolute store path and a public filesystem lock at:
+
+```text
+<resolved history directory>/market-history.lock
+```
+
+The lock contains only public metadata: PID, hostname, creation time, and resolved store path. A live owner's lock is never removed. Stale lock removal requires bounded age plus dead local process evidence. Status and scans read completed JSON without obtaining the writer lock, and sync still uses atomic JSON replacement.
+
 `eusdc_rotation_scan` uses read-only evidence: the local public history store, PulseX V1/V2 subgraphs, pool reserve data, paginated pair swaps, token metadata, token balances, allowances, bytecode checks, and route-connectivity checks. It does not call Piteas during routine scans. Every completed scan returns all five candidates, including rejected rows with explicit reasons.
 
 Each live metric carries a data-quality envelope: value, unit, source, source time, window start/end, sample count, page count, truncation state, coverage percentage, stale flag, confidence, and warnings. Units are explicit (`token_raw`, `token_human`, `eusdc`, `usd`, `percent`, `bps`, `count`, or `minutes`). The scanner must not label raw reserves or raw token quantities as USD/eUSDC liquidity.

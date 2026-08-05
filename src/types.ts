@@ -75,6 +75,12 @@ export interface AppConfig {
   logLevel: LogLevel;
   httpTimeoutMs: number;
   /**
+   * Optional non-secret directory for public eUSDC rotation market history.
+   * When omitted, the rotation engine resolves a deterministic repository-local
+   * path from its module location instead of the launching process cwd.
+   */
+  eusdcRotationHistoryDir?: string;
+  /**
    * Public Ed25519 operator keys allowed to sign PHIAT execution trust manifests.
    * Values are base64-encoded SPKI public-key DER bytes. This must never contain
    * private keys or wallet secrets.

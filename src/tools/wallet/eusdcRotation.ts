@@ -1,5 +1,23 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { hostname } from "node:os";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   decodeEventLog,
   encodeFunctionData,
@@ -647,6 +665,40 @@ export interface RotationHistoryCandidateSyncStatus {
   pools: RotationHistoryPoolSyncStatus[];
 }
 
+export type RotationHistoryStorePathSource =
+  | "MODULE_ROOT_DEFAULT"
+  | "CONFIG_OVERRIDE";
+
+export type RotationHistoryStoreReviewCode =
+  | "OK"
+  | "LEGACY_PUBLIC_HISTORY_MIGRATION_REQUIRED"
+  | "MULTIPLE_PUBLIC_HISTORY_STORES_REQUIRE_REVIEW";
+
+export type RotationHistoryCrossProcessLockStatus =
+  | "not_checked"
+  | "free"
+  | "acquired"
+  | "released"
+  | "busy_live_owner"
+  | "busy_unverified_owner"
+  | "stale_removed";
+
+export interface RotationHistoryPathDiagnostics {
+  repositoryRoot: string;
+  currentWorkingDirectory: string;
+  historyStoreDirectory: string;
+  historyStorePath: string;
+  historyStorePathSource: RotationHistoryStorePathSource;
+  pathMatchesExpectedRepositoryLocalDefault: boolean;
+  legacyCwdDerivedStorePath: string;
+  legacyCwdDerivedStoreExists: boolean;
+  legacyStoreRecordCount: number;
+  activeStoreRecordCount: number;
+  repositoryLocalStoreRecordCount: number;
+  historyStoreReviewCode: RotationHistoryStoreReviewCode;
+  crossProcessLockStatus: RotationHistoryCrossProcessLockStatus;
+}
+
 export interface RotationHistoryFile {
   schemaVersion: 1;
   chainId: number;
@@ -670,6 +722,8 @@ export interface RotationHistorySyncInput {
 
 export interface RotationHistorySyncResult {
   ok: boolean;
+  code?: "HISTORY_SYNC_BUSY" | RotationHistoryStoreReviewCode;
+  reason?: string;
   lookbackMinutes: number;
   requestedStartTime: string;
   requestedEndTime: string;
@@ -680,7 +734,17 @@ export interface RotationHistorySyncResult {
   latestTimestamp: string | null;
   sourceCompleteness: RotationHistoryCandidateSyncStatus[];
   unresolvedGaps: string[];
+  repositoryRoot: string;
+  currentWorkingDirectory: string;
+  historyStoreDirectory: string;
   historyStorePath: string;
+  historyStorePathSource: RotationHistoryStorePathSource;
+  pathMatchesExpectedRepositoryLocalDefault: boolean;
+  legacyCwdDerivedStorePath: string;
+  legacyCwdDerivedStoreExists: boolean;
+  legacyStoreRecordCount: number;
+  activeStoreRecordCount: number;
+  crossProcessLockStatus: RotationHistoryCrossProcessLockStatus;
   historyStoreFingerprint: `0x${string}`;
   quoteCallCount: 0;
   noPiteasQuoteUsed: true;
@@ -705,10 +769,22 @@ export interface RotationHistoryCandidateStatus {
 
 export interface RotationHistoryStatusResult {
   ok: boolean;
+  code?: RotationHistoryStoreReviewCode;
+  reason?: string;
   checkedAt: string;
   lookbackMinutes: number;
   candidates: RotationHistoryCandidateStatus[];
+  repositoryRoot: string;
+  currentWorkingDirectory: string;
+  historyStoreDirectory: string;
   historyStorePath: string;
+  historyStorePathSource: RotationHistoryStorePathSource;
+  pathMatchesExpectedRepositoryLocalDefault: boolean;
+  legacyCwdDerivedStorePath: string;
+  legacyCwdDerivedStoreExists: boolean;
+  legacyStoreRecordCount: number;
+  activeStoreRecordCount: number;
+  crossProcessLockStatus: RotationHistoryCrossProcessLockStatus;
   historyStoreFingerprint: `0x${string}`;
   quoteCallCount: 0;
   noPiteasQuoteUsed: true;
@@ -1715,12 +1791,167 @@ export function computeScanEconomicFeasibility(input: {
   };
 }
 
-function historyStoreDir(): string {
-  return join(process.cwd(), "data", "eusdc-rotation-history");
+function pathKey(path: string): string {
+  return normalize(path).toLowerCase();
 }
 
-function historyStorePath(): string {
-  return join(historyStoreDir(), "market-history.json");
+function pathEquals(a: string, b: string): boolean {
+  return pathKey(a) === pathKey(b);
+}
+
+function pathInside(child: string, parent: string): boolean {
+  const rel = relative(normalize(parent), normalize(child));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function pathHasParentTraversal(raw: string): boolean {
+  return raw.split(/[\\/]+/).some((segment) => segment === "..");
+}
+
+function modulePathFromUrlOrPath(moduleUrlOrPath: string): string {
+  return moduleUrlOrPath.startsWith("file:")
+    ? fileURLToPath(moduleUrlOrPath)
+    : moduleUrlOrPath;
+}
+
+export function resolveEusdcRotationRepositoryRoot(input: {
+  moduleUrlOrPath?: string;
+} = {}): string {
+  const modulePath = modulePathFromUrlOrPath(input.moduleUrlOrPath ?? import.meta.url);
+  return normalize(resolve(dirname(modulePath), "..", "..", ".."));
+}
+
+function resolveHistoryOverride(config: AppConfig | undefined): string | null {
+  const raw = config?.eusdcRotationHistoryDir;
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    throw new Error("EUSDC_ROTATION_HISTORY_DIR must not be blank");
+  }
+  if (trimmed.includes("\0")) {
+    throw new Error("EUSDC_ROTATION_HISTORY_DIR contains an invalid null character");
+  }
+  if (pathHasParentTraversal(trimmed)) {
+    throw new Error("EUSDC_ROTATION_HISTORY_DIR must not contain parent-directory traversal");
+  }
+  if (!isAbsolute(trimmed)) {
+    throw new Error("EUSDC_ROTATION_HISTORY_DIR must be an absolute path");
+  }
+  const normalized = normalize(trimmed);
+  if (config?.agentWalletDir) {
+    const walletDir = isAbsolute(config.agentWalletDir)
+      ? normalize(config.agentWalletDir)
+      : normalize(resolve(config.agentWalletDir));
+    if (pathInside(normalized, walletDir)) {
+      throw new Error("EUSDC_ROTATION_HISTORY_DIR must not be equal to or nested under AGENT_WALLET_DIR");
+    }
+  }
+  return normalized;
+}
+
+export function resolveEusdcRotationHistoryDirectory(
+  config?: AppConfig,
+  input: { moduleUrlOrPath?: string } = {},
+): {
+  repositoryRoot: string;
+  directory: string;
+  source: RotationHistoryStorePathSource;
+  defaultDirectory: string;
+} {
+  const repositoryRoot = resolveEusdcRotationRepositoryRoot(input);
+  const defaultDirectory = normalize(join(repositoryRoot, "data", "eusdc-rotation-history"));
+  const override = resolveHistoryOverride(config);
+  return {
+    repositoryRoot,
+    directory: override ?? defaultDirectory,
+    source: override ? "CONFIG_OVERRIDE" : "MODULE_ROOT_DEFAULT",
+    defaultDirectory,
+  };
+}
+
+export function resolveEusdcRotationHistoryStorePath(
+  config?: AppConfig,
+  input: { moduleUrlOrPath?: string } = {},
+): {
+  repositoryRoot: string;
+  directory: string;
+  path: string;
+  source: RotationHistoryStorePathSource;
+  defaultPath: string;
+} {
+  const resolved = resolveEusdcRotationHistoryDirectory(config, input);
+  const defaultPath = normalize(join(resolved.defaultDirectory, "market-history.json"));
+  return {
+    repositoryRoot: resolved.repositoryRoot,
+    directory: resolved.directory,
+    path: normalize(join(resolved.directory, "market-history.json")),
+    source: resolved.source,
+    defaultPath,
+  };
+}
+
+export function legacyCwdDerivedHistoryStorePath(cwd: string = process.cwd()): string {
+  return normalize(join(cwd, "data", "eusdc-rotation-history", "market-history.json"));
+}
+
+function countHistoryRecordsAtPath(file: string): number {
+  if (!existsSync(file)) return 0;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RotationHistoryFile>;
+    return Array.isArray(parsed.records) ? parsed.records.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function historyStorePath(config?: AppConfig): string {
+  return resolveEusdcRotationHistoryStorePath(config).path;
+}
+
+function historyStoreDirectory(config?: AppConfig): string {
+  return resolveEusdcRotationHistoryStorePath(config).directory;
+}
+
+function historyStoreReviewCode(config?: AppConfig): RotationHistoryStoreReviewCode {
+  const resolved = resolveEusdcRotationHistoryStorePath(config);
+  if (resolved.source === "CONFIG_OVERRIDE") return "OK";
+  const activeCount = countHistoryRecordsAtPath(resolved.defaultPath);
+  const legacyPath = legacyCwdDerivedHistoryStorePath();
+  const legacyCount = pathEquals(legacyPath, resolved.defaultPath)
+    ? activeCount
+    : countHistoryRecordsAtPath(legacyPath);
+  if (activeCount === 0 && legacyCount > 0) return "LEGACY_PUBLIC_HISTORY_MIGRATION_REQUIRED";
+  if (activeCount > 0 && legacyCount > 0 && !pathEquals(legacyPath, resolved.defaultPath)) {
+    return "MULTIPLE_PUBLIC_HISTORY_STORES_REQUIRE_REVIEW";
+  }
+  return "OK";
+}
+
+function historyPathDiagnostics(
+  config?: AppConfig,
+  crossProcessLockStatus: RotationHistoryCrossProcessLockStatus = "not_checked",
+): RotationHistoryPathDiagnostics {
+  const resolved = resolveEusdcRotationHistoryStorePath(config);
+  const legacyPath = legacyCwdDerivedHistoryStorePath();
+  const activeStoreRecordCount = countHistoryRecordsAtPath(resolved.path);
+  const legacyStoreRecordCount = pathEquals(legacyPath, resolved.path)
+    ? activeStoreRecordCount
+    : countHistoryRecordsAtPath(legacyPath);
+  return {
+    repositoryRoot: resolved.repositoryRoot,
+    currentWorkingDirectory: process.cwd(),
+    historyStoreDirectory: resolved.directory,
+    historyStorePath: resolved.path,
+    historyStorePathSource: resolved.source,
+    pathMatchesExpectedRepositoryLocalDefault: pathEquals(resolved.path, resolved.defaultPath),
+    legacyCwdDerivedStorePath: legacyPath,
+    legacyCwdDerivedStoreExists: existsSync(legacyPath),
+    legacyStoreRecordCount,
+    activeStoreRecordCount,
+    repositoryLocalStoreRecordCount: countHistoryRecordsAtPath(resolved.defaultPath),
+    historyStoreReviewCode: historyStoreReviewCode(config),
+    crossProcessLockStatus,
+  };
 }
 
 function emptyHistoryStore(chainId: number = PULSECHAIN_CHAIN_ID): RotationHistoryFile {
@@ -1734,7 +1965,7 @@ function emptyHistoryStore(chainId: number = PULSECHAIN_CHAIN_ID): RotationHisto
 }
 
 export function readRotationHistoryStore(config?: AppConfig): RotationHistoryFile {
-  const file = historyStorePath();
+  const file = historyStorePath(config);
   if (!existsSync(file)) return emptyHistoryStore(config?.network === "testnet" ? 943 : PULSECHAIN_CHAIN_ID);
   const parsed = JSON.parse(readFileSync(file, "utf8")) as RotationHistoryFile;
   return {
@@ -1763,9 +1994,9 @@ function assertPublicHistoryRecord(record: RotationHistoryRecord): void {
   }
 }
 
-function writeRotationHistoryStore(store: RotationHistoryFile): void {
+function writeRotationHistoryStore(config: AppConfig, store: RotationHistoryFile): void {
   for (const record of store.records) assertPublicHistoryRecord(record);
-  const file = historyStorePath();
+  const file = historyStorePath(config);
   mkdirSync(dirname(file), { recursive: true });
   atomicWriteJson(file, { ...store, updatedAt: new Date().toISOString() }, { fsync: true });
 }
@@ -1851,6 +2082,7 @@ export function mergeRotationHistoryRecords(input: {
 }
 
 const historyLocks = new Map<string, Promise<unknown>>();
+const HISTORY_LOCK_STALE_MS = 30 * 60 * 1000;
 
 async function withHistoryLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prior = historyLocks.get(key) ?? Promise.resolve();
@@ -1862,6 +2094,135 @@ async function withHistoryLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   } finally {
     if (historyLocks.get(key) === stored) historyLocks.delete(key);
   }
+}
+
+interface RotationHistoryLockMetadata {
+  pid: number;
+  hostname: string;
+  createdAt: string;
+  historyStorePath: string;
+}
+
+class HistorySyncBusyError extends Error {
+  status: RotationHistoryCrossProcessLockStatus;
+  constructor(message: string, status: RotationHistoryCrossProcessLockStatus) {
+    super(message);
+    this.name = "HistorySyncBusyError";
+    this.status = status;
+  }
+}
+
+function processAppearsLive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "EPERM";
+  }
+}
+
+function readHistoryLockMetadata(lockPath: string): RotationHistoryLockMetadata | null {
+  try {
+    const parsed = JSON.parse(readFileSync(lockPath, "utf8")) as Partial<RotationHistoryLockMetadata>;
+    if (
+      typeof parsed.pid === "number" &&
+      typeof parsed.hostname === "string" &&
+      typeof parsed.createdAt === "string" &&
+      typeof parsed.historyStorePath === "string"
+    ) {
+      return {
+        pid: parsed.pid,
+        hostname: parsed.hostname,
+        createdAt: parsed.createdAt,
+        historyStorePath: parsed.historyStorePath,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function inspectHistoryWriteLock(
+  lockPath: string,
+): RotationHistoryCrossProcessLockStatus {
+  if (!existsSync(lockPath)) return "free";
+  const metadata = readHistoryLockMetadata(lockPath);
+  if (!metadata) return "busy_unverified_owner";
+  if (metadata.hostname === hostname() && processAppearsLive(metadata.pid)) {
+    return "busy_live_owner";
+  }
+  return "busy_unverified_owner";
+}
+
+function acquireHistoryWriteLock(config: AppConfig): {
+  lockPath: string;
+  acquiredStatus: RotationHistoryCrossProcessLockStatus;
+  release: () => RotationHistoryCrossProcessLockStatus;
+} {
+  const resolved = resolveEusdcRotationHistoryStorePath(config);
+  mkdirSync(resolved.directory, { recursive: true });
+  const lockPath = join(resolved.directory, "market-history.lock");
+  const metadata: RotationHistoryLockMetadata = {
+    pid: process.pid,
+    hostname: hostname(),
+    createdAt: new Date().toISOString(),
+    historyStorePath: resolved.path,
+  };
+  let removedStale = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(lockPath, "wx");
+      try {
+        writeFileSync(fd, JSON.stringify(metadata, null, 2));
+      } finally {
+        closeSync(fd);
+      }
+      return {
+        lockPath,
+        acquiredStatus: removedStale ? "stale_removed" : "acquired",
+        release: () => {
+          try {
+            const owned = readHistoryLockMetadata(lockPath);
+            if (owned?.pid === process.pid && owned.hostname === hostname()) {
+              unlinkSync(lockPath);
+            }
+          } catch {
+            // Best-effort cleanup; stale-lock handling is conservative.
+          }
+          return "released";
+        },
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw err;
+      const metadata = readHistoryLockMetadata(lockPath);
+      const metadataAgeMs = metadata ? Date.now() - Date.parse(metadata.createdAt) : Number.NaN;
+      const canRemoveStale =
+        metadata?.hostname === hostname() &&
+        Number.isFinite(metadataAgeMs) &&
+        metadataAgeMs > HISTORY_LOCK_STALE_MS &&
+        !processAppearsLive(metadata.pid);
+      if (canRemoveStale) {
+        try {
+          const stats = statSync(lockPath);
+          const ageMs = Date.now() - stats.mtimeMs;
+          if (ageMs > HISTORY_LOCK_STALE_MS) {
+            unlinkSync(lockPath);
+            removedStale = true;
+            continue;
+          }
+        } catch {
+          // Fall through to busy if the stale lock cannot be safely removed.
+        }
+      }
+      const lockStatus = inspectHistoryWriteLock(lockPath);
+      throw new HistorySyncBusyError("public history sync is already locked by another writer", lockStatus);
+    }
+  }
+  throw new HistorySyncBusyError("public history sync lock could not be acquired", "busy_unverified_owner");
 }
 
 function decimalHumanToRaw(value: string | number | undefined, decimals: number): string {
@@ -3247,90 +3608,159 @@ export async function runEusdcRotationHistorySync(
   const requestedStartTime = new Date(startTimestamp * 1000).toISOString();
   const requestedEndTime = new Date(endTimestamp * 1000).toISOString();
   const fetchedAt = new Date(nowMs).toISOString();
-  return withHistoryLock("market-history", async () => {
-    const chainId = await getChainId(config);
-    let latestBlockNumber: bigint | undefined;
-    try {
-      latestBlockNumber = await getPublicClient(config).getBlockNumber();
-    } catch {
-      latestBlockNumber = undefined;
-    }
-    const existing = readRotationHistoryStore(config);
-    const incoming: RotationHistoryRecord[] = [];
-    const sourceCompleteness: RotationHistoryCandidateSyncStatus[] = [];
-    const unresolvedGaps: string[] = [];
-    for (const candidate of EUSDC_ROTATION_CANDIDATES) {
-      const synced = await syncHistoryForCandidate({
-        config,
-        chainId,
-        candidate,
-        startTimestamp,
-        endTimestamp,
-        maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
-        maximumPagesPerSource: normalized.maximumPagesPerSource,
-        lookbackMinutes: normalized.lookbackMinutes,
-        fetchedAt,
-      });
-      incoming.push(...synced.records);
-      const summary = summarizeCandidateSync({
-        candidate,
-        reports: synced.reports,
-        records: synced.records,
-        existingRecords: existing.records.filter((record) => record.candidateId === candidate.candidateId),
-        requestedStartTime,
-        requestedEndTime,
-        forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
-        latestBlockNumber,
-      });
-      sourceCompleteness.push(summary);
-      unresolvedGaps.push(...summary.unresolvedGaps.map((gap) => `${candidate.candidateId}: ${gap}`));
-      for (const err of synced.errors) unresolvedGaps.push(`${candidate.candidateId}: ${err}`);
-    }
-    const merged = mergeRotationHistoryRecords({
-      existing: existing.records,
-      incoming,
-      nowMs,
-      retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
-      protectedStartTimestamp: startTimestamp,
-      forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
-      latestBlockNumber,
-    });
-    const next: RotationHistoryFile = {
-      schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
-      chainId,
-      updatedAt: fetchedAt,
-      retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
-      records: merged.records,
-      lastSync: {
-        requestedStartTime,
-        requestedEndTime,
-        historyStoreFingerprint: "0x0",
-        candidates: sourceCompleteness,
-      },
-    };
-    const historyStoreFingerprint = rotationHistoryFingerprint(next);
-    next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
-    writeRotationHistoryStore(next);
-    const timestamps = next.records.map((record) => record.timestamp);
+  const resolved = resolveEusdcRotationHistoryStorePath(config);
+  const reviewCode = historyStoreReviewCode(config);
+  const blockedResult = (
+    okValue: boolean,
+    code: RotationHistorySyncResult["code"],
+    reason: string,
+    lockStatus: RotationHistoryCrossProcessLockStatus = "not_checked",
+  ): RotationHistorySyncResult => {
+    const diagnostics = historyPathDiagnostics(config, lockStatus);
     return {
-      ok: true,
+      ok: okValue,
+      code,
+      reason,
       lookbackMinutes: normalized.lookbackMinutes,
       requestedStartTime,
       requestedEndTime,
-      recordsAdded: merged.added,
-      recordsUpdated: merged.updated,
-      duplicateRecordsIgnored: merged.duplicates,
-      earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
-      latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
-      sourceCompleteness,
-      unresolvedGaps: [...new Set(unresolvedGaps)],
-      historyStorePath: historyStorePath(),
-      historyStoreFingerprint,
+      recordsAdded: 0,
+      recordsUpdated: 0,
+      duplicateRecordsIgnored: 0,
+      earliestTimestamp: null,
+      latestTimestamp: null,
+      sourceCompleteness: [],
+      unresolvedGaps: [],
+      repositoryRoot: diagnostics.repositoryRoot,
+      currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+      historyStoreDirectory: diagnostics.historyStoreDirectory,
+      historyStorePath: diagnostics.historyStorePath,
+      historyStorePathSource: diagnostics.historyStorePathSource,
+      pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+      legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+      legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+      legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+      activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+      crossProcessLockStatus: diagnostics.crossProcessLockStatus,
+      historyStoreFingerprint: rotationHistoryFingerprint(readRotationHistoryStore(config)),
       quoteCallCount: 0,
       noPiteasQuoteUsed: true,
       noWalletWrite: true,
       noLiveTransaction: true,
     };
+  };
+  if (reviewCode !== "OK") {
+    return blockedResult(false, reviewCode, "public history store path review is required before sync");
+  }
+  return withHistoryLock(resolved.path, async () => {
+    let release: (() => RotationHistoryCrossProcessLockStatus) | null = null;
+    try {
+      const lock = acquireHistoryWriteLock(config);
+      release = lock.release;
+      const chainId = await getChainId(config);
+      let latestBlockNumber: bigint | undefined;
+      try {
+        latestBlockNumber = await getPublicClient(config).getBlockNumber();
+      } catch {
+        latestBlockNumber = undefined;
+      }
+      const existing = readRotationHistoryStore(config);
+      const incoming: RotationHistoryRecord[] = [];
+      const sourceCompleteness: RotationHistoryCandidateSyncStatus[] = [];
+      const unresolvedGaps: string[] = [];
+      for (const candidate of EUSDC_ROTATION_CANDIDATES) {
+        const synced = await syncHistoryForCandidate({
+          config,
+          chainId,
+          candidate,
+          startTimestamp,
+          endTimestamp,
+          maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
+          maximumPagesPerSource: normalized.maximumPagesPerSource,
+          lookbackMinutes: normalized.lookbackMinutes,
+          fetchedAt,
+        });
+        incoming.push(...synced.records);
+        const summary = summarizeCandidateSync({
+          candidate,
+          reports: synced.reports,
+          records: synced.records,
+          existingRecords: existing.records.filter((record) => record.candidateId === candidate.candidateId),
+          requestedStartTime,
+          requestedEndTime,
+          forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+          latestBlockNumber,
+        });
+        sourceCompleteness.push(summary);
+        unresolvedGaps.push(...summary.unresolvedGaps.map((gap) => `${candidate.candidateId}: ${gap}`));
+        for (const err of synced.errors) unresolvedGaps.push(`${candidate.candidateId}: ${err}`);
+      }
+      const merged = mergeRotationHistoryRecords({
+        existing: existing.records,
+        incoming,
+        nowMs,
+        retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+        protectedStartTimestamp: startTimestamp,
+        forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+        latestBlockNumber,
+      });
+      const next: RotationHistoryFile = {
+        schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
+        chainId,
+        updatedAt: fetchedAt,
+        retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+        records: merged.records,
+        lastSync: {
+          requestedStartTime,
+          requestedEndTime,
+          historyStoreFingerprint: "0x0",
+          candidates: sourceCompleteness,
+        },
+      };
+      const historyStoreFingerprint = rotationHistoryFingerprint(next);
+      next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
+      writeRotationHistoryStore(config, next);
+      const released = release();
+      release = null;
+      const diagnostics = historyPathDiagnostics(config, released);
+      const timestamps = next.records.map((record) => record.timestamp);
+      return {
+        ok: true,
+        lookbackMinutes: normalized.lookbackMinutes,
+        requestedStartTime,
+        requestedEndTime,
+        recordsAdded: merged.added,
+        recordsUpdated: merged.updated,
+        duplicateRecordsIgnored: merged.duplicates,
+        earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
+        latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
+        sourceCompleteness,
+        unresolvedGaps: [...new Set(unresolvedGaps)],
+        repositoryRoot: diagnostics.repositoryRoot,
+        currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+        historyStoreDirectory: diagnostics.historyStoreDirectory,
+        historyStorePath: diagnostics.historyStorePath,
+        historyStorePathSource: diagnostics.historyStorePathSource,
+        pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+        legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+        legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+        legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+        activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+        crossProcessLockStatus: diagnostics.crossProcessLockStatus,
+        historyStoreFingerprint,
+        quoteCallCount: 0,
+        noPiteasQuoteUsed: true,
+        noWalletWrite: true,
+        noLiveTransaction: true,
+      };
+    } catch (err) {
+      if (err instanceof HistorySyncBusyError) {
+        return blockedResult(false, "HISTORY_SYNC_BUSY", err.message, err.status);
+      }
+      throw err;
+    } finally {
+      if (release) release();
+    }
   });
 }
 
@@ -3395,16 +3825,24 @@ function statusForCandidateFromStore(input: {
 }
 
 export async function runEusdcRotationHistoryStatus(
-  _config: AppConfig,
+  config: AppConfig,
   input: { lookbackMinutes?: number; candleMinutes?: number } = {},
 ): Promise<RotationHistoryStatusResult> {
   const nowMs = Date.now();
   const lookbackMinutes = input.lookbackMinutes ?? DEFAULT_HISTORY_LOOKBACK_MINUTES;
   const candleMinutes = input.candleMinutes ?? DEFAULT_CANDLE_MINUTES;
-  const store = readRotationHistoryStore();
+  const lockPath = join(historyStoreDirectory(config), "market-history.lock");
+  const diagnostics = historyPathDiagnostics(config, inspectHistoryWriteLock(lockPath));
+  const store = readRotationHistoryStore(config);
   const historyStoreFingerprint = rotationHistoryFingerprint(store);
   return {
-    ok: true,
+    ok: diagnostics.historyStoreReviewCode === "OK",
+    ...(diagnostics.historyStoreReviewCode !== "OK"
+      ? {
+          code: diagnostics.historyStoreReviewCode,
+          reason: "public history store path review is required",
+        }
+      : {}),
     checkedAt: new Date(nowMs).toISOString(),
     lookbackMinutes,
     candidates: EUSDC_ROTATION_CANDIDATES.map((candidate) =>
@@ -3416,7 +3854,17 @@ export async function runEusdcRotationHistoryStatus(
         nowMs,
       }),
     ),
-    historyStorePath: historyStorePath(),
+    repositoryRoot: diagnostics.repositoryRoot,
+    currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+    historyStoreDirectory: diagnostics.historyStoreDirectory,
+    historyStorePath: diagnostics.historyStorePath,
+    historyStorePathSource: diagnostics.historyStorePathSource,
+    pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+    legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+    legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+    legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+    activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+    crossProcessLockStatus: diagnostics.crossProcessLockStatus,
     historyStoreFingerprint,
     quoteCallCount: 0,
     noPiteasQuoteUsed: true,
@@ -5057,6 +5505,7 @@ export function resetEusdcRotationForTests(): void {
   quoteCounter.count = 0;
   quoteWindowTimestamps.length = 0;
   lastScanByWallet.clear();
+  historyLocks.clear();
 }
 
 function humanTokenAmount(raw: string | undefined, decimals: number): string | undefined {

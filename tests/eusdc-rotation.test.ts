@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeFunctionData, type Hex } from "viem";
 import type { AppConfig } from "../src/types.js";
@@ -41,7 +41,13 @@ import {
   normalizeTokenAmount,
   priceObservationFromSwap,
   reduceLogChunkAfterRangeError,
+  legacyCwdDerivedHistoryStorePath,
+  readRotationHistoryStore,
   resetEusdcRotationForTests,
+  resolveEusdcRotationHistoryStorePath,
+  resolveEusdcRotationRepositoryRoot,
+  runEusdcRotationHistorySync,
+  runEusdcRotationHistoryStatus,
   runEusdcRotationProposeEntry,
   runEusdcRotationProposeExit,
   runEusdcRotationScan,
@@ -1311,6 +1317,102 @@ describe("eUSDC live scan hardening primitives", () => {
 });
 
 describe("eUSDC rotation public history sync primitives", () => {
+  function writeHistoryFixture(dir: string, records: RotationHistoryRecord[]): void {
+    mkdirSync(dir, { recursive: true });
+    atomicWriteJson(join(dir, "market-history.json"), {
+      schemaVersion: 1,
+      chainId: 369,
+      updatedAt: new Date(BASE_NOW).toISOString(),
+      retentionDays: 7,
+      records,
+    });
+  }
+
+  it("resolves the repository-local history store from module location independent of process cwd", () => {
+    const originalCwd = process.cwd();
+    const repoRoot = originalCwd;
+    const sourceModule = join(repoRoot, "src", "tools", "wallet", "eusdcRotation.ts");
+    const distModule = join(repoRoot, "dist", "tools", "wallet", "eusdcRotation.js");
+    const expectedStore = join(repoRoot, "data", "eusdc-rotation-history", "market-history.json");
+    const parent = join(repoRoot, "..");
+    const unrelated = mkdtempSync(join(tmpdir(), "eusdc-rotation-cwd-"));
+    tempDirs.push(unrelated);
+    try {
+      process.chdir(repoRoot);
+      expect(resolveEusdcRotationRepositoryRoot({ moduleUrlOrPath: sourceModule })).toBe(repoRoot);
+      expect(resolveEusdcRotationHistoryStorePath(undefined, { moduleUrlOrPath: sourceModule }).path).toBe(expectedStore);
+      process.chdir(parent);
+      expect(resolveEusdcRotationHistoryStorePath(undefined, { moduleUrlOrPath: sourceModule }).path).toBe(expectedStore);
+      process.chdir(unrelated);
+      expect(resolveEusdcRotationHistoryStorePath(undefined, { moduleUrlOrPath: sourceModule }).path).toBe(expectedStore);
+      expect(resolveEusdcRotationRepositoryRoot({ moduleUrlOrPath: distModule })).toBe(repoRoot);
+      expect(resolveEusdcRotationHistoryStorePath(undefined, { moduleUrlOrPath: distModule }).path).toBe(expectedStore);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it("normalizes slash variants and keeps the legacy cwd path diagnostic-only", async () => {
+    const cfg = testConfig();
+    const historyDir = join(mkdtempSync(join(tmpdir(), "eusdc-history-active-")), "history");
+    const legacyDir = join(process.cwd(), "data", "eusdc-rotation-history");
+    tempDirs.push(dirname(historyDir));
+    const activeRecord = historyRecord({ timestamp: Math.floor(BASE_NOW / 1000), logIndex: 10 });
+    const activeDirWithForwardSlashes = historyDir.replace(/\\/g, "/");
+    const withOverride: AppConfig = { ...cfg, eusdcRotationHistoryDir: activeDirWithForwardSlashes };
+    writeHistoryFixture(historyDir, [activeRecord]);
+    const resolved = resolveEusdcRotationHistoryStorePath(withOverride);
+    expect(resolved.path).toBe(join(historyDir, "market-history.json"));
+    expect(legacyCwdDerivedHistoryStorePath()).toBe(join(legacyDir, "market-history.json"));
+    const status = await runEusdcRotationHistoryStatus(withOverride, { lookbackMinutes: 1440, candleMinutes: 5 });
+    expect(status.ok).toBe(true);
+    expect(status.historyStorePath).toBe(resolved.path);
+    expect(status.historyStorePathSource).toBe("CONFIG_OVERRIDE");
+    expect(status.activeStoreRecordCount).toBe(1);
+    expect(status.pathMatchesExpectedRepositoryLocalDefault).toBe(false);
+    expect(readRotationHistoryStore(withOverride).records).toHaveLength(1);
+  });
+
+  it("rejects unsafe history-directory overrides", () => {
+    const cfg = testConfig();
+    expect(() =>
+      resolveEusdcRotationHistoryStorePath({ ...cfg, eusdcRotationHistoryDir: "relative-history" }),
+    ).toThrow(/absolute path/);
+    expect(() =>
+      resolveEusdcRotationHistoryStorePath({ ...cfg, eusdcRotationHistoryDir: join(cfg.agentWalletDir, "history") }),
+    ).toThrow(/AGENT_WALLET_DIR/);
+    expect(() =>
+      resolveEusdcRotationHistoryStorePath({
+        ...cfg,
+        eusdcRotationHistoryDir: `${tmpdir()}${sep}rotation${sep}..${sep}history`,
+      }),
+    ).toThrow(/parent-directory traversal/);
+  });
+
+  it("returns HISTORY_SYNC_BUSY when a live cross-process public-history writer lock exists", async () => {
+    const cfg = testConfig();
+    const historyDir = join(mkdtempSync(join(tmpdir(), "eusdc-history-lock-")), "history");
+    tempDirs.push(dirname(historyDir));
+    const withOverride: AppConfig = { ...cfg, eusdcRotationHistoryDir: historyDir };
+    mkdirSync(historyDir, { recursive: true });
+    atomicWriteJson(join(historyDir, "market-history.lock"), {
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+      historyStorePath: join(historyDir, "market-history.json"),
+    });
+    const result = await runEusdcRotationHistorySync(withOverride, {
+      lookbackMinutes: 10080,
+      maximumBlocksPerChunk: 100,
+      maximumPagesPerSource: 1,
+      forceRecentBlockRecheck: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("HISTORY_SYNC_BUSY");
+    expect(result.recordsAdded).toBe(0);
+    expect(result.crossProcessLockStatus).toBe("busy_live_owner");
+  });
+
   it("plans block-log fallback when subgraph pagination truncates and reduces RPC chunks after range errors", () => {
     expect(shouldUseRpcLogFallback({
       candidateId: "PLSX",
