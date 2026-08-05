@@ -23,16 +23,25 @@ import {
 import {
   EUSDC_ROTATION_CANDIDATES,
   PRVX_ADDRESS,
+  analyzeRotationCandles,
   buildCandidateScanRow,
+  buildFiveMinuteCandles,
+  calculatePairLiquidityEusdc,
+  computeScanEconomicFeasibility,
   computeRequiredFinalEusdcRaw,
   computeSimpleBalanceTargetRaw,
+  consolidateRotationPools,
+  deriveRouteConnectivity,
   getRotationCandidate,
   getRotationCandidateRegistry,
+  normalizeTokenAmount,
+  priceObservationFromSwap,
   resetEusdcRotationForTests,
   runEusdcRotationProposeEntry,
   runEusdcRotationProposeExit,
   runEusdcRotationScan,
   selectRotationWinner,
+  type RotationPriceObservation,
   type RotationCandidateId,
   type RotationDeps,
   type RotationMarketEvidence,
@@ -44,6 +53,7 @@ import {
   PLSX_ADDRESS,
   WPLS_ADDRESS,
 } from "../src/constants.js";
+import type { SubgraphPair, SubgraphSwap } from "../src/data/index.js";
 
 const WALLET_ID = "aw_524fe256dc97aff6b28c1e6992c7a27c";
 const WALLET = "0x64443a931c6d6096c8de27711f2a525393c21133" as const;
@@ -141,6 +151,78 @@ function market(overrides: Partial<RotationMarketEvidence> = {}): RotationMarket
     dataSourceErrors: [],
     tokenPath: [EUSDC_TOKEN_ADDRESS, WPLS_ADDRESS],
     ...overrides,
+  };
+}
+
+function pairFixture(input: {
+  id: string;
+  token0: string;
+  token1: string;
+  symbol0?: string;
+  symbol1?: string;
+  decimals0?: string;
+  decimals1?: string;
+  reserve0: string;
+  reserve1: string;
+  reserveUSD?: string;
+}): SubgraphPair {
+  return {
+    id: input.id,
+    token0: {
+      id: input.token0.toLowerCase(),
+      symbol: input.symbol0 ?? "T0",
+      decimals: input.decimals0 ?? "18",
+    },
+    token1: {
+      id: input.token1.toLowerCase(),
+      symbol: input.symbol1 ?? "T1",
+      decimals: input.decimals1 ?? "18",
+    },
+    reserve0: input.reserve0,
+    reserve1: input.reserve1,
+    reserveUSD: input.reserveUSD ?? "0",
+    volumeUSD: "0",
+    totalTransactions: "0",
+    token0Price: "0",
+    token1Price: "0",
+  };
+}
+
+function swapFixture(input: {
+  id: string;
+  timestamp: number;
+  pair: SubgraphPair;
+  amount0In?: string;
+  amount1In?: string;
+  amount0Out?: string;
+  amount1Out?: string;
+  amountUSD?: string;
+  tx?: string;
+}): SubgraphSwap {
+  return {
+    id: input.id,
+    timestamp: String(input.timestamp),
+    pair: {
+      id: input.pair.id,
+      token0: input.pair.token0,
+      token1: input.pair.token1,
+    },
+    amount0In: input.amount0In ?? "0",
+    amount1In: input.amount1In ?? "0",
+    amount0Out: input.amount0Out ?? "0",
+    amount1Out: input.amount1Out ?? "0",
+    amountUSD: input.amountUSD ?? "0",
+    transaction: { id: input.tx ?? `0xtx${input.id}` },
+  };
+}
+
+function observation(timestamp: number, price: number, id: string, volumeEusdc = 10): RotationPriceObservation {
+  return {
+    timestamp,
+    priceEusdc: price,
+    volumeEusdc,
+    swapId: id,
+    source: "fixture",
   };
 }
 
@@ -250,6 +332,7 @@ function deps(overrides: Partial<RotationDeps> = {}): RotationDeps {
     nowMs: vi.fn(() => BASE_NOW),
     getChainId: vi.fn(async () => 369),
     getAgentWalletInfo: vi.fn(async () => walletInfo()),
+    listAgentWallets: vi.fn(() => [walletInfo()]),
     agentWalletSystemStatus: vi.fn(() => ({
       agentWalletEnabled: true,
       masterKeyConfigured: true,
@@ -867,6 +950,324 @@ describe("eUSDC rotation proposal guards", () => {
     expect(highGas.ok).toBe(false);
     expect(highGas.classification).toBe("GAS_COST_ABOVE_LIMIT");
     expect(gasAbove.proposeAgentTx).not.toHaveBeenCalled();
+  });
+});
+
+describe("eUSDC live scan hardening primitives", () => {
+  it("normalizes token amounts and pool liquidity without displaying raw reserves as USD", () => {
+    expect(normalizeTokenAmount("1000000000000000000", 18, true)).toBe(1);
+    expect(normalizeTokenAmount("100000000", 8, true)).toBe(1);
+    expect(normalizeTokenAmount("1000000", 6, true)).toBe(1);
+    expect(getRotationCandidate("PRVX").expectedNamePatterns).toContain("provex");
+
+    const hugeRawLooking = pairFixture({
+      id: "0x1000000000000000000000000000000000000001",
+      token0: WPLS_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      symbol0: "WPLS",
+      symbol1: "eUSDC",
+      reserve0: "1000000",
+      reserve1: "20",
+      reserveUSD: "147567622857993420000000000000",
+    });
+    const liquidity = calculatePairLiquidityEusdc(
+      hugeRawLooking,
+      new Map([
+        [WPLS_ADDRESS.toLowerCase(), 0.00002],
+        [EUSDC_TOKEN_ADDRESS.toLowerCase(), 1],
+      ]),
+    );
+    expect(liquidity).toBe(40);
+    expect(liquidity).toBeLessThan(1_000_000);
+  });
+
+  it("builds five-minute candles across 24 hours, removes duplicate swaps, and reports missing coverage", () => {
+    const now = Date.parse("2026-08-05T12:00:00.000Z");
+    const start = Math.floor(now / 1000) - 24 * 60 * 60;
+    const observations: RotationPriceObservation[] = [];
+    for (let i = 0; i < 288; i += 1) {
+      if (i % 12 === 0) continue;
+      observations.push(observation(start + i * 300 + 10, 1 + i / 10_000, `swap-${i}`));
+    }
+    observations.push({ ...observations[0]!, priceEusdc: 99 });
+    const { candles, coverage } = buildFiveMinuteCandles({
+      observations,
+      lookbackMinutes: 1440,
+      candleMinutes: 5,
+      nowMs: now,
+    });
+    expect(coverage.expectedCandles).toBe(288);
+    expect(coverage.populatedCandles).toBe(264);
+    expect(coverage.activeTradeCandles).toBe(264);
+    expect(coverage.missingBuckets).toBe(24);
+    expect(candles[0]!.open).not.toBe(99);
+  });
+
+  it("derives direct and WPLS-anchored eUSDC prices with stale anchor rejection", () => {
+    const anchorPair = pairFixture({
+      id: "0x2000000000000000000000000000000000000001",
+      token0: WPLS_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      symbol0: "WPLS",
+      symbol1: "eUSDC",
+      reserve0: "1000000",
+      reserve1: "20",
+    });
+    const plsxWplsPair = pairFixture({
+      id: "0x2000000000000000000000000000000000000002",
+      token0: PLSX_ADDRESS,
+      token1: WPLS_ADDRESS,
+      symbol0: "PLSX",
+      symbol1: "WPLS",
+      reserve0: "10000000",
+      reserve1: "5000",
+    });
+    const anchorSwap = swapFixture({
+      id: "a",
+      timestamp: 1000,
+      pair: anchorPair,
+      amount0In: "100000",
+      amount1Out: "2",
+      amountUSD: "2",
+    });
+    const anchor = priceObservationFromSwap({
+      swap: anchorSwap,
+      candidate: getRotationCandidate("PLS"),
+    });
+    expect(anchor?.priceEusdc).toBeCloseTo(0.00002);
+
+    const candidateSwap = swapFixture({
+      id: "b",
+      timestamp: 1200,
+      pair: plsxWplsPair,
+      amount0In: "100000",
+      amount1Out: "50",
+      amountUSD: "0",
+    });
+    const derived = priceObservationFromSwap({
+      swap: candidateSwap,
+      candidate: getRotationCandidate("PLSX"),
+      anchorObservations: [anchor!],
+      maxAnchorAgeSeconds: 900,
+    });
+    expect(derived?.priceEusdc).toBeCloseTo(0.00000001);
+    const stale = priceObservationFromSwap({
+      swap: { ...candidateSwap, timestamp: "10000" },
+      candidate: getRotationCandidate("PLSX"),
+      anchorObservations: [anchor!],
+      maxAnchorAgeSeconds: 900,
+    });
+    expect(stale).toBeNull();
+  });
+
+  it("detects exact dip/rebound evidence and rejects lower-low continuation", () => {
+    const now = Date.parse("2026-08-05T12:00:00.000Z");
+    const start = Math.floor(now / 1000) - 75 * 60;
+    const prices = [1.0, 1.0, 1.0, 0.9899, 0.9902, 0.992, 0.9925, 0.993];
+    const observations = prices.map((price, i) => observation(start + i * 300 + 1, price, `dip-${i}`, 20));
+    const { candles } = buildFiveMinuteCandles({
+      observations,
+      lookbackMinutes: 90,
+      candleMinutes: 5,
+      nowMs: now,
+    });
+    const analysis = analyzeRotationCandles({
+      candles,
+      scanInput: {
+        walletId: WALLET_ID,
+        lookbackMinutes: 90,
+        candleMinutes: 5,
+        minimumDipBps: 100,
+        minimumReboundConfirmationBps: 20,
+        minimumNetTargetBps: 100,
+      },
+      pageCount: 2,
+      truncated: false,
+    });
+    expect(analysis.dipReboundEvidence.status).toBe("AVAILABLE");
+    expect(analysis.dipReboundEvidence.dipBps).toBeGreaterThanOrEqual(100);
+    expect(analysis.dipReboundEvidence.reboundBps).toBeGreaterThanOrEqual(20);
+    expect(analysis.meanReversionScore).toBeGreaterThan(0);
+
+    const lowerLowCandles = candles.map((candle, i) =>
+      i === candles.length - 1 ? { ...candle, low: 0.98, close: 0.98 } : candle,
+    );
+    const lowerLow = analyzeRotationCandles({
+      candles: lowerLowCandles,
+      scanInput: {
+        walletId: WALLET_ID,
+        lookbackMinutes: 90,
+        candleMinutes: 5,
+        minimumDipBps: 100,
+        minimumReboundConfirmationBps: 20,
+        minimumNetTargetBps: 100,
+      },
+      pageCount: 2,
+      truncated: false,
+    });
+    expect(lowerLow.dipReboundEvidence.trendRejected).toBe(true);
+  });
+
+  it("classifies WPLS, PLSX, INC, pHEX, and PRVX route connectivity from verified pool graph", () => {
+    const anchor = pairFixture({
+      id: "0x3000000000000000000000000000000000000001",
+      token0: WPLS_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      reserve0: "1000000",
+      reserve1: "20",
+    });
+    const plsxWpls = pairFixture({
+      id: "0x3000000000000000000000000000000000000002",
+      token0: PLSX_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "1000000",
+      reserve1: "1000",
+    });
+    const incDirect = pairFixture({
+      id: "0x3000000000000000000000000000000000000003",
+      token0: INC_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      reserve0: "1000",
+      reserve1: "2000",
+    });
+    const hexDirect = pairFixture({
+      id: "0x3000000000000000000000000000000000000004",
+      token0: HEX_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      decimals0: "8",
+      decimals1: "6",
+      reserve0: "1000000",
+      reserve1: "3000",
+    });
+    const prvxWpls = pairFixture({
+      id: "0x3000000000000000000000000000000000000005",
+      token0: PRVX_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "1000",
+      reserve1: "100",
+    });
+    const graph = [anchor, plsxWpls, incDirect, hexDirect, prvxWpls];
+    expect(deriveRouteConnectivity({ candidate: getRotationCandidate("PLS"), pairs: graph })).toBe("DIRECT_POOL");
+    expect(deriveRouteConnectivity({ candidate: getRotationCandidate("PLSX"), pairs: graph })).toBe("MULTIHOP_VIA_WPLS");
+    expect(deriveRouteConnectivity({ candidate: getRotationCandidate("INC"), pairs: graph })).toBe("DIRECT_POOL");
+    expect(deriveRouteConnectivity({ candidate: getRotationCandidate("PHEX"), pairs: graph })).toBe("DIRECT_POOL");
+    expect(deriveRouteConnectivity({ candidate: getRotationCandidate("PRVX"), pairs: graph })).toBe("MULTIHOP_VIA_WPLS");
+  });
+
+  it("excludes manipulated tiny pools and reports consolidated liquidity/price", () => {
+    const candidate = getRotationCandidate("PLSX");
+    const good = pairFixture({
+      id: "0x4000000000000000000000000000000000000001",
+      token0: PLSX_ADDRESS,
+      token1: WPLS_ADDRESS,
+      reserve0: "100000000000",
+      reserve1: "10000000",
+    });
+    const tiny = pairFixture({
+      id: "0x4000000000000000000000000000000000000002",
+      token0: PLSX_ADDRESS,
+      token1: EUSDC_TOKEN_ADDRESS,
+      reserve0: "1",
+      reserve1: "100",
+    });
+    const consolidation = consolidateRotationPools({
+      candidate,
+      pairs: [good, tiny],
+      priceMap: new Map([
+        [WPLS_ADDRESS.toLowerCase(), 0.00002],
+        [EUSDC_TOKEN_ADDRESS.toLowerCase(), 1],
+        [PLSX_ADDRESS.toLowerCase(), 0.00000001],
+      ]),
+    });
+    expect(consolidation.eligiblePools).toContain(good.id.toLowerCase());
+    expect(consolidation.excludedPools.some((row) => row.pool === tiny.id.toLowerCase())).toBe(true);
+    expect(consolidation.aggregateLiquidityEusdc).toBeGreaterThan(0);
+    expect(consolidation.priceDispersionPercent).not.toBe(Number.NaN);
+  });
+
+  it("does not create fake ranking for all-zero evidence and preserves ties", () => {
+    const noEvidence = EUSDC_ROTATION_CANDIDATES.map((candidate) =>
+      buildCandidateScanRow({
+        candidate,
+        tokenValidation: validation(candidate.candidateId),
+        market: market({
+          meanReversionScore: 0,
+          liquidityScore: 0,
+          volumeScore: 0,
+          routeQualityScore: 0,
+          volatilitySuitabilityScore: 0,
+          distanceFromOneHourHighBps: null,
+          reboundFromRecentLocalLowBps: null,
+        }),
+        scanInput: {
+          walletId: WALLET_ID,
+          lookbackMinutes: 1440,
+          candleMinutes: 5,
+          minimumDipBps: 100,
+          minimumReboundConfirmationBps: 20,
+          minimumNetTargetBps: 100,
+        },
+        state: "EUSDC_IDLE",
+        hasOpenCycle: false,
+      }),
+    );
+    const noRank = selectRotationWinner(noEvidence);
+    expect(noRank.rankedCandidateIds).toEqual([]);
+    expect(noEvidence.every((row) => row.rankingStatus === "UNRANKED_NO_EVIDENCE")).toBe(true);
+
+    const tied = ["PLSX", "PHEX"].map((candidateId) =>
+      buildCandidateScanRow({
+        candidate: getRotationCandidate(candidateId as RotationCandidateId),
+        tokenValidation: validation(candidateId as RotationCandidateId),
+        market: market({ meanReversionScore: 90, liquidityScore: 90, volumeScore: 90, routeQualityScore: 90 }),
+        scanInput: {
+          walletId: WALLET_ID,
+          lookbackMinutes: 1440,
+          candleMinutes: 5,
+          minimumDipBps: 100,
+          minimumReboundConfirmationBps: 20,
+          minimumNetTargetBps: 100,
+        },
+        state: "EUSDC_IDLE",
+        hasOpenCycle: false,
+      }),
+    );
+    const tie = selectRotationWinner(tied);
+    expect(tie.decision).toBe("HOLD_EUSDC");
+    expect(tie.tiedCandidateIds).toEqual(["PLSX", "PHEX"]);
+  });
+
+  it("calculates dynamic eUSDC target and rejects economically infeasible one-percent cycles", async () => {
+    const feasible = computeScanEconomicFeasibility({
+      startingEusdcRaw: STARTING_EUSDC,
+      minimumNetTargetBps: 100,
+      wplsPriceEusdc: 0.00000001,
+      estimatedGasPlsPerLeg: 100,
+      approvalLegs: 0,
+      swapLegs: 2,
+      safetyBufferRaw: "0",
+    });
+    expect(feasible.simpleTargetRaw).toBe("5274899");
+    expect(feasible.onePercentTargetEconomicallyPlausible).toBe(true);
+
+    const infeasible = computeScanEconomicFeasibility({
+      startingEusdcRaw: STARTING_EUSDC,
+      minimumNetTargetBps: 100,
+      wplsPriceEusdc: 0.001,
+      estimatedGasPlsPerLeg: 1500,
+      approvalLegs: 2,
+      swapLegs: 2,
+    });
+    expect(infeasible.onePercentTargetEconomicallyPlausible).toBe(false);
+
+    const cfg = testConfig();
+    const d = deps();
+    const scan = await runEusdcRotationScan(cfg, { walletId: WALLET_ID }, d);
+    expect(scan.candidates).toHaveLength(5);
+    expect(scan.quoteCallCount).toBe(0);
+    expect(d.getPiteasQuote).not.toHaveBeenCalled();
+    expect(d.proposeAgentTx).not.toHaveBeenCalled();
+    expect(d.executeAgentTx).not.toHaveBeenCalled();
   });
 });
 

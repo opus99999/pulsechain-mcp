@@ -47,6 +47,7 @@ import {
   executeAgentTx,
   getAgentWalletInfo,
   inspectTokenNotional,
+  listAgentWallets,
   loadProposal,
   proposeAgentTx,
   withWalletLock,
@@ -97,8 +98,31 @@ export type RotationCycleState =
 export type RotationScanDecision =
   | "HOLD_EUSDC"
   | "CANDIDATE_SELECTED"
+  | "INSUFFICIENT_HISTORY"
   | "INSUFFICIENT_EVIDENCE"
+  | "TARGET_ECONOMICALLY_INFEASIBLE"
   | "DATA_SOURCE_FAILURE";
+
+export type RotationMetricUnit =
+  | "token_raw"
+  | "token_human"
+  | "eusdc"
+  | "usd"
+  | "percent"
+  | "bps"
+  | "count"
+  | "minutes";
+
+export type RotationRouteAvailabilityStatus =
+  | "DIRECT_POOL"
+  | "MULTIHOP_VIA_WPLS"
+  | "MULTIHOP_OTHER_VERIFIED"
+  | "UNKNOWN_UNTIL_EXECUTABLE_QUOTE"
+  | "UNAVAILABLE"
+  | "both_directions"
+  | "missing_entry"
+  | "missing_exit"
+  | "none";
 
 export type RotationProposalClassification =
   | "READY_FOR_HUMAN_CONFIRMATION"
@@ -211,7 +235,7 @@ export const EUSDC_ROTATION_CANDIDATES: readonly RotationCandidateRegistryEntry[
     displaySymbol: "PRVX",
     executionTokenAddress: PRVX_ADDRESS,
     expectedSymbol: "PRVX",
-    expectedNamePatterns: ["prvx"],
+    expectedNamePatterns: ["prvx", "provex"],
     expectedDecimals: 18,
     baseAssetAddress: EUSDC_ADDRESS,
     enabled: true,
@@ -283,8 +307,12 @@ export interface RotationMarketEvidence {
   relevantPools: string[];
   largestPoolLiquidityUsd: number;
   aggregateLiquidityUsd: number;
+  largestPoolLiquidityEusdc?: number;
+  aggregateLiquidityEusdc?: number;
   recentVolumeUsd: number;
+  recentVolumeEusdc?: number;
   tradeCount: number;
+  uniqueTransactionCount?: number;
   fiveMinuteReturnBps: number | null;
   fifteenMinuteReturnBps: number | null;
   oneHourReturnBps: number | null;
@@ -300,11 +328,20 @@ export interface RotationMarketEvidence {
   routeQualityScore: number;
   volatilitySuitabilityScore: number;
   estimatedPriceImpactPercent: number | null;
-  routeAvailabilityStatus: "both_directions" | "missing_entry" | "missing_exit" | "none";
+  routeAvailabilityStatus: RotationRouteAvailabilityStatus;
+  entryRouteAvailability?: RotationRouteAvailabilityStatus;
+  exitRouteAvailability?: RotationRouteAvailabilityStatus;
   evidenceFresh: boolean;
   dataSourceErrors: string[];
   poolsUsed?: string[];
   tokenPath?: string[];
+  metrics?: Record<string, RotationMetric<unknown> | RotationUnavailableMetric>;
+  candleCoverage?: RotationCandleCoverage;
+  dipReboundEvidence?: RotationDipReboundEvidence;
+  poolConsolidation?: RotationPoolConsolidation;
+  dataSourcesUsed?: string[];
+  dataFreshness?: string;
+  diagnosticRankReason?: string;
 }
 
 export interface RotationCandidateScanRow {
@@ -317,8 +354,12 @@ export interface RotationCandidateScanRow {
   relevantPools: string[];
   largestPoolLiquidityUsd: number;
   aggregateLiquidityUsd: number;
+  largestPoolLiquidityEusdc?: number;
+  aggregateLiquidityEusdc?: number;
   recentVolumeUsd: number;
+  recentVolumeEusdc?: number;
   tradeCount: number;
+  uniqueTransactionCount?: number;
   fiveMinuteReturnBps: number | null;
   fifteenMinuteReturnBps: number | null;
   oneHourReturnBps: number | null;
@@ -333,9 +374,19 @@ export interface RotationCandidateScanRow {
   volumeScore: number;
   estimatedPriceImpactForCompleteEusdcBalancePercent: number | null;
   routeAvailabilityStatus: RotationMarketEvidence["routeAvailabilityStatus"];
+  entryRouteAvailability?: RotationRouteAvailabilityStatus;
+  exitRouteAvailability?: RotationRouteAvailabilityStatus;
   eligibility: boolean;
   score: number;
   rejectionReasons: string[];
+  metrics?: Record<string, RotationMetric<unknown> | RotationUnavailableMetric>;
+  metricAvailability?: Record<string, RotationMetricStatus>;
+  candleCoverage?: RotationCandleCoverage;
+  dipReboundEvidence?: RotationDipReboundEvidence;
+  poolConsolidation?: RotationPoolConsolidation;
+  dataSourcesUsed?: string[];
+  dataFreshness?: string;
+  rankingStatus?: "ELIGIBLE_RANKED" | "UNRANKED_NO_EVIDENCE" | "TIED";
 }
 
 export interface RotationScanResult {
@@ -351,9 +402,109 @@ export interface RotationScanResult {
   candidates: RotationCandidateScanRow[];
   winner?: RotationCandidateId;
   rankedCandidateIds: RotationCandidateId[];
+  diagnosticOrdering?: RotationCandidateId[];
+  eligibleCandidateRanking?: RotationCandidateId[];
+  tiedCandidateIds?: RotationCandidateId[];
+  economicFeasibility?: RotationEconomicFeasibility;
   noPiteasQuoteUsed: true;
   noLiveTransaction: true;
   reason?: string;
+}
+
+export interface RotationMetric<T = unknown> {
+  value: T;
+  unit: RotationMetricUnit;
+  source: string;
+  sourceTimestamp: string | null;
+  startTimestamp: string | null;
+  endTimestamp: string | null;
+  sampleCount: number;
+  pageCount: number;
+  truncated: boolean;
+  coveragePercent: number;
+  stale: boolean;
+  confidence: "high" | "medium" | "low" | "none";
+  warnings: string[];
+}
+
+export interface RotationUnavailableMetric {
+  status: "UNAVAILABLE";
+  reason: string;
+  unit: RotationMetricUnit;
+  source: string;
+  requiredSamples: number;
+  availableSamples: number;
+  warnings: string[];
+}
+
+export interface RotationMetricStatus {
+  status: "AVAILABLE" | "UNAVAILABLE";
+  reason?: string;
+  requiredSamples?: number;
+  availableSamples?: number;
+}
+
+export interface RotationCandle {
+  startTimestamp: string;
+  endTimestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volumeEusdc: number;
+  tradeCount: number;
+  sourceSwapIds: string[];
+  carriedForward: boolean;
+}
+
+export interface RotationCandleCoverage {
+  expectedCandles: number;
+  populatedCandles: number;
+  activeTradeCandles: number;
+  coveragePercent: number;
+  maximumDataGapMinutes: number | null;
+  mostRecentTradeAgeMinutes: number | null;
+  missingBuckets: number;
+  truncated: boolean;
+  sparseMarketMethodUsed: boolean;
+}
+
+export interface RotationDipReboundEvidence {
+  status: "AVAILABLE" | "UNAVAILABLE";
+  referenceTimestamp?: string;
+  referencePrice?: number;
+  localLowTimestamp?: string;
+  localLowPrice?: number;
+  currentTimestamp?: string;
+  currentPrice?: number;
+  dipBps?: number;
+  reboundBps?: number;
+  candlesInvolved: number;
+  volumeConfirmation: boolean;
+  trendRejected: boolean;
+  reason?: string;
+}
+
+export interface RotationPoolConsolidation {
+  primaryPool: string | null;
+  eligiblePools: string[];
+  excludedPools: Array<{ pool: string; reason: string }>;
+  aggregateLiquidityEusdc: number;
+  largestPoolLiquidityEusdc: number;
+  liquidityConcentrationPercent: number;
+  consolidatedPriceEusdc: number | null;
+  priceDispersionPercent: number | null;
+}
+
+export interface RotationEconomicFeasibility {
+  simpleTargetRaw: string;
+  estimatedCycleGasEusdcRaw: string;
+  routeCostEusdcRaw: string;
+  safetyBufferRaw: string;
+  dynamicTargetRaw: string;
+  requiredGrossMoveBps: number;
+  onePercentTargetEconomicallyPlausible: boolean;
+  gasConversionSource: string;
 }
 
 export interface RotationCycleLedgerEntry {
@@ -511,6 +662,7 @@ export interface RotationDeps {
   nowMs: () => number;
   getChainId: typeof getChainId;
   getAgentWalletInfo: typeof getAgentWalletInfo;
+  listAgentWallets: typeof listAgentWallets;
   agentWalletSystemStatus: (config: AppConfig) => Record<string, unknown>;
   getTokenValidation: (
     config: AppConfig,
@@ -579,13 +731,91 @@ function num(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function round(value: number, decimals = 8): number {
+  if (!Number.isFinite(value)) return 0;
+  const scale = 10 ** decimals;
+  return Math.round(value * scale) / scale;
+}
+
+function isoFromSeconds(seconds: number | null | undefined): string | null {
+  if (!seconds || !Number.isFinite(seconds)) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
+function makeMetric<T>(input: {
+  value: T;
+  unit: RotationMetricUnit;
+  source: string;
+  sourceTimestamp?: string | null;
+  startTimestamp?: string | null;
+  endTimestamp?: string | null;
+  sampleCount: number;
+  pageCount: number;
+  truncated: boolean;
+  coveragePercent: number;
+  stale: boolean;
+  confidence?: RotationMetric["confidence"];
+  warnings?: string[];
+}): RotationMetric<T> {
+  return {
+    value: input.value,
+    unit: input.unit,
+    source: input.source,
+    sourceTimestamp: input.sourceTimestamp ?? null,
+    startTimestamp: input.startTimestamp ?? null,
+    endTimestamp: input.endTimestamp ?? null,
+    sampleCount: input.sampleCount,
+    pageCount: input.pageCount,
+    truncated: input.truncated,
+    coveragePercent: round(input.coveragePercent, 4),
+    stale: input.stale,
+    confidence: input.confidence ?? (input.sampleCount > 0 && !input.stale ? "medium" : "none"),
+    warnings: input.warnings ?? [],
+  };
+}
+
+function unavailableMetric(input: {
+  reason: string;
+  unit: RotationMetricUnit;
+  source: string;
+  requiredSamples: number;
+  availableSamples: number;
+  warnings?: string[];
+}): RotationUnavailableMetric {
+  return {
+    status: "UNAVAILABLE",
+    reason: input.reason,
+    unit: input.unit,
+    source: input.source,
+    requiredSamples: input.requiredSamples,
+    availableSamples: input.availableSamples,
+    warnings: input.warnings ?? [],
+  };
+}
+
+function metricStatus(metric: RotationMetric<unknown> | RotationUnavailableMetric | undefined): RotationMetricStatus {
+  if (!metric) return { status: "UNAVAILABLE", reason: "metric missing", requiredSamples: 1, availableSamples: 0 };
+  if ("status" in metric && metric.status === "UNAVAILABLE") {
+    return {
+      status: "UNAVAILABLE",
+      reason: metric.reason,
+      requiredSamples: metric.requiredSamples,
+      availableSamples: metric.availableSamples,
+    };
+  }
+  return { status: "AVAILABLE" };
+}
+
 function stableScanPayload(row: RotationCandidateScanRow): Record<string, unknown> {
   return {
     candidateId: row.candidateId,
     executionTokenAddress: row.executionTokenAddress.toLowerCase(),
     largestPoolLiquidityUsd: row.largestPoolLiquidityUsd,
     aggregateLiquidityUsd: row.aggregateLiquidityUsd,
+    largestPoolLiquidityEusdc: row.largestPoolLiquidityEusdc,
+    aggregateLiquidityEusdc: row.aggregateLiquidityEusdc,
     recentVolumeUsd: row.recentVolumeUsd,
+    recentVolumeEusdc: row.recentVolumeEusdc,
     tradeCount: row.tradeCount,
     fiveMinuteReturnBps: row.fiveMinuteReturnBps,
     fifteenMinuteReturnBps: row.fifteenMinuteReturnBps,
@@ -598,6 +828,10 @@ function stableScanPayload(row: RotationCandidateScanRow): Record<string, unknow
     estimatedPriceImpactForCompleteEusdcBalancePercent:
       row.estimatedPriceImpactForCompleteEusdcBalancePercent,
     routeAvailabilityStatus: row.routeAvailabilityStatus,
+    entryRouteAvailability: row.entryRouteAvailability,
+    exitRouteAvailability: row.exitRouteAvailability,
+    candleCoverage: row.candleCoverage,
+    dipReboundEvidence: row.dipReboundEvidence,
     eligibility: row.eligibility,
     score: row.score,
     rejectionReasons: row.rejectionReasons,
@@ -664,6 +898,612 @@ export function computeRequiredFinalEusdcRaw(input: {
   };
 }
 
+function tokenId(token: { id?: string } | undefined): string {
+  return String(token?.id ?? "").toLowerCase();
+}
+
+function tokenSymbol(token: { symbol?: string } | undefined): string {
+  return String(token?.symbol ?? "").toLowerCase();
+}
+
+function pairIncludes(pair: SubgraphPair | NonNullable<SubgraphSwap["pair"]>, token: string): boolean {
+  const lower = token.toLowerCase();
+  return tokenId(pair.token0) === lower || tokenId(pair.token1) === lower;
+}
+
+function pairMatches(pair: SubgraphPair, a: string, b: string): boolean {
+  return pairIncludes(pair, a) && pairIncludes(pair, b);
+}
+
+function pairReserveFor(pair: SubgraphPair, token: string): number {
+  const lower = token.toLowerCase();
+  if (tokenId(pair.token0) === lower) return num(pair.reserve0);
+  if (tokenId(pair.token1) === lower) return num(pair.reserve1);
+  return 0;
+}
+
+function pairTokenDecimals(pair: SubgraphPair, token: string, fallback: number): number {
+  const lower = token.toLowerCase();
+  const raw =
+    tokenId(pair.token0) === lower
+      ? pair.token0.decimals
+      : tokenId(pair.token1) === lower
+        ? pair.token1.decimals
+        : undefined;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 36 ? parsed : fallback;
+}
+
+export function normalizeTokenAmount(value: string, decimals: number, sourceIsRaw: boolean): number {
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return 0;
+  if (!sourceIsRaw) return num(value);
+  try {
+    return Number(formatUnits(BigInt(value), decimals));
+  } catch {
+    return 0;
+  }
+}
+
+function amountForSwapToken(swap: SubgraphSwap, token: string): number {
+  const lower = token.toLowerCase();
+  const p = swap.pair;
+  if (!p) return 0;
+  if (tokenId(p.token0) === lower || (!p.token0?.id && tokenSymbol(p.token0) === lower)) {
+    return num(swap.amount0In) + num(swap.amount0Out);
+  }
+  if (tokenId(p.token1) === lower || (!p.token1?.id && tokenSymbol(p.token1) === lower)) {
+    return num(swap.amount1In) + num(swap.amount1Out);
+  }
+  return 0;
+}
+
+function swapPairMatches(swap: SubgraphSwap, a: string, b: string): boolean {
+  const p = swap.pair;
+  if (!p) return false;
+  return pairIncludes(p, a) && pairIncludes(p, b);
+}
+
+function pairPriceEusdc(pair: SubgraphPair, token: string, priceMap: Map<string, number>): number | null {
+  const lower = token.toLowerCase();
+  const tokenReserve = pairReserveFor(pair, lower);
+  if (tokenReserve <= 0) return null;
+  const other =
+    tokenId(pair.token0) === lower
+      ? tokenId(pair.token1)
+      : tokenId(pair.token1) === lower
+        ? tokenId(pair.token0)
+        : "";
+  const otherReserve = other ? pairReserveFor(pair, other) : 0;
+  const otherPrice = priceMap.get(other);
+  if (!other || otherReserve <= 0 || otherPrice === undefined || otherPrice <= 0) return null;
+  return (otherReserve * otherPrice) / tokenReserve;
+}
+
+function findAnchorWplsEusdcPair(pairs: SubgraphPair[]): SubgraphPair | undefined {
+  return pairs
+    .filter((pair) => pairMatches(pair, WPLS_ADDRESS, EUSDC_ADDRESS))
+    .sort((a, b) => pairLiquidityUsd(b) - pairLiquidityUsd(a))[0];
+}
+
+function deriveWplsEusdcPrice(anchor: SubgraphPair | undefined): number | null {
+  if (!anchor) return null;
+  const wplsReserve = pairReserveFor(anchor, WPLS_ADDRESS);
+  const eusdcReserve = pairReserveFor(anchor, EUSDC_ADDRESS);
+  if (wplsReserve <= 0 || eusdcReserve <= 0) return null;
+  return eusdcReserve / wplsReserve;
+}
+
+export function calculatePairLiquidityEusdc(pair: SubgraphPair, priceMap: Map<string, number>): number {
+  const token0 = tokenId(pair.token0);
+  const token1 = tokenId(pair.token1);
+  const p0 = priceMap.get(token0);
+  const p1 = priceMap.get(token1);
+  if (p0 === undefined || p1 === undefined || p0 <= 0 || p1 <= 0) return 0;
+  const r0 = normalizeTokenAmount(pair.reserve0, pairTokenDecimals(pair, token0, 18), false);
+  const r1 = normalizeTokenAmount(pair.reserve1, pairTokenDecimals(pair, token1, 18), false);
+  return Math.max(0, r0 * p0 + r1 * p1);
+}
+
+function median(values: number[]): number | null {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
+function priceDispersionPercent(values: number[]): number | null {
+  const m = median(values);
+  if (m === null || m <= 0) return null;
+  const deviations = values.map((v) => Math.abs(v - m) / m * 100);
+  return round(Math.max(0, ...deviations), 6);
+}
+
+export function consolidateRotationPools(input: {
+  candidate: RotationCandidateRegistryEntry;
+  pairs: SubgraphPair[];
+  priceMap: Map<string, number>;
+  poolBytecode?: Map<string, boolean>;
+}): RotationPoolConsolidation {
+  const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
+  const routeRelevant = input.pairs.filter(
+    (pair) =>
+      pairMatches(pair, candidateToken, EUSDC_ADDRESS) ||
+      pairMatches(pair, candidateToken, WPLS_ADDRESS) ||
+      (input.candidate.candidateId === "PLS" && pairMatches(pair, WPLS_ADDRESS, EUSDC_ADDRESS)),
+  );
+  const eligible: Array<{ pair: SubgraphPair; liquidity: number; price: number | null }> = [];
+  const excluded: Array<{ pool: string; reason: string }> = [];
+  for (const pair of routeRelevant) {
+    const id = pair.id.toLowerCase();
+    if (input.poolBytecode?.has(id) && input.poolBytecode.get(id) === false) {
+      excluded.push({ pool: id, reason: "pool bytecode missing" });
+      continue;
+    }
+    const liquidity = calculatePairLiquidityEusdc(pair, input.priceMap);
+    if (liquidity <= 0) {
+      excluded.push({ pool: id, reason: "non-positive or unpriced reserves" });
+      continue;
+    }
+    if (liquidity < Math.max(10, input.candidate.minimumLiquidityUsd * 0.01)) {
+      excluded.push({ pool: id, reason: "tiny pool excluded from consolidation" });
+      continue;
+    }
+    eligible.push({ pair, liquidity, price: pairPriceEusdc(pair, candidateToken, input.priceMap) });
+  }
+  eligible.sort((a, b) => b.liquidity - a.liquidity);
+  const aggregate = eligible.reduce((sum, row) => sum + row.liquidity, 0);
+  const largest = eligible[0]?.liquidity ?? 0;
+  const priceRows = eligible.filter((row) => row.price !== null) as Array<{
+    pair: SubgraphPair;
+    liquidity: number;
+    price: number;
+  }>;
+  const weightedPrice =
+    priceRows.length === 0
+      ? null
+      : priceRows.reduce((sum, row) => sum + row.price * row.liquidity, 0) /
+        priceRows.reduce((sum, row) => sum + row.liquidity, 0);
+  return {
+    primaryPool: eligible[0]?.pair.id.toLowerCase() ?? null,
+    eligiblePools: eligible.map((row) => row.pair.id.toLowerCase()),
+    excludedPools: excluded,
+    aggregateLiquidityEusdc: round(aggregate, 6),
+    largestPoolLiquidityEusdc: round(largest, 6),
+    liquidityConcentrationPercent: aggregate > 0 ? round(largest / aggregate * 100, 6) : 0,
+    consolidatedPriceEusdc: weightedPrice === null ? null : round(weightedPrice, 12),
+    priceDispersionPercent: priceDispersionPercent(priceRows.map((row) => row.price)),
+  };
+}
+
+export function deriveRouteConnectivity(input: {
+  candidate: RotationCandidateRegistryEntry;
+  pairs: SubgraphPair[];
+}): RotationRouteAvailabilityStatus {
+  const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
+  const hasPositive = (pair: SubgraphPair, a: string, b: string) =>
+    pairMatches(pair, a, b) && pairReserveFor(pair, a) > 0 && pairReserveFor(pair, b) > 0;
+  if (input.pairs.some((pair) => hasPositive(pair, candidateToken, EUSDC_ADDRESS))) return "DIRECT_POOL";
+  const hasWplsAnchor = input.pairs.some((pair) => hasPositive(pair, WPLS_ADDRESS, EUSDC_ADDRESS));
+  if (input.candidate.candidateId === "PLS") {
+    return hasWplsAnchor ? "DIRECT_POOL" : "UNAVAILABLE";
+  }
+  const hasCandidateWpls = input.pairs.some((pair) => hasPositive(pair, candidateToken, WPLS_ADDRESS));
+  if (hasCandidateWpls && hasWplsAnchor) return "MULTIHOP_VIA_WPLS";
+  return hasCandidateWpls ? "UNKNOWN_UNTIL_EXECUTABLE_QUOTE" : "UNAVAILABLE";
+}
+
+export interface RotationPriceObservation {
+  timestamp: number;
+  priceEusdc: number;
+  volumeEusdc: number;
+  swapId: string;
+  source: string;
+  anchorAgeSeconds?: number;
+}
+
+function nearestAnchorPrice(
+  anchors: RotationPriceObservation[],
+  timestamp: number,
+  maxAgeSeconds: number,
+): { price: number; age: number } | null {
+  let best: RotationPriceObservation | null = null;
+  let bestAge = Number.POSITIVE_INFINITY;
+  for (const anchor of anchors) {
+    const age = Math.abs(anchor.timestamp - timestamp);
+    if (age < bestAge) {
+      best = anchor;
+      bestAge = age;
+    }
+  }
+  return best && bestAge <= maxAgeSeconds ? { price: best.priceEusdc, age: bestAge } : null;
+}
+
+export function priceObservationFromSwap(input: {
+  swap: SubgraphSwap;
+  candidate: RotationCandidateRegistryEntry;
+  anchorObservations?: RotationPriceObservation[];
+  maxAnchorAgeSeconds?: number;
+}): RotationPriceObservation | null {
+  const swap = input.swap;
+  const ts = Number(swap.timestamp);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
+  const candidateAmount = amountForSwapToken(swap, candidateToken);
+  const eusdcAmount = amountForSwapToken(swap, EUSDC_ADDRESS);
+  const wplsAmount = amountForSwapToken(swap, WPLS_ADDRESS);
+  let price: number | null = null;
+  let volumeEusdc = num(swap.amountUSD);
+  let source = "direct";
+  let anchorAgeSeconds: number | undefined;
+  if (candidateAmount > 0 && eusdcAmount > 0 && swapPairMatches(swap, candidateToken, EUSDC_ADDRESS)) {
+    price = eusdcAmount / candidateAmount;
+    volumeEusdc = Math.max(volumeEusdc, eusdcAmount);
+  } else if (
+    input.candidate.candidateId === "PLS" &&
+    wplsAmount > 0 &&
+    eusdcAmount > 0 &&
+    swapPairMatches(swap, WPLS_ADDRESS, EUSDC_ADDRESS)
+  ) {
+    price = eusdcAmount / wplsAmount;
+    volumeEusdc = Math.max(volumeEusdc, eusdcAmount);
+    source = "wpls/eusdc";
+  } else if (candidateAmount > 0 && wplsAmount > 0 && swapPairMatches(swap, candidateToken, WPLS_ADDRESS)) {
+    const anchor = nearestAnchorPrice(input.anchorObservations ?? [], ts, input.maxAnchorAgeSeconds ?? 900);
+    if (!anchor) return null;
+    price = (wplsAmount / candidateAmount) * anchor.price;
+    volumeEusdc = Math.max(volumeEusdc, wplsAmount * anchor.price);
+    source = "candidate/wpls*historical-wpls/eusdc";
+    anchorAgeSeconds = anchor.age;
+  }
+  if (price === null || price <= 0 || !Number.isFinite(price)) return null;
+  return {
+    timestamp: ts,
+    priceEusdc: price,
+    volumeEusdc: Math.max(0, volumeEusdc),
+    swapId: `${swap.transaction?.id ?? ""}:${swap.id}`,
+    source,
+    ...(anchorAgeSeconds !== undefined ? { anchorAgeSeconds } : {}),
+  };
+}
+
+function bucketStart(timestampSeconds: number, candleMinutes: number): number {
+  const size = candleMinutes * 60;
+  return Math.floor(timestampSeconds / size) * size;
+}
+
+export function buildFiveMinuteCandles(input: {
+  observations: RotationPriceObservation[];
+  lookbackMinutes: number;
+  candleMinutes: number;
+  nowMs: number;
+}): { candles: RotationCandle[]; coverage: RotationCandleCoverage } {
+  const candleSeconds = input.candleMinutes * 60;
+  const expectedCandles = Math.ceil(input.lookbackMinutes / input.candleMinutes);
+  const endSeconds = Math.floor(input.nowMs / 1000 / candleSeconds) * candleSeconds;
+  const startSeconds = endSeconds - expectedCandles * candleSeconds;
+  const byBucket = new Map<number, RotationPriceObservation[]>();
+  const uniqueObservations = new Map<string, RotationPriceObservation>();
+  for (const obs of input.observations) {
+    if (!uniqueObservations.has(obs.swapId)) uniqueObservations.set(obs.swapId, obs);
+  }
+  for (const obs of uniqueObservations.values()) {
+    if (obs.timestamp < startSeconds || obs.timestamp >= endSeconds) continue;
+    const bucket = bucketStart(obs.timestamp, input.candleMinutes);
+    if (!byBucket.has(bucket)) byBucket.set(bucket, []);
+    byBucket.get(bucket)!.push(obs);
+  }
+  const candles: RotationCandle[] = [];
+  const populatedBuckets = [...byBucket.keys()].sort((a, b) => a - b);
+  for (const bucket of populatedBuckets) {
+    const rows = byBucket.get(bucket)!.sort((a, b) => a.timestamp - b.timestamp);
+    const prices = rows.map((row) => row.priceEusdc);
+    candles.push({
+      startTimestamp: new Date(bucket * 1000).toISOString(),
+      endTimestamp: new Date((bucket + candleSeconds) * 1000).toISOString(),
+      open: prices[0]!,
+      high: Math.max(...prices),
+      low: Math.min(...prices),
+      close: prices[prices.length - 1]!,
+      volumeEusdc: round(rows.reduce((sum, row) => sum + row.volumeEusdc, 0), 6),
+      tradeCount: rows.length,
+      sourceSwapIds: rows.map((row) => row.swapId),
+      carriedForward: false,
+    });
+  }
+  const gaps = populatedBuckets.slice(1).map((bucket, i) => (bucket - populatedBuckets[i]!) / 60);
+  const mostRecent = [...uniqueObservations.values()]
+    .filter((obs) => obs.timestamp < endSeconds)
+    .sort((a, b) => b.timestamp - a.timestamp)[0];
+  const populatedCandles = candles.length;
+  return {
+    candles,
+    coverage: {
+      expectedCandles,
+      populatedCandles,
+      activeTradeCandles: populatedCandles,
+      coveragePercent: expectedCandles > 0 ? round(populatedCandles / expectedCandles * 100, 4) : 0,
+      maximumDataGapMinutes: gaps.length > 0 ? Math.max(...gaps) : null,
+      mostRecentTradeAgeMinutes: mostRecent ? round((endSeconds - mostRecent.timestamp) / 60, 4) : null,
+      missingBuckets: Math.max(0, expectedCandles - populatedCandles),
+      truncated: false,
+      sparseMarketMethodUsed: false,
+    },
+  };
+}
+
+function returnBps(candles: RotationCandle[], minutes: number): RotationMetric<number> | RotationUnavailableMetric {
+  const latest = candles[candles.length - 1];
+  if (!latest) {
+    return unavailableMetric({
+      reason: "no candles available",
+      unit: "bps",
+      source: "five-minute-candles",
+      requiredSamples: 2,
+      availableSamples: 0,
+    });
+  }
+  const target = Date.parse(latest.endTimestamp) - minutes * 60_000;
+  const prior = [...candles].reverse().find((candle) => Date.parse(candle.endTimestamp) <= target);
+  if (!prior || prior.close <= 0) {
+    return unavailableMetric({
+      reason: `insufficient candle span for ${minutes} minute return`,
+      unit: "bps",
+      source: "five-minute-candles",
+      requiredSamples: Math.ceil(minutes / DEFAULT_CANDLE_MINUTES) + 1,
+      availableSamples: candles.length,
+    });
+  }
+  return makeMetric({
+    value: round((latest.close - prior.close) / prior.close * 10_000, 6),
+    unit: "bps",
+    source: "five-minute-candles",
+    sourceTimestamp: latest.endTimestamp,
+    startTimestamp: prior.endTimestamp,
+    endTimestamp: latest.endTimestamp,
+    sampleCount: candles.length,
+    pageCount: 0,
+    truncated: false,
+    coveragePercent: 100,
+    stale: false,
+    confidence: "medium",
+  });
+}
+
+function metricNumber(metric: RotationMetric<number> | RotationUnavailableMetric): number | null {
+  return "status" in metric ? null : metric.value;
+}
+
+export function analyzeRotationCandles(input: {
+  candles: RotationCandle[];
+  scanInput: Required<RotationScanInput>;
+  pageCount: number;
+  truncated: boolean;
+}): {
+  metrics: Record<string, RotationMetric<unknown> | RotationUnavailableMetric>;
+  dipReboundEvidence: RotationDipReboundEvidence;
+  directionalTrendScore: number;
+  meanReversionScore: number;
+  volatilitySuitabilityScore: number;
+} {
+  const candles = [...input.candles].sort(
+    (a, b) => Date.parse(a.endTimestamp) - Date.parse(b.endTimestamp),
+  );
+  const metrics: Record<string, RotationMetric<unknown> | RotationUnavailableMetric> = {
+    fiveMinuteReturnBps: returnBps(candles, 5),
+    fifteenMinuteReturnBps: returnBps(candles, 15),
+    oneHourReturnBps: returnBps(candles, 60),
+    sixHourReturnBps: returnBps(candles, 360),
+  };
+  const consecutive = candles.slice(1).map((candle, i) => {
+    const prev = candles[i]!;
+    return prev.close > 0 ? (candle.close - prev.close) / prev.close * 10_000 : 0;
+  });
+  const mean = consecutive.length ? consecutive.reduce((s, v) => s + v, 0) / consecutive.length : 0;
+  const variance = consecutive.length
+    ? consecutive.reduce((s, v) => s + (v - mean) ** 2, 0) / consecutive.length
+    : 0;
+  if (consecutive.length >= 2) {
+    metrics.realizedVolatilityBps = makeMetric({
+      value: round(Math.sqrt(variance), 6),
+      unit: "bps",
+      source: "five-minute-candles",
+      sourceTimestamp: candles[candles.length - 1]?.endTimestamp ?? null,
+      startTimestamp: candles[0]?.startTimestamp ?? null,
+      endTimestamp: candles[candles.length - 1]?.endTimestamp ?? null,
+      sampleCount: consecutive.length,
+      pageCount: input.pageCount,
+      truncated: input.truncated,
+      coveragePercent: 100,
+      stale: false,
+      confidence: "medium",
+    });
+  } else {
+    metrics.realizedVolatilityBps = unavailableMetric({
+      reason: "at least three active candles required",
+      unit: "bps",
+      source: "five-minute-candles",
+      requiredSamples: 3,
+      availableSamples: candles.length,
+    });
+  }
+
+  const latest = candles[candles.length - 1];
+  const oneHourStart = latest ? Date.parse(latest.endTimestamp) - 60 * 60_000 : 0;
+  const lastHour = candles.filter((candle) => Date.parse(candle.endTimestamp) >= oneHourStart);
+  const high = lastHour.length ? Math.max(...lastHour.map((c) => c.high)) : null;
+  const low = lastHour.length ? Math.min(...lastHour.map((c) => c.low)) : null;
+  metrics.distanceFromOneHourHighBps =
+    latest && high && high > 0
+      ? makeMetric({
+          value: round((latest.close - high) / high * 10_000, 6),
+          unit: "bps",
+          source: "five-minute-candles",
+          sourceTimestamp: latest.endTimestamp,
+          startTimestamp: lastHour[0]?.startTimestamp ?? latest.startTimestamp,
+          endTimestamp: latest.endTimestamp,
+          sampleCount: lastHour.length,
+          pageCount: input.pageCount,
+          truncated: input.truncated,
+          coveragePercent: 100,
+          stale: false,
+        })
+      : unavailableMetric({
+          reason: "insufficient one-hour candles",
+          unit: "bps",
+          source: "five-minute-candles",
+          requiredSamples: 2,
+          availableSamples: lastHour.length,
+        });
+  metrics.distanceFromOneHourLowBps =
+    latest && low && low > 0
+      ? makeMetric({
+          value: round((latest.close - low) / low * 10_000, 6),
+          unit: "bps",
+          source: "five-minute-candles",
+          sourceTimestamp: latest.endTimestamp,
+          startTimestamp: lastHour[0]?.startTimestamp ?? latest.startTimestamp,
+          endTimestamp: latest.endTimestamp,
+          sampleCount: lastHour.length,
+          pageCount: input.pageCount,
+          truncated: input.truncated,
+          coveragePercent: 100,
+          stale: false,
+        })
+      : unavailableMetric({
+          reason: "insufficient one-hour candles",
+          unit: "bps",
+          source: "five-minute-candles",
+          requiredSamples: 2,
+          availableSamples: lastHour.length,
+        });
+
+  let dipReboundEvidence: RotationDipReboundEvidence = {
+    status: "UNAVAILABLE",
+    candlesInvolved: lastHour.length,
+    volumeConfirmation: false,
+    trendRejected: false,
+    reason: "insufficient one-hour candles",
+  };
+  let directionalTrendScore = 0;
+  let meanReversionScore = 0;
+  if (latest && lastHour.length >= 3) {
+    const reference = lastHour.reduce((best, candle) => (candle.high > best.high ? candle : best), lastHour[0]!);
+    const afterReference = lastHour.filter(
+      (candle) => Date.parse(candle.endTimestamp) > Date.parse(reference.endTimestamp),
+    );
+    const localLow = afterReference.reduce<RotationCandle | null>(
+      (best, candle) => (!best || candle.low < best.low ? candle : best),
+      null,
+    );
+    const first = lastHour[0]!;
+    const slopeBps = first.close > 0 ? (latest.close - first.close) / first.close * 10_000 : 0;
+    directionalTrendScore = round(Math.max(-100, Math.min(100, slopeBps / 2)), 6);
+    if (localLow && reference.high > 0 && localLow.low > 0) {
+      const dipBps = (reference.high - localLow.low) / reference.high * 10_000;
+      const reboundBps = (latest.close - localLow.low) / localLow.low * 10_000;
+      const madeNewLowerLow = latest.low < localLow.low;
+      const reboundVolume = afterReference
+        .filter((candle) => Date.parse(candle.endTimestamp) >= Date.parse(localLow.endTimestamp))
+        .reduce((sum, candle) => sum + candle.volumeEusdc, 0);
+      const volumeConfirmation = reboundVolume > 0;
+      dipReboundEvidence = {
+        status: "AVAILABLE",
+        referenceTimestamp: reference.endTimestamp,
+        referencePrice: round(reference.high, 12),
+        localLowTimestamp: localLow.endTimestamp,
+        localLowPrice: round(localLow.low, 12),
+        currentTimestamp: latest.endTimestamp,
+        currentPrice: round(latest.close, 12),
+        dipBps: round(dipBps, 6),
+        reboundBps: round(reboundBps, 6),
+        candlesInvolved: afterReference.length,
+        volumeConfirmation,
+        trendRejected: madeNewLowerLow || directionalTrendScore < -50,
+        ...(madeNewLowerLow ? { reason: "current candle made a new lower low after rebound" } : {}),
+      };
+      metrics.reboundFromRecentLocalLowBps = makeMetric({
+        value: round(reboundBps, 6),
+        unit: "bps",
+        source: "dip-rebound-candles",
+        sourceTimestamp: latest.endTimestamp,
+        startTimestamp: localLow.endTimestamp,
+        endTimestamp: latest.endTimestamp,
+        sampleCount: afterReference.length,
+        pageCount: input.pageCount,
+        truncated: input.truncated,
+        coveragePercent: 100,
+        stale: false,
+        confidence: volumeConfirmation ? "medium" : "low",
+        warnings: volumeConfirmation ? [] : ["no rebound volume confirmation"],
+      });
+      meanReversionScore =
+        dipBps >= input.scanInput.minimumDipBps && reboundBps >= input.scanInput.minimumReboundConfirmationBps
+          ? clampScore(50 + Math.min(35, dipBps / 4) + Math.min(15, reboundBps / 4))
+          : 0;
+    }
+  }
+  if (!metrics.reboundFromRecentLocalLowBps) {
+    metrics.reboundFromRecentLocalLowBps = unavailableMetric({
+      reason: dipReboundEvidence.reason ?? "no post-reference local low",
+      unit: "bps",
+      source: "dip-rebound-candles",
+      requiredSamples: 3,
+      availableSamples: lastHour.length,
+    });
+  }
+  return {
+    metrics,
+    dipReboundEvidence,
+    directionalTrendScore,
+    meanReversionScore,
+    volatilitySuitabilityScore: clampScore(100 - Math.abs(num(metricNumber(metrics.realizedVolatilityBps as never)) - 80) / 2),
+  };
+}
+
+export function computeScanEconomicFeasibility(input: {
+  startingEusdcRaw: string;
+  minimumNetTargetBps: number;
+  wplsPriceEusdc: number | null;
+  estimatedGasPlsPerLeg?: number;
+  approvalLegs?: number;
+  swapLegs?: number;
+  routeCostEusdcRaw?: string;
+  safetyBufferRaw?: string;
+}): RotationEconomicFeasibility {
+  const simpleTargetRaw = computeSimpleBalanceTargetRaw(input.startingEusdcRaw, input.minimumNetTargetBps);
+  const gasPls =
+    (input.estimatedGasPlsPerLeg ?? 1500) *
+    ((input.approvalLegs ?? 2) + (input.swapLegs ?? 2));
+  const estimatedCycleGasEusdcRaw =
+    input.wplsPriceEusdc && input.wplsPriceEusdc > 0
+      ? Math.ceil(gasPls * input.wplsPriceEusdc * 1_000_000).toString()
+      : "0";
+  const routeCostEusdcRaw = input.routeCostEusdcRaw ?? "0";
+  const safetyBufferRaw = input.safetyBufferRaw ?? "1000";
+  const dynamicTargetRaw = (
+    BigInt(simpleTargetRaw) +
+    BigInt(estimatedCycleGasEusdcRaw) +
+    BigInt(routeCostEusdcRaw) +
+    BigInt(safetyBufferRaw)
+  ).toString();
+  const starting = Number(input.startingEusdcRaw);
+  const requiredGrossMoveBps = starting > 0 ? (Number(dynamicTargetRaw) - starting) / starting * 10_000 : 0;
+  return {
+    simpleTargetRaw,
+    estimatedCycleGasEusdcRaw,
+    routeCostEusdcRaw,
+    safetyBufferRaw,
+    dynamicTargetRaw,
+    requiredGrossMoveBps: round(requiredGrossMoveBps, 6),
+    onePercentTargetEconomicallyPlausible:
+      input.wplsPriceEusdc !== null && requiredGrossMoveBps <= input.minimumNetTargetBps + 250,
+    gasConversionSource:
+      input.wplsPriceEusdc !== null
+        ? "verified WPLS/eUSDC reserve-derived price"
+        : "unavailable: no verified WPLS/eUSDC anchor",
+  };
+}
+
 function ledgerPath(config: AppConfig): string {
   return join(config.agentWalletDir, "eusdc-rotation-ledger.json");
 }
@@ -717,6 +1557,13 @@ function normalizeScanInput(input: RotationScanInput): Required<RotationScanInpu
   };
 }
 
+function isRouteConnected(status: RotationRouteAvailabilityStatus): boolean {
+  return status === "DIRECT_POOL" ||
+    status === "MULTIHOP_VIA_WPLS" ||
+    status === "MULTIHOP_OTHER_VERIFIED" ||
+    status === "both_directions";
+}
+
 export function buildCandidateScanRow(input: {
   candidate: RotationCandidateRegistryEntry;
   tokenValidation: RotationTokenValidation;
@@ -734,13 +1581,15 @@ export function buildCandidateScanRow(input: {
   if (input.inCooldown) rejectionReasons.push("candidate cooldown active");
   if (!market.evidenceFresh) rejectionReasons.push("market evidence is stale or incomplete");
   if (market.dataSourceErrors.length > 0) rejectionReasons.push("market data source failure");
-  if (market.routeAvailabilityStatus !== "both_directions") {
+  if (!isRouteConnected(market.routeAvailabilityStatus)) {
     rejectionReasons.push("read-only route availability missing in one or both directions");
   }
-  if (market.largestPoolLiquidityUsd < candidate.minimumLiquidityUsd) {
+  const liquidityForGate = market.largestPoolLiquidityEusdc ?? market.largestPoolLiquidityUsd;
+  const volumeForGate = market.recentVolumeEusdc ?? market.recentVolumeUsd;
+  if (liquidityForGate < candidate.minimumLiquidityUsd) {
     rejectionReasons.push("largest-pool liquidity below threshold");
   }
-  if (market.recentVolumeUsd < candidate.minimumRecentVolumeUsd) {
+  if (volumeForGate < candidate.minimumRecentVolumeUsd) {
     rejectionReasons.push("recent volume below threshold");
   }
   if (
@@ -759,6 +1608,35 @@ export function buildCandidateScanRow(input: {
   }
   if (market.directionalTrendScore < -50) {
     rejectionReasons.push("severe continuing downtrend detected");
+  }
+  if (market.candleCoverage && market.candleCoverage.coveragePercent < 80 && !market.candleCoverage.sparseMarketMethodUsed) {
+    rejectionReasons.push("insufficient candle coverage");
+  }
+  if (market.candleCoverage?.truncated) {
+    rejectionReasons.push("unresolved swap pagination truncation");
+  }
+  if (market.dipReboundEvidence?.status === "AVAILABLE") {
+    if (!market.dipReboundEvidence.volumeConfirmation) rejectionReasons.push("rebound volume confirmation missing");
+    if (market.dipReboundEvidence.trendRejected) {
+      rejectionReasons.push(market.dipReboundEvidence.reason ?? "trend rejection evidence present");
+    }
+  }
+  const metricAvailability: Record<string, RotationMetricStatus> = market.metrics
+    ? {
+        fiveMinuteReturnBps: metricStatus(market.metrics.fiveMinuteReturnBps),
+        fifteenMinuteReturnBps: metricStatus(market.metrics.fifteenMinuteReturnBps),
+        oneHourReturnBps: metricStatus(market.metrics.oneHourReturnBps),
+        sixHourReturnBps: metricStatus(market.metrics.sixHourReturnBps),
+        realizedVolatilityBps: metricStatus(market.metrics.realizedVolatilityBps),
+        reboundFromRecentLocalLowBps: metricStatus(market.metrics.reboundFromRecentLocalLowBps),
+      }
+    : {};
+  if (market.metrics) {
+    for (const [name, status] of Object.entries(metricAvailability)) {
+      if (status.status === "UNAVAILABLE") {
+        rejectionReasons.push(`${name} unavailable: ${status.reason ?? "missing"}`);
+      }
+    }
   }
 
   const rawScore =
@@ -783,8 +1661,12 @@ export function buildCandidateScanRow(input: {
     relevantPools: market.relevantPools,
     largestPoolLiquidityUsd: market.largestPoolLiquidityUsd,
     aggregateLiquidityUsd: market.aggregateLiquidityUsd,
+    largestPoolLiquidityEusdc: market.largestPoolLiquidityEusdc,
+    aggregateLiquidityEusdc: market.aggregateLiquidityEusdc,
     recentVolumeUsd: market.recentVolumeUsd,
+    recentVolumeEusdc: market.recentVolumeEusdc,
     tradeCount: market.tradeCount,
+    uniqueTransactionCount: market.uniqueTransactionCount,
     fiveMinuteReturnBps: market.fiveMinuteReturnBps,
     fifteenMinuteReturnBps: market.fifteenMinuteReturnBps,
     oneHourReturnBps: market.oneHourReturnBps,
@@ -800,9 +1682,19 @@ export function buildCandidateScanRow(input: {
     estimatedPriceImpactForCompleteEusdcBalancePercent:
       market.estimatedPriceImpactPercent,
     routeAvailabilityStatus: market.routeAvailabilityStatus,
+    entryRouteAvailability: market.entryRouteAvailability,
+    exitRouteAvailability: market.exitRouteAvailability,
     eligibility,
     score: eligibility ? Math.round(clampScore(rawScore) * 100) / 100 : 0,
     rejectionReasons,
+    metrics: market.metrics,
+    metricAvailability,
+    candleCoverage: market.candleCoverage,
+    dipReboundEvidence: market.dipReboundEvidence,
+    poolConsolidation: market.poolConsolidation,
+    dataSourcesUsed: market.dataSourcesUsed,
+    dataFreshness: market.dataFreshness,
+    rankingStatus: eligibility ? "ELIGIBLE_RANKED" : "UNRANKED_NO_EVIDENCE",
   };
 }
 
@@ -810,15 +1702,35 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
   decision: RotationScanDecision;
   winner?: RotationCandidateId;
   rankedCandidateIds: RotationCandidateId[];
+  diagnosticOrdering: RotationCandidateId[];
+  eligibleCandidateRanking: RotationCandidateId[];
+  tiedCandidateIds?: RotationCandidateId[];
   reason?: string;
 } {
-  const ranked = [...rows].sort((a, b) => b.score - a.score);
-  const eligible = ranked.filter((row) => row.eligibility);
+  const diagnostic = [...rows].sort((a, b) => {
+    const scoreDelta = b.score - a.score;
+    if (scoreDelta !== 0) return scoreDelta;
+    const liquidityDelta = (b.aggregateLiquidityEusdc ?? b.aggregateLiquidityUsd) -
+      (a.aggregateLiquidityEusdc ?? a.aggregateLiquidityUsd);
+    return liquidityDelta;
+  });
+  const eligible = diagnostic.filter((row) => row.eligibility);
   if (rows.some((row) => row.rejectionReasons.includes("market data source failure"))) {
     return {
       decision: "DATA_SOURCE_FAILURE",
-      rankedCandidateIds: ranked.map((row) => row.candidateId),
+      rankedCandidateIds: [],
+      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      eligibleCandidateRanking: [],
       reason: "one or more candidate data sources failed",
+    };
+  }
+  if (rows.some((row) => row.rejectionReasons.some((reason) => /insufficient candle coverage|pagination truncation|returnBps unavailable|volatility/i.test(reason)))) {
+    return {
+      decision: "INSUFFICIENT_HISTORY",
+      rankedCandidateIds: [],
+      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      eligibleCandidateRanking: [],
+      reason: "candle coverage or required return metrics are insufficient",
     };
   }
   if (eligible.length === 0) {
@@ -829,14 +1741,30 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
     );
     return {
       decision: allInsufficient ? "INSUFFICIENT_EVIDENCE" : "HOLD_EUSDC",
-      rankedCandidateIds: ranked.map((row) => row.candidateId),
+      rankedCandidateIds: [],
+      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      eligibleCandidateRanking: [],
       reason: "no candidate satisfied the guarded entry signal",
+    };
+  }
+  const topScore = eligible[0]!.score;
+  const tied = eligible.filter((row) => row.score === topScore).map((row) => row.candidateId);
+  if (tied.length > 1) {
+    return {
+      decision: "HOLD_EUSDC",
+      rankedCandidateIds: [],
+      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      eligibleCandidateRanking: eligible.map((row) => row.candidateId),
+      tiedCandidateIds: tied,
+      reason: "eligible candidates tied; no registry-order tie-break applied",
     };
   }
   return {
     decision: "CANDIDATE_SELECTED",
     winner: eligible[0]!.candidateId,
-    rankedCandidateIds: ranked.map((row) => row.candidateId),
+    rankedCandidateIds: eligible.map((row) => row.candidateId),
+    diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+    eligibleCandidateRanking: eligible.map((row) => row.candidateId),
   };
 }
 
@@ -908,19 +1836,11 @@ async function defaultTokenValidation(
     rejectionReasons.push("allowance read failed");
   }
 
-  const routeEvidence = await defaultMarketEvidence(config, candidate, {
-    walletId: "aw_00000000000000000000000000000000",
-    lookbackMinutes: DEFAULT_LOOKBACK_MINUTES,
-    candleMinutes: DEFAULT_CANDLE_MINUTES,
-    minimumDipBps: DEFAULT_MINIMUM_DIP_BPS,
-    minimumReboundConfirmationBps: DEFAULT_MINIMUM_REBOUND_BPS,
-    minimumNetTargetBps: DEFAULT_MINIMUM_NET_TARGET_BPS,
-  }, "0");
-  const routeToBaseAvailable = routeEvidence.routeAvailabilityStatus === "both_directions";
-  const routeFromBaseAvailable = routeEvidence.routeAvailabilityStatus === "both_directions";
-  if (!routeToBaseAvailable || !routeFromBaseAvailable) {
-    rejectionReasons.push("read-only route availability failed");
-  }
+  // Route connectivity is evaluated once in the market evidence pass. Keeping
+  // token identity validation metadata-only avoids duplicate live subgraph work
+  // and keeps routine scans read-only and bounded.
+  const routeToBaseAvailable = true;
+  const routeFromBaseAvailable = true;
 
   return {
     chainId,
@@ -942,13 +1862,9 @@ function uniqueLower(values: string[]): string[] {
   return [...new Set(values.map((value) => value.toLowerCase()).filter(Boolean))];
 }
 
-function pairHasToken(pair: SubgraphPair, token: string): boolean {
-  const lower = token.toLowerCase();
-  return pair.token0.id.toLowerCase() === lower || pair.token1.id.toLowerCase() === lower;
-}
-
 function pairLiquidityUsd(pair: SubgraphPair): number {
-  return Math.max(0, num(pair.reserveUSD));
+  const raw = Math.max(0, num(pair.reserveUSD));
+  return raw > 1_000_000_000_000 ? 0 : raw;
 }
 
 function estimatedImpactPercent(balanceRaw: string, liquidityUsd: number): number | null {
@@ -962,69 +1878,324 @@ function swapsVolume(swaps: SubgraphSwap[]): number {
   return swaps.reduce((sum, swap) => sum + num(swap.amountUSD), 0);
 }
 
-async function defaultMarketEvidence(
+async function fetchPairsForCandidate(
   config: AppConfig,
   candidate: RotationCandidateRegistryEntry,
-  _input: Required<RotationScanInput>,
-  eUsdcBalanceRaw: string,
-): Promise<RotationMarketEvidence> {
+): Promise<{ pairs: SubgraphPair[]; errors: string[] }> {
   const errors: string[] = [];
   const pairs: SubgraphPair[] = [];
+  const tokens = [candidate.executionTokenAddress, WPLS_ADDRESS, EUSDC_ADDRESS];
   for (const version of ["v1", "v2"] as const) {
-    try {
-      pairs.push(...(await fetchPairsForToken(config, candidate.executionTokenAddress, 12, version)));
-    } catch (err) {
-      errors.push(`${version} pairs: ${err instanceof Error ? err.message : String(err)}`);
+    for (const token of tokens) {
+      try {
+        pairs.push(...(await fetchPairsForToken(config, token, 20, version)));
+      } catch (err) {
+        errors.push(`${version} pairs ${token}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
   const byId = new Map<string, SubgraphPair>();
   for (const pair of pairs) byId.set(pair.id.toLowerCase(), pair);
-  const mergedPairs = [...byId.values()];
-  const basePairs = mergedPairs.filter(
-    (pair) => pairHasToken(pair, candidate.baseAssetAddress) && pairHasToken(pair, candidate.executionTokenAddress),
+  return { pairs: [...byId.values()], errors };
+}
+
+function selectedSwapPairIds(
+  candidate: RotationCandidateRegistryEntry,
+  pairs: SubgraphPair[],
+): string[] {
+  const candidateToken = candidate.executionTokenAddress.toLowerCase();
+  const relevant = pairs.filter(
+    (pair) =>
+      pairMatches(pair, candidateToken, EUSDC_ADDRESS) ||
+      pairMatches(pair, candidateToken, WPLS_ADDRESS) ||
+      pairMatches(pair, WPLS_ADDRESS, EUSDC_ADDRESS),
   );
-  const largestPoolLiquidityUsd = Math.max(0, ...mergedPairs.map(pairLiquidityUsd));
-  const aggregateLiquidityUsd = mergedPairs.reduce((sum, pair) => sum + pairLiquidityUsd(pair), 0);
-  let swaps: SubgraphSwap[] = [];
-  try {
-    swaps = (await fetchSwapsAdvanced(config, {
-      token: candidate.executionTokenAddress,
-      first: 50,
-      version: "v2",
-    })).swaps;
-  } catch (err) {
-    errors.push(`v2 swaps: ${err instanceof Error ? err.message : String(err)}`);
+  return relevant
+    .sort((a, b) => pairLiquidityUsd(b) - pairLiquidityUsd(a))
+    .slice(0, 4)
+    .map((pair) => pair.id.toLowerCase());
+}
+
+async function verifyPoolBytecode(
+  config: AppConfig,
+  pairIds: string[],
+): Promise<Map<string, boolean>> {
+  const client = getPublicClient(config);
+  const rows = await Promise.allSettled(
+    pairIds.map(async (id) => {
+      const code = await client.getBytecode({ address: id as `0x${string}` });
+      return [id.toLowerCase(), typeof code === "string" && code !== "0x"] as const;
+    }),
+  );
+  const out = new Map<string, boolean>();
+  for (const row of rows) {
+    if (row.status === "fulfilled") out.set(row.value[0], row.value[1]);
   }
+  return out;
+}
+
+async function fetchPairSwapsPaginated(input: {
+  config: AppConfig;
+  pairIds: string[];
+  startTimestamp: number;
+  maxPagesPerPair?: number;
+}): Promise<{
+  swaps: SubgraphSwap[];
+  pageCount: number;
+  truncated: boolean;
+  errors: string[];
+  pairsUsed: string[];
+}> {
+  const errors: string[] = [];
+  const maxPages = input.maxPagesPerPair ?? 8;
+  const byId = new Map<string, SubgraphSwap>();
+  let pageCount = 0;
+  let truncated = false;
+  const tasks = input.pairIds.map(async (pairId) => {
+    const local: SubgraphSwap[] = [];
+    let localPages = 0;
+    let localTruncated = false;
+    for (let page = 0; page < maxPages; page += 1) {
+      const result = await fetchSwapsAdvanced(input.config, {
+        pair: pairId,
+        first: 100,
+        skip: page * 100,
+        version: "v2",
+      });
+      localPages += 1;
+      const swaps = result.swaps ?? [];
+      local.push(...swaps);
+      const oldest = swaps.reduce(
+        (min, swap) => Math.min(min, Number(swap.timestamp) || Number.POSITIVE_INFINITY),
+        Number.POSITIVE_INFINITY,
+      );
+      if (swaps.length < 100 || oldest <= input.startTimestamp) break;
+      if (page === maxPages - 1) localTruncated = true;
+    }
+    return { pairId, swaps: local, pageCount: localPages, truncated: localTruncated };
+  });
+  const settled = await Promise.allSettled(tasks);
+  for (const row of settled) {
+    if (row.status === "rejected") {
+      errors.push(row.reason instanceof Error ? row.reason.message : String(row.reason));
+      continue;
+    }
+    pageCount += row.value.pageCount;
+    truncated = truncated || row.value.truncated;
+    for (const swap of row.value.swaps) {
+      const key = `${swap.transaction?.id ?? ""}:${swap.id}`;
+      byId.set(key, swap);
+    }
+  }
+  return {
+    swaps: [...byId.values()].sort((a, b) => Number(a.timestamp) - Number(b.timestamp)),
+    pageCount,
+    truncated,
+    errors,
+    pairsUsed: input.pairIds,
+  };
+}
+
+function buildAnchorObservations(swaps: SubgraphSwap[]): RotationPriceObservation[] {
+  return swaps
+    .filter((swap) => swapPairMatches(swap, WPLS_ADDRESS, EUSDC_ADDRESS))
+    .map((swap) =>
+      priceObservationFromSwap({
+        swap,
+        candidate: getRotationCandidate("PLS"),
+      }),
+    )
+    .filter((row): row is RotationPriceObservation => row !== null);
+}
+
+function observationsForCandidate(
+  candidate: RotationCandidateRegistryEntry,
+  swaps: SubgraphSwap[],
+  anchorObservations: RotationPriceObservation[],
+): RotationPriceObservation[] {
+  const byId = new Map<string, RotationPriceObservation>();
+  for (const swap of swaps) {
+    const obs = priceObservationFromSwap({
+      swap,
+      candidate,
+      anchorObservations,
+      maxAnchorAgeSeconds: 15 * 60,
+    });
+    if (obs) byId.set(obs.swapId, obs);
+  }
+  return [...byId.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function marketMetricNumber(
+  metrics: Record<string, RotationMetric<unknown> | RotationUnavailableMetric>,
+  key: string,
+): number | null {
+  const value = metrics[key];
+  if (!value || ("status" in value && value.status === "UNAVAILABLE")) return null;
+  if (!("value" in value)) return null;
+  return typeof value.value === "number" ? value.value : null;
+}
+
+async function defaultMarketEvidence(
+  config: AppConfig,
+  candidate: RotationCandidateRegistryEntry,
+  input: Required<RotationScanInput>,
+  eUsdcBalanceRaw: string,
+): Promise<RotationMarketEvidence> {
+  const endTimestamp = Math.floor(Date.now() / 1000);
+  const startTimestamp = endTimestamp - input.lookbackMinutes * 60;
+  const { pairs: mergedPairs, errors } = await fetchPairsForCandidate(config, candidate);
+  const routeAvailabilityStatus = deriveRouteConnectivity({ candidate, pairs: mergedPairs });
+  const anchor = findAnchorWplsEusdcPair(mergedPairs);
+  const wplsPrice = deriveWplsEusdcPrice(anchor);
+  const priceMap = new Map<string, number>([
+    [EUSDC_ADDRESS.toLowerCase(), 1],
+    ...(wplsPrice ? ([[WPLS_ADDRESS.toLowerCase(), wplsPrice]] as Array<[string, number]>) : []),
+  ]);
+  for (const pair of mergedPairs) {
+    const p0 = pairPriceEusdc(pair, tokenId(pair.token0), priceMap);
+    if (p0 && !priceMap.has(tokenId(pair.token0))) priceMap.set(tokenId(pair.token0), p0);
+    const p1 = pairPriceEusdc(pair, tokenId(pair.token1), priceMap);
+    if (p1 && !priceMap.has(tokenId(pair.token1))) priceMap.set(tokenId(pair.token1), p1);
+  }
+  const pairIds = selectedSwapPairIds(candidate, mergedPairs);
+  const poolBytecode = await verifyPoolBytecode(config, pairIds);
+  const consolidation = consolidateRotationPools({
+    candidate,
+    pairs: mergedPairs,
+    priceMap,
+    poolBytecode,
+  });
+  let swaps: SubgraphSwap[] = [];
+  let pageCount = 0;
+  let truncated = false;
+  try {
+    const paged = await fetchPairSwapsPaginated({
+      config,
+      pairIds,
+      startTimestamp,
+      maxPagesPerPair: 4,
+    });
+    swaps = paged.swaps;
+    pageCount = paged.pageCount;
+    truncated = paged.truncated;
+    errors.push(...paged.errors);
+  } catch (err) {
+    errors.push(`paginated swaps: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const anchorObservations = buildAnchorObservations(swaps);
+  const observations = observationsForCandidate(candidate, swaps, anchorObservations);
+  const candleResult = buildFiveMinuteCandles({
+    observations,
+    lookbackMinutes: input.lookbackMinutes,
+    candleMinutes: input.candleMinutes,
+    nowMs: Date.now(),
+  });
+  candleResult.coverage.truncated = truncated;
+  const analysis = analyzeRotationCandles({
+    candles: candleResult.candles,
+    scanInput: input,
+    pageCount,
+    truncated,
+  });
+  const uniqueTransactionCount = new Set(
+    observations.map((obs) => obs.swapId.split(":")[0] || obs.swapId),
+  ).size;
   const recentVolumeUsd = swapsVolume(swaps);
-  const tradeCount = swaps.length;
-  const routeAvailabilityStatus =
-    basePairs.length > 0 ? "both_directions" : "none";
+  const recentVolumeEusdc = observations.reduce((sum, obs) => sum + obs.volumeEusdc, 0);
+  const largestPoolLiquidityEusdc = consolidation.largestPoolLiquidityEusdc;
+  const aggregateLiquidityEusdc = consolidation.aggregateLiquidityEusdc;
+  const latestTimestamp = observations[observations.length - 1]?.timestamp ?? null;
+  const stale = latestTimestamp === null || endTimestamp - latestTimestamp > 30 * 60;
+  const coverage = candleResult.coverage.coveragePercent;
+  const enoughCoverage = coverage >= 80 || (observations.length >= 20 && !truncated);
+  const metrics: Record<string, RotationMetric<unknown> | RotationUnavailableMetric> = {
+    ...analysis.metrics,
+    aggregateLiquidityEusdc: makeMetric({
+      value: aggregateLiquidityEusdc,
+      unit: "eusdc",
+      source: "pool reserves * reserve-derived token prices",
+      sourceTimestamp: isoFromSeconds(endTimestamp),
+      startTimestamp: isoFromSeconds(startTimestamp),
+      endTimestamp: isoFromSeconds(endTimestamp),
+      sampleCount: consolidation.eligiblePools.length,
+      pageCount: 0,
+      truncated: false,
+      coveragePercent: 100,
+      stale: false,
+      confidence: aggregateLiquidityEusdc > 0 ? "medium" : "none",
+      warnings: consolidation.excludedPools.map((row) => `${row.pool}: ${row.reason}`),
+    }),
+    recentVolumeEusdc: makeMetric({
+      value: round(recentVolumeEusdc, 6),
+      unit: "eusdc",
+      source: "paginated pair swaps converted to eUSDC",
+      sourceTimestamp: isoFromSeconds(latestTimestamp),
+      startTimestamp: isoFromSeconds(startTimestamp),
+      endTimestamp: isoFromSeconds(endTimestamp),
+      sampleCount: observations.length,
+      pageCount,
+      truncated,
+      coveragePercent: coverage,
+      stale,
+      confidence: observations.length > 0 && !stale ? "medium" : "none",
+      warnings: truncated ? ["pagination cap reached before time boundary"] : [],
+    }),
+  };
+  const fiveMinuteReturnBps = marketMetricNumber(metrics, "fiveMinuteReturnBps");
+  const fifteenMinuteReturnBps = marketMetricNumber(metrics, "fifteenMinuteReturnBps");
+  const oneHourReturnBps = marketMetricNumber(metrics, "oneHourReturnBps");
+  const sixHourReturnBps = marketMetricNumber(metrics, "sixHourReturnBps");
+  const distanceFromOneHourHighBps = marketMetricNumber(metrics, "distanceFromOneHourHighBps");
+  const distanceFromOneHourLowBps = marketMetricNumber(metrics, "distanceFromOneHourLowBps");
+  const reboundFromRecentLocalLowBps = marketMetricNumber(metrics, "reboundFromRecentLocalLowBps");
+  const realizedVolatilityBps = marketMetricNumber(metrics, "realizedVolatilityBps");
+  const tradeCount = observations.length;
   return {
     relevantPools: uniqueLower(mergedPairs.map((pair) => pair.id)),
-    largestPoolLiquidityUsd,
-    aggregateLiquidityUsd,
-    recentVolumeUsd,
+    largestPoolLiquidityUsd: largestPoolLiquidityEusdc,
+    aggregateLiquidityUsd: aggregateLiquidityEusdc,
+    largestPoolLiquidityEusdc,
+    aggregateLiquidityEusdc,
+    recentVolumeUsd: recentVolumeEusdc || recentVolumeUsd,
+    recentVolumeEusdc,
     tradeCount,
-    fiveMinuteReturnBps: null,
-    fifteenMinuteReturnBps: null,
-    oneHourReturnBps: null,
-    sixHourReturnBps: null,
-    distanceFromOneHourHighBps: null,
-    distanceFromOneHourLowBps: null,
-    reboundFromRecentLocalLowBps: null,
-    realizedVolatilityBps: null,
-    directionalTrendScore: 0,
-    meanReversionScore: 0,
-    liquidityScore: Math.min(100, (aggregateLiquidityUsd / Math.max(1, candidate.minimumLiquidityUsd)) * 50),
-    volumeScore: Math.min(100, (recentVolumeUsd / Math.max(1, candidate.minimumRecentVolumeUsd)) * 50),
-    routeQualityScore: routeAvailabilityStatus === "both_directions" ? 70 : 0,
-    volatilitySuitabilityScore: 0,
-    estimatedPriceImpactPercent: estimatedImpactPercent(eUsdcBalanceRaw, largestPoolLiquidityUsd),
+    uniqueTransactionCount,
+    fiveMinuteReturnBps,
+    fifteenMinuteReturnBps,
+    oneHourReturnBps,
+    sixHourReturnBps,
+    distanceFromOneHourHighBps,
+    distanceFromOneHourLowBps,
+    reboundFromRecentLocalLowBps,
+    realizedVolatilityBps,
+    directionalTrendScore: analysis.directionalTrendScore,
+    meanReversionScore: analysis.meanReversionScore,
+    liquidityScore: Math.min(100, (aggregateLiquidityEusdc / Math.max(1, candidate.minimumLiquidityUsd)) * 50),
+    volumeScore: Math.min(100, (recentVolumeEusdc / Math.max(1, candidate.minimumRecentVolumeUsd)) * 50),
+    routeQualityScore:
+      routeAvailabilityStatus === "DIRECT_POOL" ? 100 :
+        routeAvailabilityStatus === "MULTIHOP_VIA_WPLS" ? 85 :
+          routeAvailabilityStatus === "MULTIHOP_OTHER_VERIFIED" ? 70 : 0,
+    volatilitySuitabilityScore: analysis.volatilitySuitabilityScore,
+    estimatedPriceImpactPercent: estimatedImpactPercent(eUsdcBalanceRaw, largestPoolLiquidityEusdc),
     routeAvailabilityStatus,
-    evidenceFresh: errors.length === 0 && tradeCount > 0,
+    entryRouteAvailability: routeAvailabilityStatus,
+    exitRouteAvailability: routeAvailabilityStatus,
+    evidenceFresh: errors.length === 0 && tradeCount > 0 && !stale && enoughCoverage,
     dataSourceErrors: errors,
-    poolsUsed: uniqueLower(basePairs.map((pair) => pair.id)),
-    tokenPath: [candidate.baseAssetAddress.toLowerCase(), candidate.executionTokenAddress.toLowerCase()],
+    poolsUsed: consolidation.eligiblePools,
+    tokenPath:
+      routeAvailabilityStatus === "MULTIHOP_VIA_WPLS"
+        ? [candidate.baseAssetAddress.toLowerCase(), WPLS_ADDRESS.toLowerCase(), candidate.executionTokenAddress.toLowerCase()]
+        : [candidate.baseAssetAddress.toLowerCase(), candidate.executionTokenAddress.toLowerCase()],
+    metrics,
+    candleCoverage: candleResult.coverage,
+    dipReboundEvidence: analysis.dipReboundEvidence,
+    poolConsolidation: consolidation,
+    dataSourcesUsed: ["PulseX V1/V2 pairs", "PulseX V2 paginated pair swaps", "PulseChain RPC bytecode/metadata"],
+    dataFreshness: stale ? "stale" : "fresh",
+    diagnosticRankReason: enoughCoverage ? "candles available" : "insufficient candle coverage",
   };
 }
 
@@ -1032,6 +2203,7 @@ export const defaultRotationDeps: RotationDeps = {
   nowMs: () => Date.now(),
   getChainId,
   getAgentWalletInfo,
+  listAgentWallets,
   agentWalletSystemStatus,
   getTokenValidation: defaultTokenValidation,
   fetchCandidateMarketEvidence: defaultMarketEvidence,
@@ -1089,6 +2261,18 @@ async function getWalletForRotation(
   return wallet;
 }
 
+function getWalletForRotationReadOnly(
+  config: AppConfig,
+  walletId: string,
+  deps: RotationDeps,
+): AgentWalletPublicInfo {
+  const wallet = deps.listAgentWallets(config).find((entry) => entry.id === walletId);
+  if (!wallet) throw new Error("wallet not found");
+  if (!wallet.policy.enabled) throw new Error("wallet disabled");
+  if (wallet.policy.killed) throw new Error("wallet killed");
+  return wallet;
+}
+
 export async function runEusdcRotationScan(
   config: AppConfig,
   input: RotationScanInput,
@@ -1104,7 +2288,7 @@ export async function runEusdcRotationScan(
   let walletAddress: `0x${string}` | undefined;
   let eUsdcBalanceRaw = "0";
   try {
-    const wallet = await getWalletForRotation(config, scanInput.walletId, deps);
+    const wallet = getWalletForRotationReadOnly(config, scanInput.walletId, deps);
     walletAddress = wallet.address;
     eUsdcBalanceRaw = await deps.readTokenBalance(config, EUSDC_TOKEN_ADDRESS, wallet.address);
   } catch {
@@ -1191,9 +2375,24 @@ export async function runEusdcRotationScan(
     );
   }
   const selection = selectRotationWinner(rows);
+  const wplsPrice =
+    rows.find((row) => row.candidateId === "PLS")?.poolConsolidation?.consolidatedPriceEusdc ??
+    null;
+  const hasProductionMarketEvidence = rows.some((row) => row.poolConsolidation || row.metrics);
+  const economicFeasibility = computeScanEconomicFeasibility({
+    startingEusdcRaw: eUsdcBalanceRaw,
+    minimumNetTargetBps: scanInput.minimumNetTargetBps,
+    wplsPriceEusdc: wplsPrice,
+  });
+  const finalDecision =
+    selection.decision === "CANDIDATE_SELECTED" &&
+    hasProductionMarketEvidence &&
+    !economicFeasibility.onePercentTargetEconomicallyPlausible
+      ? "TARGET_ECONOMICALLY_INFEASIBLE"
+      : selection.decision;
   const result: RotationScanResult = {
     ok: true,
-    decision: selection.decision,
+    decision: finalDecision,
     walletId: scanInput.walletId,
     ...(walletAddress ? { walletAddress } : {}),
     state,
@@ -1203,16 +2402,25 @@ export async function runEusdcRotationScan(
       scanInput,
       state,
       candidates: rows.map(stableScanPayload),
-      decision: selection.decision,
+      decision: finalDecision,
       winner: selection.winner ?? null,
+      economicFeasibility,
     }),
     quoteCallCount: quoteCounter.count,
     candidates: rows,
-    ...(selection.winner ? { winner: selection.winner } : {}),
-    rankedCandidateIds: selection.rankedCandidateIds,
+    ...(finalDecision === "CANDIDATE_SELECTED" && selection.winner ? { winner: selection.winner } : {}),
+    rankedCandidateIds: finalDecision === "CANDIDATE_SELECTED" ? selection.rankedCandidateIds : [],
+    diagnosticOrdering: selection.diagnosticOrdering,
+    eligibleCandidateRanking: selection.eligibleCandidateRanking,
+    ...(selection.tiedCandidateIds ? { tiedCandidateIds: selection.tiedCandidateIds } : {}),
+    economicFeasibility,
     noPiteasQuoteUsed: true,
     noLiveTransaction: true,
-    ...(selection.reason ? { reason: selection.reason } : {}),
+    ...(finalDecision === "TARGET_ECONOMICALLY_INFEASIBLE"
+      ? { reason: "dynamic gas-adjusted target makes a normal 1% cycle economically infeasible" }
+      : selection.reason
+        ? { reason: selection.reason }
+        : {}),
   };
   lastScanByWallet.set(scanInput.walletId, result);
   return result;
