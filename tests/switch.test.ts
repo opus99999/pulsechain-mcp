@@ -614,7 +614,7 @@ describe("Switch tool registration", () => {
     expect(meta.find((m) => m.name === "switch_prepare_swap")?.description).toMatch(
       /piteas|SWITCH_API_KEY|request-api-key/i,
     );
-    // Existing inventory plus in-process Piteas wallet proposal and eUSDC rotation tools.
-    expect(meta.length).toBe(108);
+    // Existing inventory plus in-process Piteas wallet proposal, rotation tools, and history tools.
+    expect(meta.length).toBe(110);
   });
 });

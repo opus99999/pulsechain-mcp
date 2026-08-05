@@ -444,6 +444,8 @@ describe("Piteas tool registration", () => {
     expect(names).toContain("phiat_live_route_readiness");
     expect(names).toContain("phiat_execution_trust_report");
     expect(names).toContain("piteas_propose_agent_swap");
+    expect(names).toContain("eusdc_rotation_history_sync");
+    expect(names).toContain("eusdc_rotation_history_status");
     expect(names).toContain("eusdc_rotation_scan");
     expect(names).toContain("eusdc_rotation_propose_entry");
     expect(names).toContain("eusdc_rotation_propose_exit");
@@ -465,6 +467,6 @@ describe("Piteas tool registration", () => {
     expect(proposalTool?.category).toBe("wallet");
     expect(proposalTool?.write).toBe(true);
     expect(proposalTool?.description).toMatch(/never signs|raw calldata/i);
-    expect(meta.length).toBe(108);
+    expect(meta.length).toBe(110);
   });
 });

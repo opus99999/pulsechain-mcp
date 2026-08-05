@@ -791,7 +791,7 @@ describe("Tier A tool registration", () => {
       expect(t?.category).toBe("analytics");
       expect(t?.write).toBe(false);
     }
-    // Prior inventory + in-process Piteas wallet proposal + six eUSDC rotation tools
-    expect(meta.length).toBe(108);
+    // Prior inventory + in-process Piteas wallet proposal + six rotation tools + two history tools
+    expect(meta.length).toBe(110);
   });
 });

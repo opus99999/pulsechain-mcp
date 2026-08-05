@@ -15,6 +15,7 @@ coverage/
 wallets/
 data/wallets/
 data/wallets-lab/
+data/eusdc-rotation-history/
 data/install-host-configs/
 .DS_Store
 *.tsbuildinfo

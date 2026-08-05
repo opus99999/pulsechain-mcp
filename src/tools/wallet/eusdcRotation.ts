@@ -1,6 +1,13 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { encodeFunctionData, formatEther, formatUnits } from "viem";
+import {
+  decodeEventLog,
+  encodeFunctionData,
+  formatEther,
+  formatUnits,
+  parseAbiItem,
+  parseUnits,
+} from "viem";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
@@ -102,6 +109,11 @@ export type RotationScanDecision =
   | "INSUFFICIENT_EVIDENCE"
   | "TARGET_ECONOMICALLY_INFEASIBLE"
   | "DATA_SOURCE_FAILURE";
+
+export type RotationAnalysisMode =
+  | "DENSE_CANDLES"
+  | "SPARSE_EVENT_TIME"
+  | "UNUSABLE_HISTORY";
 
 export type RotationMetricUnit =
   | "token_raw"
@@ -258,6 +270,21 @@ const DEFAULT_MAX_GAS_COST_PLS = "1500";
 const SCAN_FRESHNESS_MS = 5 * 60_000;
 const PITEAS_QUOTE_RATE_WINDOW_MS = 60_000;
 const PITEAS_QUOTE_RATE_LIMIT = 10;
+const DEFAULT_HISTORY_LOOKBACK_MINUTES = 10_080;
+const DEFAULT_HISTORY_RETENTION_DAYS = 7;
+const DEFAULT_HISTORY_PAGE_SIZE = 100;
+const DEFAULT_HISTORY_MAX_PAGES = 32;
+const DEFAULT_LOG_CHUNK_BLOCKS = 25_000;
+const HISTORY_STORE_SCHEMA_VERSION = 1;
+const HISTORY_RECENT_REORG_BLOCKS = 64n;
+const SPARSE_MIN_ACTUAL_SWAPS = 20;
+const SPARSE_MAX_GAP_MINUTES = 360;
+const FRESH_TRADE_MAX_AGE_MINUTES = 30;
+const PRICE_CARRY_FORWARD_MAX_MINUTES = 60;
+
+const v2SwapEventAbi = parseAbiItem(
+  "event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)",
+);
 const ROUTER = VERIFIED_PITEAS_ROUTER;
 
 const walletIdSchema = z.string().regex(/^aw_[a-f0-9]{32}$/);
@@ -338,6 +365,8 @@ export interface RotationMarketEvidence {
   metrics?: Record<string, RotationMetric<unknown> | RotationUnavailableMetric>;
   candleCoverage?: RotationCandleCoverage;
   dipReboundEvidence?: RotationDipReboundEvidence;
+  historyQuality?: RotationHistoryQuality;
+  targetAwareReversion?: RotationTargetAwareReversion;
   poolConsolidation?: RotationPoolConsolidation;
   dataSourcesUsed?: string[];
   dataFreshness?: string;
@@ -383,10 +412,12 @@ export interface RotationCandidateScanRow {
   metricAvailability?: Record<string, RotationMetricStatus>;
   candleCoverage?: RotationCandleCoverage;
   dipReboundEvidence?: RotationDipReboundEvidence;
+  historyQuality?: RotationHistoryQuality;
+  targetAwareReversion?: RotationTargetAwareReversion;
   poolConsolidation?: RotationPoolConsolidation;
   dataSourcesUsed?: string[];
   dataFreshness?: string;
-  rankingStatus?: "ELIGIBLE_RANKED" | "UNRANKED_NO_EVIDENCE" | "TIED";
+  rankingStatus?: "ELIGIBLE_RANKED" | "UNRANKED_NO_EVIDENCE" | "UNRANKED_INCOMPLETE_HISTORY" | "TIED";
 }
 
 export interface RotationScanResult {
@@ -462,11 +493,16 @@ export interface RotationCandleCoverage {
   populatedCandles: number;
   activeTradeCandles: number;
   coveragePercent: number;
+  activeTradeCandlePercent?: number;
+  sourceCompletenessPercent?: number;
+  priceContinuityPercent?: number;
+  analysisMode?: RotationAnalysisMode;
   maximumDataGapMinutes: number | null;
   mostRecentTradeAgeMinutes: number | null;
   missingBuckets: number;
   truncated: boolean;
   sparseMarketMethodUsed: boolean;
+  unresolvedGaps?: string[];
 }
 
 export interface RotationDipReboundEvidence {
@@ -483,6 +519,43 @@ export interface RotationDipReboundEvidence {
   volumeConfirmation: boolean;
   trendRejected: boolean;
   reason?: string;
+}
+
+export interface RotationHistoryQuality {
+  sourceCompletenessPercent: number;
+  activeTradeCandlePercent: number;
+  priceContinuityPercent: number;
+  analysisMode: RotationAnalysisMode;
+  latestTradeAgeMinutes: number | null;
+  maximumObservedGapMinutes: number | null;
+  actualTradeCount: number;
+  sourceTruncated: boolean;
+  unresolvedGaps: string[];
+  readinessForLiveScanning: boolean;
+}
+
+export interface RotationHistoricalReversionEvidence {
+  targetBps: number;
+  completedReversions: number;
+  failedReversions: number;
+  completionRatePercent: number;
+  medianCompletionTimeMinutes: number | null;
+  medianAdverseContinuationBps: number | null;
+  worstAdverseContinuationBps: number | null;
+  daysWithNoQualifyingReversal: number;
+}
+
+export interface RotationTargetAwareReversion {
+  requestedNetTargetBps: number;
+  requiredGrossMoveBps: number;
+  currentDipBps: number | null;
+  currentReboundBps: number | null;
+  projectedRemainingMoveBps: number | null;
+  historicalProbabilityOfCompletionPercent: number;
+  medianTimeToCompleteMinutes: number | null;
+  simpleOnePercentReversions: RotationHistoricalReversionEvidence;
+  dynamicTargetReversions: RotationHistoricalReversionEvidence;
+  dynamicGrossMoveSupported: boolean;
 }
 
 export interface RotationPoolConsolidation {
@@ -505,6 +578,142 @@ export interface RotationEconomicFeasibility {
   requiredGrossMoveBps: number;
   onePercentTargetEconomicallyPlausible: boolean;
   gasConversionSource: string;
+}
+
+export interface RotationHistoryRecord {
+  chainId: number;
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  factoryAddress: `0x${string}` | null;
+  protocol: string;
+  blockNumber: string | null;
+  blockHash: `0x${string}` | null;
+  transactionHash: `0x${string}`;
+  logIndex: number;
+  timestamp: number;
+  token0: `0x${string}`;
+  token1: `0x${string}`;
+  amount0Raw: string;
+  amount1Raw: string;
+  candidatePriceEusdc: number;
+  eusdcNotionalRaw: string;
+  source: string;
+  fetchedAt: string;
+}
+
+export interface RotationHistoryPoolSyncStatus {
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  sourceEndpoint: string;
+  queryType: string;
+  pageSize: number;
+  maximumPageCount: number;
+  cursorMechanism: string;
+  oldestReturnedRecord: string | null;
+  newestReturnedRecord: string | null;
+  requestedStartTime: string;
+  requestedEndTime: string;
+  totalRecordsRetrieved: number;
+  deduplicatedRecords: number;
+  boundaryCrossed: boolean;
+  truncationReason:
+    | "NONE"
+    | "SOURCE_ROW_LIMIT"
+    | "PAGINATION_BUG_OR_REPEATED_CURSOR"
+    | "SPARSE_ACTUAL_TRADING"
+    | "STALE_POOL"
+    | "MISSING_POOL_DISCOVERY"
+    | "FAILED_BLOCK_TO_TIME_CONVERSION"
+    | "UNSUPPORTED_EVENT_ABI"
+    | "RPC_LOG_RANGE_LIMITATION"
+    | "SOURCE_ERROR";
+  sourceRepeatsOrCapsRecords: boolean;
+  historicalPaginationReliable: boolean;
+  fallbackUsed?: "NONE" | "RPC_ETH_GETLOGS";
+  fallbackRecords?: number;
+  error?: string;
+}
+
+export interface RotationHistoryCandidateSyncStatus {
+  candidateId: RotationCandidateId;
+  recordsAdded: number;
+  recordsUpdated: number;
+  duplicateRecordsIgnored: number;
+  earliestTimestamp: string | null;
+  latestTimestamp: string | null;
+  boundaryCrossed: boolean;
+  sourceCompletenessPercent: number;
+  unresolvedGaps: string[];
+  pools: RotationHistoryPoolSyncStatus[];
+}
+
+export interface RotationHistoryFile {
+  schemaVersion: 1;
+  chainId: number;
+  updatedAt: string;
+  retentionDays: number;
+  records: RotationHistoryRecord[];
+  lastSync?: {
+    requestedStartTime: string;
+    requestedEndTime: string;
+    historyStoreFingerprint: `0x${string}`;
+    candidates: RotationHistoryCandidateSyncStatus[];
+  };
+}
+
+export interface RotationHistorySyncInput {
+  lookbackMinutes?: number;
+  maximumBlocksPerChunk?: number;
+  maximumPagesPerSource?: number;
+  forceRecentBlockRecheck?: boolean;
+}
+
+export interface RotationHistorySyncResult {
+  ok: boolean;
+  lookbackMinutes: number;
+  requestedStartTime: string;
+  requestedEndTime: string;
+  recordsAdded: number;
+  recordsUpdated: number;
+  duplicateRecordsIgnored: number;
+  earliestTimestamp: string | null;
+  latestTimestamp: string | null;
+  sourceCompleteness: RotationHistoryCandidateSyncStatus[];
+  unresolvedGaps: string[];
+  historyStorePath: string;
+  historyStoreFingerprint: `0x${string}`;
+  quoteCallCount: 0;
+  noPiteasQuoteUsed: true;
+  noWalletWrite: true;
+  noLiveTransaction: true;
+}
+
+export interface RotationHistoryCandidateStatus {
+  candidateId: RotationCandidateId;
+  recordsStored: number;
+  earliestRecord: string | null;
+  latestRecord: string | null;
+  historyDurationMinutes: number;
+  sourceCompletenessPercent: number;
+  activeCandleCoveragePercent: number;
+  priceContinuityPercent: number;
+  analysisMode: RotationAnalysisMode;
+  latestTradeAgeMinutes: number | null;
+  unresolvedGaps: string[];
+  readinessForLiveScanning: boolean;
+}
+
+export interface RotationHistoryStatusResult {
+  ok: boolean;
+  checkedAt: string;
+  lookbackMinutes: number;
+  candidates: RotationHistoryCandidateStatus[];
+  historyStorePath: string;
+  historyStoreFingerprint: `0x${string}`;
+  quoteCallCount: 0;
+  noPiteasQuoteUsed: true;
+  noWalletWrite: true;
+  noLiveTransaction: true;
 }
 
 export interface RotationCycleLedgerEntry {
@@ -832,6 +1041,8 @@ function stableScanPayload(row: RotationCandidateScanRow): Record<string, unknow
     exitRouteAvailability: row.exitRouteAvailability,
     candleCoverage: row.candleCoverage,
     dipReboundEvidence: row.dipReboundEvidence,
+    historyQuality: row.historyQuality,
+    targetAwareReversion: row.targetAwareReversion,
     eligibility: row.eligibility,
     score: row.score,
     rejectionReasons: row.rejectionReasons,
@@ -1500,7 +1711,525 @@ export function computeScanEconomicFeasibility(input: {
     gasConversionSource:
       input.wplsPriceEusdc !== null
         ? "verified WPLS/eUSDC reserve-derived price"
-        : "unavailable: no verified WPLS/eUSDC anchor",
+      : "unavailable: no verified WPLS/eUSDC anchor",
+  };
+}
+
+function historyStoreDir(): string {
+  return join(process.cwd(), "data", "eusdc-rotation-history");
+}
+
+function historyStorePath(): string {
+  return join(historyStoreDir(), "market-history.json");
+}
+
+function emptyHistoryStore(chainId: number = PULSECHAIN_CHAIN_ID): RotationHistoryFile {
+  return {
+    schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
+    chainId,
+    updatedAt: new Date(0).toISOString(),
+    retentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+    records: [],
+  };
+}
+
+export function readRotationHistoryStore(config?: AppConfig): RotationHistoryFile {
+  const file = historyStorePath();
+  if (!existsSync(file)) return emptyHistoryStore(config?.network === "testnet" ? 943 : PULSECHAIN_CHAIN_ID);
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as RotationHistoryFile;
+  return {
+    schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
+    chainId: Number(parsed.chainId ?? PULSECHAIN_CHAIN_ID),
+    updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
+    retentionDays: parsed.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+    records: Array.isArray(parsed.records) ? parsed.records : [],
+    ...(parsed.lastSync ? { lastSync: parsed.lastSync } : {}),
+  };
+}
+
+function assertPublicHistoryRecord(record: RotationHistoryRecord): void {
+  const serialized = JSON.stringify(record).toLowerCase();
+  for (const forbidden of [
+    "private_key",
+    "master_key",
+    "seed",
+    "wallet_secret",
+    ".env.wallet",
+    "raw_signed",
+  ]) {
+    if (serialized.includes(forbidden)) {
+      throw new Error(`history record contains forbidden secret marker: ${forbidden}`);
+    }
+  }
+}
+
+function writeRotationHistoryStore(store: RotationHistoryFile): void {
+  for (const record of store.records) assertPublicHistoryRecord(record);
+  const file = historyStorePath();
+  mkdirSync(dirname(file), { recursive: true });
+  atomicWriteJson(file, { ...store, updatedAt: new Date().toISOString() }, { fsync: true });
+}
+
+function rotationHistoryFingerprint(store: RotationHistoryFile): `0x${string}` {
+  return fingerprint({
+    schemaVersion: store.schemaVersion,
+    chainId: store.chainId,
+    records: store.records.map((record) => ({
+      c: record.candidateId,
+      p: record.poolAddress.toLowerCase(),
+      t: record.transactionHash.toLowerCase(),
+      i: record.logIndex,
+      ts: record.timestamp,
+      px: record.candidatePriceEusdc,
+    })),
+  });
+}
+
+function historyRecordKey(record: Pick<RotationHistoryRecord, "chainId" | "transactionHash" | "logIndex">): string {
+  return `${record.chainId}:${record.transactionHash.toLowerCase()}:${record.logIndex}`;
+}
+
+export function mergeRotationHistoryRecords(input: {
+  existing: RotationHistoryRecord[];
+  incoming: RotationHistoryRecord[];
+  nowMs: number;
+  retentionDays?: number;
+  protectedStartTimestamp?: number;
+  forceRecentBlockRecheck?: boolean;
+  latestBlockNumber?: bigint;
+}): {
+  records: RotationHistoryRecord[];
+  added: number;
+  updated: number;
+  duplicates: number;
+} {
+  const retentionSeconds = (input.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS) * 24 * 60 * 60;
+  const retentionFloor = Math.floor(input.nowMs / 1000) - retentionSeconds;
+  const protectedFloor = input.protectedStartTimestamp ?? retentionFloor;
+  const floor = Math.min(retentionFloor, protectedFloor);
+  const byKey = new Map<string, RotationHistoryRecord>();
+  for (const record of input.existing) {
+    if (record.timestamp < floor) continue;
+    byKey.set(historyRecordKey(record), record);
+  }
+  let added = 0;
+  let updated = 0;
+  let duplicates = 0;
+  const latest = input.latestBlockNumber;
+  for (const record of input.incoming) {
+    if (record.timestamp < floor) continue;
+    const key = historyRecordKey(record);
+    const prior = byKey.get(key);
+    const block = record.blockNumber ? BigInt(record.blockNumber) : null;
+    const recent =
+      input.forceRecentBlockRecheck === true &&
+      latest !== undefined &&
+      block !== null &&
+      latest >= block &&
+      latest - block <= HISTORY_RECENT_REORG_BLOCKS;
+    if (!prior) {
+      byKey.set(key, record);
+      added += 1;
+    } else if (
+      recent &&
+      (prior.blockHash !== record.blockHash ||
+        prior.candidatePriceEusdc !== record.candidatePriceEusdc ||
+        prior.eusdcNotionalRaw !== record.eusdcNotionalRaw)
+    ) {
+      byKey.set(key, record);
+      updated += 1;
+    } else {
+      duplicates += 1;
+    }
+  }
+  const records = [...byKey.values()].sort((a, b) =>
+    a.timestamp - b.timestamp ||
+    a.transactionHash.localeCompare(b.transactionHash) ||
+    a.logIndex - b.logIndex,
+  );
+  return { records, added, updated, duplicates };
+}
+
+const historyLocks = new Map<string, Promise<unknown>>();
+
+async function withHistoryLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = historyLocks.get(key) ?? Promise.resolve();
+  const current = prior.then(fn, fn);
+  const stored = current.catch(() => undefined);
+  historyLocks.set(key, stored);
+  try {
+    return await current;
+  } finally {
+    if (historyLocks.get(key) === stored) historyLocks.delete(key);
+  }
+}
+
+function decimalHumanToRaw(value: string | number | undefined, decimals: number): string {
+  const text = String(value ?? "0");
+  if (!/^-?\d+(?:\.\d+)?$/.test(text) || text.startsWith("-")) return "0";
+  try {
+    return parseUnits(text, decimals).toString();
+  } catch {
+    return "0";
+  }
+}
+
+function parseSubgraphLogIndex(swap: SubgraphSwap, fallback: number): number {
+  const parts = String(swap.id ?? "").split(/[-:#]/).reverse();
+  for (const part of parts) {
+    if (/^\d+$/.test(part)) return Number(part);
+  }
+  return fallback;
+}
+
+function swapTransactionHash(swap: SubgraphSwap, fallback: string): `0x${string}` {
+  const tx = String(swap.transaction?.id ?? "");
+  return /^0x[a-fA-F0-9]{64}$/.test(tx) ? (tx as `0x${string}`) : fingerprint({ fallback, id: swap.id });
+}
+
+function pairTokenAddress(pair: SubgraphPair, index: 0 | 1): `0x${string}` {
+  const id = index === 0 ? pair.token0.id : pair.token1.id;
+  return id.toLowerCase() as `0x${string}`;
+}
+
+function historyRecordFromSubgraphSwap(input: {
+  chainId: number;
+  candidate: RotationCandidateRegistryEntry;
+  pair: SubgraphPair;
+  swap: SubgraphSwap;
+  observation: RotationPriceObservation;
+  fetchedAt: string;
+  fallbackLogIndex: number;
+}): RotationHistoryRecord {
+  const pair = input.pair;
+  const amount0Human = num(input.swap.amount0In) + num(input.swap.amount0Out);
+  const amount1Human = num(input.swap.amount1In) + num(input.swap.amount1Out);
+  const token0Decimals = pairTokenDecimals(pair, pair.token0.id, 18);
+  const token1Decimals = pairTokenDecimals(pair, pair.token1.id, 18);
+  const txHash = swapTransactionHash(input.swap, `${pair.id}:${input.swap.id}`);
+  return {
+    chainId: input.chainId,
+    candidateId: input.candidate.candidateId,
+    poolAddress: pair.id.toLowerCase() as `0x${string}`,
+    factoryAddress: null,
+    protocol: "PulseX V2",
+    blockNumber: null,
+    blockHash: null,
+    transactionHash: txHash,
+    logIndex: parseSubgraphLogIndex(input.swap, input.fallbackLogIndex),
+    timestamp: Number(input.swap.timestamp),
+    token0: pairTokenAddress(pair, 0),
+    token1: pairTokenAddress(pair, 1),
+    amount0Raw: decimalHumanToRaw(String(amount0Human), token0Decimals),
+    amount1Raw: decimalHumanToRaw(String(amount1Human), token1Decimals),
+    candidatePriceEusdc: round(input.observation.priceEusdc, 18),
+    eusdcNotionalRaw: decimalHumanToRaw(String(input.observation.volumeEusdc), 6),
+    source: input.observation.source.includes("historical")
+      ? "pulsex-v2-subgraph-time-aligned-anchor"
+      : "pulsex-v2-subgraph",
+    fetchedAt: input.fetchedAt,
+  };
+}
+
+function recordsForCandidate(
+  store: RotationHistoryFile,
+  candidate: RotationCandidateRegistryEntry,
+  startTimestamp: number,
+  endTimestamp: number,
+): RotationHistoryRecord[] {
+  return store.records
+    .filter((record) =>
+      record.chainId === store.chainId &&
+      record.candidateId === candidate.candidateId &&
+      record.timestamp >= startTimestamp &&
+      record.timestamp <= endTimestamp &&
+      record.candidatePriceEusdc > 0,
+    )
+    .sort((a, b) => a.timestamp - b.timestamp || a.logIndex - b.logIndex);
+}
+
+function observationsFromHistory(records: RotationHistoryRecord[]): RotationPriceObservation[] {
+  return records.map((record) => ({
+    timestamp: record.timestamp,
+    priceEusdc: record.candidatePriceEusdc,
+    volumeEusdc: Number(formatUnits(BigInt(record.eusdcNotionalRaw), 6)),
+    swapId: `${record.transactionHash}:${record.logIndex}`,
+    source: record.source,
+  }));
+}
+
+export function calculatePriceContinuityPercent(input: {
+  observations: RotationPriceObservation[];
+  lookbackMinutes: number;
+  candleMinutes: number;
+  nowMs: number;
+  maxCarryForwardMinutes?: number;
+}): number {
+  const expectedCandles = Math.ceil(input.lookbackMinutes / input.candleMinutes);
+  if (expectedCandles <= 0 || input.observations.length === 0) return 0;
+  const candleSeconds = input.candleMinutes * 60;
+  const maxCarrySeconds = (input.maxCarryForwardMinutes ?? PRICE_CARRY_FORWARD_MAX_MINUTES) * 60;
+  const endSeconds = Math.floor(input.nowMs / 1000 / candleSeconds) * candleSeconds;
+  const startSeconds = endSeconds - expectedCandles * candleSeconds;
+  const observations = [...input.observations]
+    .filter((obs) => obs.timestamp >= startSeconds && obs.timestamp < endSeconds)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  let cursor = 0;
+  let lastObserved: RotationPriceObservation | null = null;
+  let covered = 0;
+  for (let bucket = startSeconds; bucket < endSeconds; bucket += candleSeconds) {
+    const bucketEnd = bucket + candleSeconds;
+    while (cursor < observations.length && observations[cursor]!.timestamp < bucketEnd) {
+      lastObserved = observations[cursor]!;
+      cursor += 1;
+    }
+    if (lastObserved && bucketEnd - lastObserved.timestamp <= maxCarrySeconds) {
+      covered += 1;
+    }
+  }
+  return round(covered / expectedCandles * 100, 4);
+}
+
+export function classifyHistoryAnalysisMode(input: {
+  sourceCompletenessPercent: number;
+  activeTradeCandlePercent: number;
+  priceContinuityPercent: number;
+  actualTradeCount: number;
+  latestTradeAgeMinutes: number | null;
+  maximumObservedGapMinutes: number | null;
+  routeConnected: boolean;
+  liquidityPasses: boolean;
+  priceDispersionPercent: number | null;
+  sourceTruncated: boolean;
+}): RotationAnalysisMode {
+  if (input.sourceCompletenessPercent < 95 || input.sourceTruncated) return "UNUSABLE_HISTORY";
+  if (input.latestTradeAgeMinutes === null || input.latestTradeAgeMinutes > FRESH_TRADE_MAX_AGE_MINUTES) {
+    return "UNUSABLE_HISTORY";
+  }
+  if (input.activeTradeCandlePercent >= 80) return "DENSE_CANDLES";
+  const dispersionOk = input.priceDispersionPercent === null || input.priceDispersionPercent <= 5;
+  if (
+    input.actualTradeCount >= SPARSE_MIN_ACTUAL_SWAPS &&
+    (input.maximumObservedGapMinutes ?? Number.POSITIVE_INFINITY) <= SPARSE_MAX_GAP_MINUTES &&
+    input.routeConnected &&
+    input.liquidityPasses &&
+    dispersionOk &&
+    input.priceContinuityPercent >= 50
+  ) {
+    return "SPARSE_EVENT_TIME";
+  }
+  return "UNUSABLE_HISTORY";
+}
+
+function sourceCompletenessForRecords(input: {
+  records: RotationHistoryRecord[];
+  startTimestamp: number;
+  endTimestamp: number;
+  syncStatus?: RotationHistoryCandidateSyncStatus;
+}): { percent: number; unresolvedGaps: string[]; truncated: boolean } {
+  const unresolved: string[] = [];
+  if (input.records.length === 0) {
+    unresolved.push("no stored records in requested window");
+    return { percent: 0, unresolvedGaps: unresolved, truncated: true };
+  }
+  const earliest = input.records[0]!.timestamp;
+  const latest = input.records[input.records.length - 1]!.timestamp;
+  const window = Math.max(1, input.endTimestamp - input.startTimestamp);
+  const coveredStart = Math.max(input.startTimestamp, earliest);
+  const coveredEnd = Math.min(input.endTimestamp, latest);
+  const spanPercent = Math.max(0, Math.min(100, (coveredEnd - coveredStart) / window * 100));
+  const statusPercent = input.syncStatus && input.syncStatus.pools.length > 0
+    ? round(input.syncStatus.pools.filter((report) =>
+      report.boundaryCrossed ||
+      report.truncationReason === "NONE" ||
+      report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+      report.truncationReason === "STALE_POOL",
+    ).length / input.syncStatus.pools.length * 100, 4)
+    : input.syncStatus?.sourceCompletenessPercent;
+  const percent = input.syncStatus?.boundaryCrossed ? 100 : round(Math.max(spanPercent, statusPercent ?? 0), 4);
+  const truncated =
+    input.syncStatus?.pools.some((pool) => pool.truncationReason !== "NONE" && pool.truncationReason !== "SPARSE_ACTUAL_TRADING") ??
+    percent < 95;
+  if (earliest > input.startTimestamp) unresolved.push("oldest stored record does not cross requested start boundary");
+  if (latest < input.endTimestamp - FRESH_TRADE_MAX_AGE_MINUTES * 60) unresolved.push("latest stored record is stale");
+  for (const gap of input.syncStatus?.unresolvedGaps ?? []) unresolved.push(gap);
+  return { percent, unresolvedGaps: [...new Set(unresolved)], truncated };
+}
+
+function buildHistoryQuality(input: {
+  records: RotationHistoryRecord[];
+  observations: RotationPriceObservation[];
+  coverage: RotationCandleCoverage;
+  sourceCompletenessPercent: number;
+  sourceTruncated: boolean;
+  unresolvedGaps: string[];
+  routeConnected: boolean;
+  liquidityPasses: boolean;
+  priceDispersionPercent: number | null;
+  nowMs: number;
+  lookbackMinutes: number;
+  candleMinutes: number;
+}): RotationHistoryQuality {
+  const latest = input.observations[input.observations.length - 1];
+  const latestTradeAgeMinutes = latest
+    ? round((Math.floor(input.nowMs / 1000) - latest.timestamp) / 60, 4)
+    : null;
+  const activeTradeCandlePercent = input.coverage.coveragePercent;
+  const priceContinuityPercent = calculatePriceContinuityPercent({
+    observations: input.observations,
+    lookbackMinutes: input.lookbackMinutes,
+    candleMinutes: input.candleMinutes,
+    nowMs: input.nowMs,
+  });
+  const analysisMode = classifyHistoryAnalysisMode({
+    sourceCompletenessPercent: input.sourceCompletenessPercent,
+    activeTradeCandlePercent,
+    priceContinuityPercent,
+    actualTradeCount: input.observations.length,
+    latestTradeAgeMinutes,
+    maximumObservedGapMinutes: input.coverage.maximumDataGapMinutes,
+    routeConnected: input.routeConnected,
+    liquidityPasses: input.liquidityPasses,
+    priceDispersionPercent: input.priceDispersionPercent,
+    sourceTruncated: input.sourceTruncated,
+  });
+  return {
+    sourceCompletenessPercent: input.sourceCompletenessPercent,
+    activeTradeCandlePercent,
+    priceContinuityPercent,
+    analysisMode,
+    latestTradeAgeMinutes,
+    maximumObservedGapMinutes: input.coverage.maximumDataGapMinutes,
+    actualTradeCount: input.records.length,
+    sourceTruncated: input.sourceTruncated,
+    unresolvedGaps: input.unresolvedGaps,
+    readinessForLiveScanning: analysisMode !== "UNUSABLE_HISTORY",
+  };
+}
+
+export function analyzeHistoricalReversions(input: {
+  observations: RotationPriceObservation[];
+  targetBps: number;
+  lookbackMinutes: number;
+}): RotationHistoricalReversionEvidence {
+  const observations = [...input.observations].sort((a, b) => a.timestamp - b.timestamp);
+  if (observations.length < 3) {
+    return {
+      targetBps: input.targetBps,
+      completedReversions: 0,
+      failedReversions: 0,
+      completionRatePercent: 0,
+      medianCompletionTimeMinutes: null,
+      medianAdverseContinuationBps: null,
+      worstAdverseContinuationBps: null,
+      daysWithNoQualifyingReversal: Math.ceil(input.lookbackMinutes / 1440),
+    };
+  }
+  let reference = observations[0]!;
+  let active:
+    | {
+        referencePrice: number;
+        localLowPrice: number;
+        localLowTimestamp: number;
+        worstAdverseBps: number;
+      }
+    | null = null;
+  const completionTimes: number[] = [];
+  const adverseContinuations: number[] = [];
+  let failed = 0;
+  const completedDays = new Set<string>();
+  for (const obs of observations.slice(1)) {
+    if (obs.priceEusdc > reference.priceEusdc && !active) {
+      reference = obs;
+    }
+    if (!active) {
+      const dipBps = reference.priceEusdc > 0
+        ? (reference.priceEusdc - obs.priceEusdc) / reference.priceEusdc * 10_000
+        : 0;
+      if (dipBps >= input.targetBps) {
+        active = {
+          referencePrice: reference.priceEusdc,
+          localLowPrice: obs.priceEusdc,
+          localLowTimestamp: obs.timestamp,
+          worstAdverseBps: 0,
+        };
+      }
+      continue;
+    }
+    if (obs.priceEusdc < active.localLowPrice) {
+      active.localLowPrice = obs.priceEusdc;
+      active.localLowTimestamp = obs.timestamp;
+      active.worstAdverseBps = active.referencePrice > 0
+        ? Math.max(active.worstAdverseBps, (active.referencePrice - obs.priceEusdc) / active.referencePrice * 10_000)
+        : active.worstAdverseBps;
+    }
+    const reboundBps = active.localLowPrice > 0
+      ? (obs.priceEusdc - active.localLowPrice) / active.localLowPrice * 10_000
+      : 0;
+    if (reboundBps >= input.targetBps) {
+      completionTimes.push((obs.timestamp - active.localLowTimestamp) / 60);
+      adverseContinuations.push(active.worstAdverseBps);
+      completedDays.add(new Date(obs.timestamp * 1000).toISOString().slice(0, 10));
+      reference = obs;
+      active = null;
+    }
+  }
+  if (active) failed += 1;
+  const completed = completionTimes.length;
+  const attempts = completed + failed;
+  const totalDays = Math.max(1, Math.ceil(input.lookbackMinutes / 1440));
+  return {
+    targetBps: input.targetBps,
+    completedReversions: completed,
+    failedReversions: failed,
+    completionRatePercent: attempts > 0 ? round(completed / attempts * 100, 4) : 0,
+    medianCompletionTimeMinutes: median(completionTimes),
+    medianAdverseContinuationBps: median(adverseContinuations),
+    worstAdverseContinuationBps: adverseContinuations.length > 0 ? round(Math.max(...adverseContinuations), 6) : null,
+    daysWithNoQualifyingReversal: Math.max(0, totalDays - completedDays.size),
+  };
+}
+
+function buildTargetAwareReversion(input: {
+  observations: RotationPriceObservation[];
+  dipReboundEvidence: RotationDipReboundEvidence;
+  economicFeasibility: RotationEconomicFeasibility;
+  requestedNetTargetBps: number;
+  lookbackMinutes: number;
+}): RotationTargetAwareReversion {
+  const requiredGrossMoveBps = input.economicFeasibility.requiredGrossMoveBps;
+  const currentDipBps = input.dipReboundEvidence.status === "AVAILABLE"
+    ? input.dipReboundEvidence.dipBps ?? null
+    : null;
+  const currentReboundBps = input.dipReboundEvidence.status === "AVAILABLE"
+    ? input.dipReboundEvidence.reboundBps ?? null
+    : null;
+  const dynamic = analyzeHistoricalReversions({
+    observations: input.observations,
+    targetBps: requiredGrossMoveBps,
+    lookbackMinutes: input.lookbackMinutes,
+  });
+  const simple = analyzeHistoricalReversions({
+    observations: input.observations,
+    targetBps: input.requestedNetTargetBps,
+    lookbackMinutes: input.lookbackMinutes,
+  });
+  const projectedRemaining =
+    currentReboundBps === null ? null : round(Math.max(0, requiredGrossMoveBps - currentReboundBps), 6);
+  return {
+    requestedNetTargetBps: input.requestedNetTargetBps,
+    requiredGrossMoveBps,
+    currentDipBps,
+    currentReboundBps,
+    projectedRemainingMoveBps: projectedRemaining,
+    historicalProbabilityOfCompletionPercent: dynamic.completionRatePercent,
+    medianTimeToCompleteMinutes: dynamic.medianCompletionTimeMinutes,
+    simpleOnePercentReversions: simple,
+    dynamicTargetReversions: dynamic,
+    dynamicGrossMoveSupported:
+      currentDipBps !== null &&
+      currentDipBps >= requiredGrossMoveBps &&
+      dynamic.completedReversions > 0,
   };
 }
 
@@ -1615,10 +2344,50 @@ export function buildCandidateScanRow(input: {
   if (market.candleCoverage?.truncated) {
     rejectionReasons.push("unresolved swap pagination truncation");
   }
+  if (market.historyQuality) {
+    if (market.historyQuality.sourceCompletenessPercent < 95) {
+      rejectionReasons.push("source completeness below 95%");
+    }
+    if (market.historyQuality.analysisMode === "UNUSABLE_HISTORY") {
+      rejectionReasons.push("unusable price history");
+    }
+    if (market.historyQuality.latestTradeAgeMinutes === null ||
+      market.historyQuality.latestTradeAgeMinutes > FRESH_TRADE_MAX_AGE_MINUTES) {
+      rejectionReasons.push("latest trade is stale or unavailable");
+    }
+    if (market.historyQuality.actualTradeCount < SPARSE_MIN_ACTUAL_SWAPS) {
+      rejectionReasons.push("insufficient actual trade count");
+    }
+    if (market.historyQuality.maximumObservedGapMinutes !== null &&
+      market.historyQuality.maximumObservedGapMinutes > SPARSE_MAX_GAP_MINUTES) {
+      rejectionReasons.push("excessive observed trade gap");
+    }
+    for (const gap of market.historyQuality.unresolvedGaps) {
+      rejectionReasons.push(`history gap: ${gap}`);
+    }
+  }
   if (market.dipReboundEvidence?.status === "AVAILABLE") {
     if (!market.dipReboundEvidence.volumeConfirmation) rejectionReasons.push("rebound volume confirmation missing");
     if (market.dipReboundEvidence.trendRejected) {
       rejectionReasons.push(market.dipReboundEvidence.reason ?? "trend rejection evidence present");
+    }
+  }
+  if (market.targetAwareReversion) {
+    const requiredGross = market.targetAwareReversion.requiredGrossMoveBps;
+    if (
+      market.targetAwareReversion.currentDipBps === null ||
+      market.targetAwareReversion.currentDipBps < requiredGross
+    ) {
+      rejectionReasons.push("current dip does not meet dynamic gross target");
+    }
+    if (
+      market.targetAwareReversion.currentReboundBps !== null &&
+      market.targetAwareReversion.currentReboundBps < scanInput.minimumReboundConfirmationBps
+    ) {
+      rejectionReasons.push("actual-trade rebound below configured confirmation");
+    }
+    if (!market.targetAwareReversion.dynamicGrossMoveSupported) {
+      rejectionReasons.push("historical dynamic-target reversion is not proven");
     }
   }
   const metricAvailability: Record<string, RotationMetricStatus> = market.metrics
@@ -1691,10 +2460,16 @@ export function buildCandidateScanRow(input: {
     metricAvailability,
     candleCoverage: market.candleCoverage,
     dipReboundEvidence: market.dipReboundEvidence,
+    historyQuality: market.historyQuality,
+    targetAwareReversion: market.targetAwareReversion,
     poolConsolidation: market.poolConsolidation,
     dataSourcesUsed: market.dataSourcesUsed,
     dataFreshness: market.dataFreshness,
-    rankingStatus: eligibility ? "ELIGIBLE_RANKED" : "UNRANKED_NO_EVIDENCE",
+    rankingStatus: eligibility
+      ? "ELIGIBLE_RANKED"
+      : rejectionReasons.some((reason) => /history|source completeness|pagination|trade count|latest trade|gap|candle coverage/i.test(reason))
+        ? "UNRANKED_INCOMPLETE_HISTORY"
+        : "UNRANKED_NO_EVIDENCE",
   };
 }
 
@@ -1724,7 +2499,10 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
       reason: "one or more candidate data sources failed",
     };
   }
-  if (rows.some((row) => row.rejectionReasons.some((reason) => /insufficient candle coverage|pagination truncation|returnBps unavailable|volatility/i.test(reason)))) {
+  if (rows.some((row) => row.rankingStatus === "UNRANKED_INCOMPLETE_HISTORY" ||
+    row.rejectionReasons.some((reason) =>
+      /insufficient candle coverage|pagination truncation|returnBps unavailable|volatility|source completeness|unusable price history|latest trade|trade count|history gap/i.test(reason),
+    ))) {
     return {
       decision: "INSUFFICIENT_HISTORY",
       rankedCandidateIds: [],
@@ -1936,18 +2714,24 @@ async function verifyPoolBytecode(
 
 async function fetchPairSwapsPaginated(input: {
   config: AppConfig;
+  candidateId?: RotationCandidateId;
   pairIds: string[];
   startTimestamp: number;
+  endTimestamp?: number;
   maxPagesPerPair?: number;
+  pageSize?: number;
 }): Promise<{
   swaps: SubgraphSwap[];
   pageCount: number;
   truncated: boolean;
   errors: string[];
   pairsUsed: string[];
+  poolReports: RotationHistoryPoolSyncStatus[];
 }> {
   const errors: string[] = [];
   const maxPages = input.maxPagesPerPair ?? 8;
+  const pageSize = Math.min(input.pageSize ?? DEFAULT_HISTORY_PAGE_SIZE, 100);
+  const endTimestamp = input.endTimestamp ?? Math.floor(Date.now() / 1000);
   const byId = new Map<string, SubgraphSwap>();
   let pageCount = 0;
   let truncated = false;
@@ -1955,26 +2739,71 @@ async function fetchPairSwapsPaginated(input: {
     const local: SubgraphSwap[] = [];
     let localPages = 0;
     let localTruncated = false;
+    let repeatedCursor = false;
+    let previousFirstId: string | undefined;
     for (let page = 0; page < maxPages; page += 1) {
       const result = await fetchSwapsAdvanced(input.config, {
         pair: pairId,
-        first: 100,
-        skip: page * 100,
+        first: pageSize,
+        skip: page * pageSize,
         version: "v2",
       });
       localPages += 1;
       const swaps = result.swaps ?? [];
+      const firstId = swaps[0]?.id;
+      if (firstId && previousFirstId === firstId && page > 0) {
+        repeatedCursor = true;
+        localTruncated = true;
+        break;
+      }
+      previousFirstId = firstId;
       local.push(...swaps);
       const oldest = swaps.reduce(
         (min, swap) => Math.min(min, Number(swap.timestamp) || Number.POSITIVE_INFINITY),
         Number.POSITIVE_INFINITY,
       );
-      if (swaps.length < 100 || oldest <= input.startTimestamp) break;
+      if (swaps.length < pageSize || oldest <= input.startTimestamp) break;
       if (page === maxPages - 1) localTruncated = true;
     }
-    return { pairId, swaps: local, pageCount: localPages, truncated: localTruncated };
+    const unique = new Map<string, SubgraphSwap>();
+    for (const swap of local) unique.set(`${swap.transaction?.id ?? ""}:${swap.id}`, swap);
+    const timestamps = [...unique.values()]
+      .map((swap) => Number(swap.timestamp))
+      .filter((ts) => Number.isFinite(ts) && ts > 0);
+    const oldest = timestamps.length > 0 ? Math.min(...timestamps) : null;
+    const newest = timestamps.length > 0 ? Math.max(...timestamps) : null;
+    const boundaryCrossed = oldest !== null && oldest <= input.startTimestamp;
+    let truncationReason: RotationHistoryPoolSyncStatus["truncationReason"] = "NONE";
+    if (repeatedCursor) truncationReason = "PAGINATION_BUG_OR_REPEATED_CURSOR";
+    else if (localTruncated && !boundaryCrossed) truncationReason = "SOURCE_ROW_LIMIT";
+    else if (local.length === 0) truncationReason = "SPARSE_ACTUAL_TRADING";
+    else if (newest !== null && newest < endTimestamp - FRESH_TRADE_MAX_AGE_MINUTES * 60) {
+      truncationReason = "STALE_POOL";
+    }
+    const report: RotationHistoryPoolSyncStatus = {
+      candidateId: input.candidateId ?? "PLS",
+      poolAddress: pairId.toLowerCase() as `0x${string}`,
+      sourceEndpoint: input.config.pulseXSubgraphV2,
+      queryType: "PulseX V2 swaps(pair, first, skip)",
+      pageSize,
+      maximumPageCount: maxPages,
+      cursorMechanism: "skip",
+      oldestReturnedRecord: isoFromSeconds(oldest),
+      newestReturnedRecord: isoFromSeconds(newest),
+      requestedStartTime: isoFromSeconds(input.startTimestamp) ?? new Date(input.startTimestamp * 1000).toISOString(),
+      requestedEndTime: isoFromSeconds(endTimestamp) ?? new Date(endTimestamp * 1000).toISOString(),
+      totalRecordsRetrieved: local.length,
+      deduplicatedRecords: unique.size,
+      boundaryCrossed,
+      truncationReason,
+      sourceRepeatsOrCapsRecords: repeatedCursor || (localTruncated && !boundaryCrossed),
+      historicalPaginationReliable: (boundaryCrossed || local.length < pageSize) && !repeatedCursor,
+      fallbackUsed: "NONE",
+    };
+    return { pairId, swaps: [...unique.values()], pageCount: localPages, truncated: localTruncated, report };
   });
   const settled = await Promise.allSettled(tasks);
+  const poolReports: RotationHistoryPoolSyncStatus[] = [];
   for (const row of settled) {
     if (row.status === "rejected") {
       errors.push(row.reason instanceof Error ? row.reason.message : String(row.reason));
@@ -1982,6 +2811,7 @@ async function fetchPairSwapsPaginated(input: {
     }
     pageCount += row.value.pageCount;
     truncated = truncated || row.value.truncated;
+    poolReports.push(row.value.report);
     for (const swap of row.value.swaps) {
       const key = `${swap.transaction?.id ?? ""}:${swap.id}`;
       byId.set(key, swap);
@@ -1993,6 +2823,7 @@ async function fetchPairSwapsPaginated(input: {
     truncated,
     errors,
     pairsUsed: input.pairIds,
+    poolReports,
   };
 }
 
@@ -2024,6 +2855,574 @@ function observationsForCandidate(
     if (obs) byId.set(obs.swapId, obs);
   }
   return [...byId.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+export function reduceLogChunkAfterRangeError(currentBlocks: number): number {
+  return Math.max(100, Math.floor(currentBlocks / 2));
+}
+
+export function shouldUseRpcLogFallback(report: RotationHistoryPoolSyncStatus): boolean {
+  return (
+    report.truncationReason === "SOURCE_ROW_LIMIT" ||
+    report.truncationReason === "PAGINATION_BUG_OR_REPEATED_CURSOR" ||
+    report.truncationReason === "SOURCE_ERROR"
+  );
+}
+
+async function approximateStartBlock(
+  config: AppConfig,
+  lookbackMinutes: number,
+): Promise<{ latestBlock: bigint; startBlock: bigint }> {
+  const client = getPublicClient(config);
+  const latestBlock = await client.getBlockNumber();
+  const estimatedBlocks = BigInt(Math.ceil((lookbackMinutes * 60) / 10) + 1_000);
+  return {
+    latestBlock,
+    startBlock: latestBlock > estimatedBlocks ? latestBlock - estimatedBlocks : 0n,
+  };
+}
+
+async function fetchV2SwapLogsFallback(input: {
+  config: AppConfig;
+  candidate: RotationCandidateRegistryEntry;
+  pair: SubgraphPair;
+  startTimestamp: number;
+  lookbackMinutes: number;
+  maximumBlocksPerChunk: number;
+  fetchedAt: string;
+}): Promise<{ records: RotationHistoryRecord[]; reportPatch: Partial<RotationHistoryPoolSyncStatus>; errors: string[] }> {
+  const errors: string[] = [];
+  const records: RotationHistoryRecord[] = [];
+  const client = getPublicClient(input.config);
+  let chunk = Math.max(100, input.maximumBlocksPerChunk);
+  let bounds: { latestBlock: bigint; startBlock: bigint };
+  try {
+    bounds = await approximateStartBlock(input.config, input.lookbackMinutes);
+  } catch (err) {
+    return {
+      records,
+      reportPatch: {
+        fallbackUsed: "RPC_ETH_GETLOGS",
+        truncationReason: "FAILED_BLOCK_TO_TIME_CONVERSION",
+        error: err instanceof Error ? err.message : String(err),
+      },
+      errors: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+  const blockTimestampCache = new Map<bigint, { timestamp: number; hash: `0x${string}` | null }>();
+  const latestBlock = await client.getBlock({ blockNumber: bounds.latestBlock });
+  const latestTimestamp = Number(latestBlock.timestamp);
+  function blockInfo(blockNumber: bigint, blockHash: `0x${string}` | null): { timestamp: number; hash: `0x${string}` | null } {
+    const cached = blockTimestampCache.get(blockNumber);
+    if (cached) return cached;
+    const approximateSeconds = Number(bounds.latestBlock - blockNumber) * 10;
+    const info = { timestamp: latestTimestamp - approximateSeconds, hash: blockHash };
+    blockTimestampCache.set(blockNumber, info);
+    return info;
+  }
+  let from = bounds.startBlock;
+  while (from <= bounds.latestBlock) {
+    const to = from + BigInt(chunk) > bounds.latestBlock ? bounds.latestBlock : from + BigInt(chunk);
+    try {
+      const logs = await client.getLogs({
+        address: input.pair.id.toLowerCase() as `0x${string}`,
+        event: v2SwapEventAbi,
+        fromBlock: from,
+        toBlock: to,
+      });
+      for (const log of logs) {
+        const info = blockInfo(log.blockNumber!, log.blockHash as `0x${string}` | null);
+        if (info.timestamp < input.startTimestamp) continue;
+        const decoded = decodeEventLog({
+          abi: [v2SwapEventAbi],
+          data: log.data,
+          topics: log.topics,
+        }) as {
+          args: {
+            amount0In: bigint;
+            amount1In: bigint;
+            amount0Out: bigint;
+            amount1Out: bigint;
+          };
+        };
+        const amount0Raw = (decoded.args.amount0In + decoded.args.amount0Out).toString();
+        const amount1Raw = (decoded.args.amount1In + decoded.args.amount1Out).toString();
+        const amount0Human = Number(formatUnits(BigInt(amount0Raw), pairTokenDecimals(input.pair, input.pair.token0.id, 18)));
+        const amount1Human = Number(formatUnits(BigInt(amount1Raw), pairTokenDecimals(input.pair, input.pair.token1.id, 18)));
+        const token0 = pairTokenAddress(input.pair, 0);
+        const token1 = pairTokenAddress(input.pair, 1);
+        const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
+        const candidateAmount =
+          sameAddress(token0, candidateToken) ? amount0Human :
+            sameAddress(token1, candidateToken) ? amount1Human :
+              input.candidate.candidateId === "PLS" && sameAddress(token0, WPLS_ADDRESS) ? amount0Human :
+                input.candidate.candidateId === "PLS" && sameAddress(token1, WPLS_ADDRESS) ? amount1Human : 0;
+        const eusdcAmount =
+          sameAddress(token0, EUSDC_ADDRESS) ? amount0Human :
+            sameAddress(token1, EUSDC_ADDRESS) ? amount1Human : 0;
+        if (candidateAmount <= 0 || eusdcAmount <= 0) continue;
+        records.push({
+          chainId: PULSECHAIN_CHAIN_ID,
+          candidateId: input.candidate.candidateId,
+          poolAddress: input.pair.id.toLowerCase() as `0x${string}`,
+          factoryAddress: null,
+          protocol: "PulseX V2",
+          blockNumber: log.blockNumber?.toString() ?? null,
+          blockHash: info.hash,
+          transactionHash: log.transactionHash as `0x${string}`,
+          logIndex: Number(log.logIndex ?? 0n),
+          timestamp: info.timestamp,
+          token0,
+          token1,
+          amount0Raw,
+          amount1Raw,
+          candidatePriceEusdc: round(eusdcAmount / candidateAmount, 18),
+          eusdcNotionalRaw: decimalHumanToRaw(String(eusdcAmount), 6),
+          source: "rpc-eth_getLogs-v2-swap",
+          fetchedAt: input.fetchedAt,
+        });
+      }
+      from = to + 1n;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (chunk > 100) {
+        chunk = reduceLogChunkAfterRangeError(chunk);
+        continue;
+      }
+      errors.push(message);
+      break;
+    }
+  }
+  const timestamps = records.map((record) => record.timestamp);
+  const oldest = timestamps.length > 0 ? Math.min(...timestamps) : null;
+  const newest = timestamps.length > 0 ? Math.max(...timestamps) : null;
+  const boundaryCrossed = oldest !== null && oldest <= input.startTimestamp;
+  return {
+    records,
+    reportPatch: {
+      fallbackUsed: "RPC_ETH_GETLOGS",
+      fallbackRecords: records.length,
+      oldestReturnedRecord: oldest !== null ? isoFromSeconds(oldest) : undefined,
+      newestReturnedRecord: newest !== null ? isoFromSeconds(newest) : undefined,
+      boundaryCrossed,
+      ...(boundaryCrossed ? { truncationReason: "NONE" as const } : {}),
+      ...(errors.length > 0 ? { truncationReason: "RPC_LOG_RANGE_LIMITATION", error: errors.join("; ") } : {}),
+    },
+    errors,
+  };
+}
+
+function normalizeHistorySyncInput(input: RotationHistorySyncInput): Required<RotationHistorySyncInput> {
+  return {
+    lookbackMinutes: input.lookbackMinutes ?? DEFAULT_HISTORY_LOOKBACK_MINUTES,
+    maximumBlocksPerChunk: input.maximumBlocksPerChunk ?? DEFAULT_LOG_CHUNK_BLOCKS,
+    maximumPagesPerSource: input.maximumPagesPerSource ?? DEFAULT_HISTORY_MAX_PAGES,
+    forceRecentBlockRecheck: input.forceRecentBlockRecheck ?? true,
+  };
+}
+
+function summarizeCandidateSync(input: {
+  candidate: RotationCandidateRegistryEntry;
+  reports: RotationHistoryPoolSyncStatus[];
+  records: RotationHistoryRecord[];
+  existingRecords: RotationHistoryRecord[];
+  requestedStartTime: string;
+  requestedEndTime: string;
+  forceRecentBlockRecheck: boolean;
+  latestBlockNumber?: bigint;
+}): RotationHistoryCandidateSyncStatus {
+  const existing = new Map(input.existingRecords.map((record) => [historyRecordKey(record), record]));
+  const incoming = new Map(input.records.map((record) => [historyRecordKey(record), record]));
+  let added = 0;
+  let updated = 0;
+  let duplicates = 0;
+  for (const record of incoming.values()) {
+    const prior = existing.get(historyRecordKey(record));
+    const block = record.blockNumber ? BigInt(record.blockNumber) : null;
+    const recent =
+      input.forceRecentBlockRecheck &&
+      input.latestBlockNumber !== undefined &&
+      block !== null &&
+      input.latestBlockNumber >= block &&
+      input.latestBlockNumber - block <= HISTORY_RECENT_REORG_BLOCKS;
+    if (!prior) added += 1;
+    else if (recent && prior.blockHash !== record.blockHash) updated += 1;
+    else duplicates += 1;
+  }
+  const timestamps = [...incoming.values()].map((record) => record.timestamp);
+  const completeReports = input.reports.filter((report) =>
+    report.boundaryCrossed ||
+    report.truncationReason === "NONE" ||
+    report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+    report.truncationReason === "STALE_POOL",
+  );
+  const unresolved = input.reports
+    .filter((report) =>
+      report.truncationReason !== "NONE" &&
+      report.truncationReason !== "SPARSE_ACTUAL_TRADING" &&
+      report.truncationReason !== "STALE_POOL",
+    )
+    .map((report) => `${report.poolAddress}: ${report.truncationReason}`);
+  return {
+    candidateId: input.candidate.candidateId,
+    recordsAdded: added,
+    recordsUpdated: updated,
+    duplicateRecordsIgnored: duplicates,
+    earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
+    latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
+    boundaryCrossed: input.reports.length > 0 && input.reports.every((report) =>
+      report.boundaryCrossed ||
+      report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+      report.truncationReason === "STALE_POOL",
+    ),
+    sourceCompletenessPercent: input.reports.length > 0
+      ? round(completeReports.length / input.reports.length * 100, 4)
+      : 0,
+    unresolvedGaps: unresolved,
+    pools: input.reports,
+  };
+}
+
+async function syncHistoryForCandidate(input: {
+  config: AppConfig;
+  chainId: number;
+  candidate: RotationCandidateRegistryEntry;
+  startTimestamp: number;
+  endTimestamp: number;
+  maximumBlocksPerChunk: number;
+  maximumPagesPerSource: number;
+  lookbackMinutes: number;
+  fetchedAt: string;
+}): Promise<{
+  records: RotationHistoryRecord[];
+  reports: RotationHistoryPoolSyncStatus[];
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  const { pairs, errors: pairErrors } = await fetchPairsForCandidate(input.config, input.candidate);
+  errors.push(...pairErrors);
+  const pairIds = selectedSwapPairIds(input.candidate, pairs);
+  const pairMap = new Map(pairs.map((pair) => [pair.id.toLowerCase(), pair]));
+  if (pairIds.length === 0) {
+    return {
+      records: [],
+      errors: [...errors, "missing pool discovery"],
+      reports: [{
+        candidateId: input.candidate.candidateId,
+        poolAddress: input.candidate.executionTokenAddress.toLowerCase() as `0x${string}`,
+        sourceEndpoint: input.config.pulseXSubgraphV2,
+        queryType: "PulseX V1/V2 pairs(token)",
+        pageSize: 0,
+        maximumPageCount: input.maximumPagesPerSource,
+        cursorMechanism: "none",
+        oldestReturnedRecord: null,
+        newestReturnedRecord: null,
+        requestedStartTime: isoFromSeconds(input.startTimestamp) ?? input.fetchedAt,
+        requestedEndTime: isoFromSeconds(input.endTimestamp) ?? input.fetchedAt,
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        boundaryCrossed: false,
+        truncationReason: "MISSING_POOL_DISCOVERY",
+        sourceRepeatsOrCapsRecords: false,
+        historicalPaginationReliable: false,
+        fallbackUsed: "NONE",
+      }],
+    };
+  }
+  let paged: Awaited<ReturnType<typeof fetchPairSwapsPaginated>>;
+  try {
+    paged = await fetchPairSwapsPaginated({
+      config: input.config,
+      candidateId: input.candidate.candidateId,
+      pairIds,
+      startTimestamp: input.startTimestamp,
+      endTimestamp: input.endTimestamp,
+      maxPagesPerPair: input.maximumPagesPerSource,
+      pageSize: DEFAULT_HISTORY_PAGE_SIZE,
+    });
+    errors.push(...paged.errors);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+    paged = {
+      swaps: [],
+      pageCount: 0,
+      truncated: true,
+      errors,
+      pairsUsed: pairIds,
+      poolReports: pairIds.map((pairId) => ({
+        candidateId: input.candidate.candidateId,
+        poolAddress: pairId.toLowerCase() as `0x${string}`,
+        sourceEndpoint: input.config.pulseXSubgraphV2,
+        queryType: "PulseX V2 swaps(pair, first, skip)",
+        pageSize: DEFAULT_HISTORY_PAGE_SIZE,
+        maximumPageCount: input.maximumPagesPerSource,
+        cursorMechanism: "skip",
+        oldestReturnedRecord: null,
+        newestReturnedRecord: null,
+        requestedStartTime: isoFromSeconds(input.startTimestamp) ?? input.fetchedAt,
+        requestedEndTime: isoFromSeconds(input.endTimestamp) ?? input.fetchedAt,
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        boundaryCrossed: false,
+        truncationReason: "SOURCE_ERROR",
+        sourceRepeatsOrCapsRecords: false,
+        historicalPaginationReliable: false,
+        fallbackUsed: "NONE",
+        error: err instanceof Error ? err.message : String(err),
+      })),
+    };
+  }
+  const anchorObservations = buildAnchorObservations(paged.swaps);
+  const records: RotationHistoryRecord[] = [];
+  let fallbackRecords: RotationHistoryRecord[] = [];
+  let fallbackReports = paged.poolReports;
+  for (const [index, swap] of paged.swaps.entries()) {
+    const pair = swap.pair?.id ? pairMap.get(swap.pair.id.toLowerCase()) : undefined;
+    if (!pair) continue;
+    const observation = priceObservationFromSwap({
+      swap,
+      candidate: input.candidate,
+      anchorObservations,
+      maxAnchorAgeSeconds: 15 * 60,
+    });
+    if (!observation) continue;
+    records.push(historyRecordFromSubgraphSwap({
+      chainId: input.chainId,
+      candidate: input.candidate,
+      pair,
+      swap,
+      observation,
+      fetchedAt: input.fetchedAt,
+      fallbackLogIndex: index,
+    }));
+  }
+  for (const report of paged.poolReports) {
+    if (!shouldUseRpcLogFallback(report)) continue;
+    const pair = pairMap.get(report.poolAddress.toLowerCase());
+    if (!pair) continue;
+    try {
+      const fallback = await fetchV2SwapLogsFallback({
+        config: input.config,
+        candidate: input.candidate,
+        pair,
+        startTimestamp: input.startTimestamp,
+        lookbackMinutes: input.lookbackMinutes,
+        maximumBlocksPerChunk: input.maximumBlocksPerChunk,
+        fetchedAt: input.fetchedAt,
+      });
+      fallbackRecords = fallbackRecords.concat(fallback.records);
+      errors.push(...fallback.errors);
+      fallbackReports = fallbackReports.map((row) =>
+        sameAddress(row.poolAddress, report.poolAddress)
+          ? { ...row, ...fallback.reportPatch, historicalPaginationReliable: fallback.errors.length === 0 }
+          : row,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(message);
+      fallbackReports = fallbackReports.map((row) =>
+        sameAddress(row.poolAddress, report.poolAddress)
+          ? { ...row, fallbackUsed: "RPC_ETH_GETLOGS", truncationReason: "RPC_LOG_RANGE_LIMITATION", error: message }
+          : row,
+      );
+    }
+  }
+  const byKey = new Map<string, RotationHistoryRecord>();
+  for (const record of [...records, ...fallbackRecords]) byKey.set(historyRecordKey(record), record);
+  return {
+    records: [...byKey.values()],
+    reports: fallbackReports,
+    errors,
+  };
+}
+
+export async function runEusdcRotationHistorySync(
+  config: AppConfig,
+  input: RotationHistorySyncInput = {},
+): Promise<RotationHistorySyncResult> {
+  const normalized = normalizeHistorySyncInput(input);
+  const nowMs = Date.now();
+  const endTimestamp = Math.floor(nowMs / 1000);
+  const startTimestamp = endTimestamp - normalized.lookbackMinutes * 60;
+  const requestedStartTime = new Date(startTimestamp * 1000).toISOString();
+  const requestedEndTime = new Date(endTimestamp * 1000).toISOString();
+  const fetchedAt = new Date(nowMs).toISOString();
+  return withHistoryLock("market-history", async () => {
+    const chainId = await getChainId(config);
+    let latestBlockNumber: bigint | undefined;
+    try {
+      latestBlockNumber = await getPublicClient(config).getBlockNumber();
+    } catch {
+      latestBlockNumber = undefined;
+    }
+    const existing = readRotationHistoryStore(config);
+    const incoming: RotationHistoryRecord[] = [];
+    const sourceCompleteness: RotationHistoryCandidateSyncStatus[] = [];
+    const unresolvedGaps: string[] = [];
+    for (const candidate of EUSDC_ROTATION_CANDIDATES) {
+      const synced = await syncHistoryForCandidate({
+        config,
+        chainId,
+        candidate,
+        startTimestamp,
+        endTimestamp,
+        maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
+        maximumPagesPerSource: normalized.maximumPagesPerSource,
+        lookbackMinutes: normalized.lookbackMinutes,
+        fetchedAt,
+      });
+      incoming.push(...synced.records);
+      const summary = summarizeCandidateSync({
+        candidate,
+        reports: synced.reports,
+        records: synced.records,
+        existingRecords: existing.records.filter((record) => record.candidateId === candidate.candidateId),
+        requestedStartTime,
+        requestedEndTime,
+        forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+        latestBlockNumber,
+      });
+      sourceCompleteness.push(summary);
+      unresolvedGaps.push(...summary.unresolvedGaps.map((gap) => `${candidate.candidateId}: ${gap}`));
+      for (const err of synced.errors) unresolvedGaps.push(`${candidate.candidateId}: ${err}`);
+    }
+    const merged = mergeRotationHistoryRecords({
+      existing: existing.records,
+      incoming,
+      nowMs,
+      retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+      protectedStartTimestamp: startTimestamp,
+      forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+      latestBlockNumber,
+    });
+    const next: RotationHistoryFile = {
+      schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
+      chainId,
+      updatedAt: fetchedAt,
+      retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+      records: merged.records,
+      lastSync: {
+        requestedStartTime,
+        requestedEndTime,
+        historyStoreFingerprint: "0x0",
+        candidates: sourceCompleteness,
+      },
+    };
+    const historyStoreFingerprint = rotationHistoryFingerprint(next);
+    next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
+    writeRotationHistoryStore(next);
+    const timestamps = next.records.map((record) => record.timestamp);
+    return {
+      ok: true,
+      lookbackMinutes: normalized.lookbackMinutes,
+      requestedStartTime,
+      requestedEndTime,
+      recordsAdded: merged.added,
+      recordsUpdated: merged.updated,
+      duplicateRecordsIgnored: merged.duplicates,
+      earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
+      latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
+      sourceCompleteness,
+      unresolvedGaps: [...new Set(unresolvedGaps)],
+      historyStorePath: historyStorePath(),
+      historyStoreFingerprint,
+      quoteCallCount: 0,
+      noPiteasQuoteUsed: true,
+      noWalletWrite: true,
+      noLiveTransaction: true,
+    };
+  });
+}
+
+function statusForCandidateFromStore(input: {
+  store: RotationHistoryFile;
+  candidate: RotationCandidateRegistryEntry;
+  lookbackMinutes: number;
+  candleMinutes: number;
+  nowMs: number;
+}): RotationHistoryCandidateStatus {
+  const endTimestamp = Math.floor(input.nowMs / 1000);
+  const startTimestamp = endTimestamp - input.lookbackMinutes * 60;
+  const records = recordsForCandidate(input.store, input.candidate, startTimestamp, endTimestamp);
+  const observations = observationsFromHistory(records);
+  const candleResult = buildFiveMinuteCandles({
+    observations,
+    lookbackMinutes: input.lookbackMinutes,
+    candleMinutes: input.candleMinutes,
+    nowMs: input.nowMs,
+  });
+  const syncStatus = input.store.lastSync?.candidates.find((row) => row.candidateId === input.candidate.candidateId);
+  const completeness = sourceCompletenessForRecords({
+    records,
+    startTimestamp,
+    endTimestamp,
+    syncStatus,
+  });
+  const routeConnected = syncStatus
+    ? syncStatus.pools.some((pool) => pool.historicalPaginationReliable)
+    : records.length > 0;
+  const historyQuality = buildHistoryQuality({
+    records,
+    observations,
+    coverage: candleResult.coverage,
+    sourceCompletenessPercent: completeness.percent,
+    sourceTruncated: completeness.truncated,
+    unresolvedGaps: completeness.unresolvedGaps,
+    routeConnected,
+    liquidityPasses: records.length > 0,
+    priceDispersionPercent: null,
+    nowMs: input.nowMs,
+    lookbackMinutes: input.lookbackMinutes,
+    candleMinutes: input.candleMinutes,
+  });
+  const timestamps = records.map((record) => record.timestamp);
+  const earliest = timestamps.length > 0 ? Math.min(...timestamps) : null;
+  const latest = timestamps.length > 0 ? Math.max(...timestamps) : null;
+  return {
+    candidateId: input.candidate.candidateId,
+    recordsStored: records.length,
+    earliestRecord: isoFromSeconds(earliest),
+    latestRecord: isoFromSeconds(latest),
+    historyDurationMinutes: earliest !== null && latest !== null ? round((latest - earliest) / 60, 4) : 0,
+    sourceCompletenessPercent: historyQuality.sourceCompletenessPercent,
+    activeCandleCoveragePercent: historyQuality.activeTradeCandlePercent,
+    priceContinuityPercent: historyQuality.priceContinuityPercent,
+    analysisMode: historyQuality.analysisMode,
+    latestTradeAgeMinutes: historyQuality.latestTradeAgeMinutes,
+    unresolvedGaps: historyQuality.unresolvedGaps,
+    readinessForLiveScanning: historyQuality.readinessForLiveScanning,
+  };
+}
+
+export async function runEusdcRotationHistoryStatus(
+  _config: AppConfig,
+  input: { lookbackMinutes?: number; candleMinutes?: number } = {},
+): Promise<RotationHistoryStatusResult> {
+  const nowMs = Date.now();
+  const lookbackMinutes = input.lookbackMinutes ?? DEFAULT_HISTORY_LOOKBACK_MINUTES;
+  const candleMinutes = input.candleMinutes ?? DEFAULT_CANDLE_MINUTES;
+  const store = readRotationHistoryStore();
+  const historyStoreFingerprint = rotationHistoryFingerprint(store);
+  return {
+    ok: true,
+    checkedAt: new Date(nowMs).toISOString(),
+    lookbackMinutes,
+    candidates: EUSDC_ROTATION_CANDIDATES.map((candidate) =>
+      statusForCandidateFromStore({
+        store,
+        candidate,
+        lookbackMinutes,
+        candleMinutes,
+        nowMs,
+      }),
+    ),
+    historyStorePath: historyStorePath(),
+    historyStoreFingerprint,
+    quoteCallCount: 0,
+    noPiteasQuoteUsed: true,
+    noWalletWrite: true,
+    noLiveTransaction: true,
+  };
 }
 
 function marketMetricNumber(
@@ -2066,31 +3465,72 @@ async function defaultMarketEvidence(
     priceMap,
     poolBytecode,
   });
+  const historyStore = readRotationHistoryStore(config);
+  const historySyncStatus = historyStore.lastSync?.candidates.find((row) => row.candidateId === candidate.candidateId);
+  const historyRecords = recordsForCandidate(historyStore, candidate, startTimestamp, endTimestamp);
   let swaps: SubgraphSwap[] = [];
   let pageCount = 0;
   let truncated = false;
-  try {
-    const paged = await fetchPairSwapsPaginated({
-      config,
-      pairIds,
-      startTimestamp,
-      maxPagesPerPair: 4,
-    });
-    swaps = paged.swaps;
-    pageCount = paged.pageCount;
-    truncated = paged.truncated;
-    errors.push(...paged.errors);
-  } catch (err) {
-    errors.push(`paginated swaps: ${err instanceof Error ? err.message : String(err)}`);
+  let poolReports: RotationHistoryPoolSyncStatus[] = [];
+  let observations: RotationPriceObservation[];
+  const usingHistory = historyRecords.length > 0 || historySyncStatus !== undefined;
+  if (usingHistory) {
+    observations = observationsFromHistory(historyRecords);
+    pageCount = historySyncStatus?.pools.reduce((sum, pool) => sum + Math.max(0, pool.maximumPageCount), 0) ?? 0;
+    poolReports = historySyncStatus?.pools ?? [];
+  } else {
+    try {
+      const paged = await fetchPairSwapsPaginated({
+        config,
+        candidateId: candidate.candidateId,
+        pairIds,
+        startTimestamp,
+        endTimestamp,
+        maxPagesPerPair: 4,
+      });
+      swaps = paged.swaps;
+      pageCount = paged.pageCount;
+      truncated = paged.truncated;
+      poolReports = paged.poolReports;
+      errors.push(...paged.errors);
+    } catch (err) {
+      errors.push(`paginated swaps: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const anchorObservations = buildAnchorObservations(swaps);
+    observations = observationsForCandidate(candidate, swaps, anchorObservations);
   }
-  const anchorObservations = buildAnchorObservations(swaps);
-  const observations = observationsForCandidate(candidate, swaps, anchorObservations);
   const candleResult = buildFiveMinuteCandles({
     observations,
     lookbackMinutes: input.lookbackMinutes,
     candleMinutes: input.candleMinutes,
     nowMs: Date.now(),
   });
+  const historyCompleteness = usingHistory
+    ? sourceCompletenessForRecords({
+        records: historyRecords,
+        startTimestamp,
+        endTimestamp,
+        syncStatus: historySyncStatus,
+      })
+    : {
+        percent: poolReports.length > 0
+          ? round(poolReports.filter((report) =>
+            report.boundaryCrossed ||
+            report.truncationReason === "NONE" ||
+            report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+            report.truncationReason === "STALE_POOL",
+          ).length / poolReports.length * 100, 4)
+          : 0,
+        unresolvedGaps: poolReports
+          .filter((report) =>
+            report.truncationReason !== "NONE" &&
+            report.truncationReason !== "SPARSE_ACTUAL_TRADING" &&
+            report.truncationReason !== "STALE_POOL",
+          )
+          .map((report) => `${report.poolAddress}: ${report.truncationReason}`),
+        truncated,
+      };
+  truncated = truncated || historyCompleteness.truncated;
   candleResult.coverage.truncated = truncated;
   const analysis = analyzeRotationCandles({
     candles: candleResult.candles,
@@ -2108,7 +3548,50 @@ async function defaultMarketEvidence(
   const latestTimestamp = observations[observations.length - 1]?.timestamp ?? null;
   const stale = latestTimestamp === null || endTimestamp - latestTimestamp > 30 * 60;
   const coverage = candleResult.coverage.coveragePercent;
-  const enoughCoverage = coverage >= 80 || (observations.length >= 20 && !truncated);
+  const historyQuality = buildHistoryQuality({
+    records: usingHistory ? historyRecords : [],
+    observations,
+    coverage: candleResult.coverage,
+    sourceCompletenessPercent: historyCompleteness.percent,
+    sourceTruncated: truncated,
+    unresolvedGaps: historyCompleteness.unresolvedGaps,
+    routeConnected: isRouteConnected(routeAvailabilityStatus),
+    liquidityPasses: aggregateLiquidityEusdc >= candidate.minimumLiquidityUsd,
+    priceDispersionPercent: consolidation.priceDispersionPercent,
+    nowMs: Date.now(),
+    lookbackMinutes: input.lookbackMinutes,
+    candleMinutes: input.candleMinutes,
+  });
+  candleResult.coverage.activeTradeCandlePercent = historyQuality.activeTradeCandlePercent;
+  candleResult.coverage.sourceCompletenessPercent = historyQuality.sourceCompletenessPercent;
+  candleResult.coverage.priceContinuityPercent = historyQuality.priceContinuityPercent;
+  candleResult.coverage.analysisMode = historyQuality.analysisMode;
+  candleResult.coverage.sparseMarketMethodUsed = historyQuality.analysisMode === "SPARSE_EVENT_TIME";
+  candleResult.coverage.unresolvedGaps = historyQuality.unresolvedGaps;
+  const enoughCoverage = historyQuality.analysisMode !== "UNUSABLE_HISTORY";
+  const historyReversionRecords = usingHistory
+    ? recordsForCandidate(
+        historyStore,
+        candidate,
+        endTimestamp - DEFAULT_HISTORY_LOOKBACK_MINUTES * 60,
+        endTimestamp,
+      )
+    : [];
+  const targetObservations = historyReversionRecords.length > 0
+    ? observationsFromHistory(historyReversionRecords)
+    : observations;
+  const economicFeasibility = computeScanEconomicFeasibility({
+    startingEusdcRaw: eUsdcBalanceRaw,
+    minimumNetTargetBps: input.minimumNetTargetBps,
+    wplsPriceEusdc: wplsPrice,
+  });
+  const targetAwareReversion = buildTargetAwareReversion({
+    observations: targetObservations,
+    dipReboundEvidence: analysis.dipReboundEvidence,
+    economicFeasibility,
+    requestedNetTargetBps: input.minimumNetTargetBps,
+    lookbackMinutes: historyReversionRecords.length > 0 ? DEFAULT_HISTORY_LOOKBACK_MINUTES : input.lookbackMinutes,
+  });
   const metrics: Record<string, RotationMetric<unknown> | RotationUnavailableMetric> = {
     ...analysis.metrics,
     aggregateLiquidityEusdc: makeMetric({
@@ -2139,7 +3622,37 @@ async function defaultMarketEvidence(
       coveragePercent: coverage,
       stale,
       confidence: observations.length > 0 && !stale ? "medium" : "none",
-      warnings: truncated ? ["pagination cap reached before time boundary"] : [],
+      warnings: historyQuality.unresolvedGaps,
+    }),
+    sourceCompletenessPercent: makeMetric({
+      value: historyQuality.sourceCompletenessPercent,
+      unit: "percent",
+      source: usingHistory ? "local public rotation history" : "live subgraph pagination diagnostics",
+      sourceTimestamp: isoFromSeconds(latestTimestamp),
+      startTimestamp: isoFromSeconds(startTimestamp),
+      endTimestamp: isoFromSeconds(endTimestamp),
+      sampleCount: observations.length,
+      pageCount,
+      truncated,
+      coveragePercent: historyQuality.sourceCompletenessPercent,
+      stale,
+      confidence: historyQuality.sourceCompletenessPercent >= 95 ? "high" : "low",
+      warnings: historyQuality.unresolvedGaps,
+    }),
+    priceContinuityPercent: makeMetric({
+      value: historyQuality.priceContinuityPercent,
+      unit: "percent",
+      source: "bounded carry-forward continuity; not used to create dip/rebound signals",
+      sourceTimestamp: isoFromSeconds(latestTimestamp),
+      startTimestamp: isoFromSeconds(startTimestamp),
+      endTimestamp: isoFromSeconds(endTimestamp),
+      sampleCount: observations.length,
+      pageCount,
+      truncated,
+      coveragePercent: historyQuality.priceContinuityPercent,
+      stale,
+      confidence: historyQuality.priceContinuityPercent > 0 ? "medium" : "none",
+      warnings: [],
     }),
   };
   const fiveMinuteReturnBps = marketMetricNumber(metrics, "fiveMinuteReturnBps");
@@ -2192,10 +3705,16 @@ async function defaultMarketEvidence(
     metrics,
     candleCoverage: candleResult.coverage,
     dipReboundEvidence: analysis.dipReboundEvidence,
+    historyQuality,
+    targetAwareReversion,
     poolConsolidation: consolidation,
-    dataSourcesUsed: ["PulseX V1/V2 pairs", "PulseX V2 paginated pair swaps", "PulseChain RPC bytecode/metadata"],
+    dataSourcesUsed: [
+      "PulseX V1/V2 pairs",
+      usingHistory ? "local public rotation history" : "PulseX V2 paginated pair swaps",
+      "PulseChain RPC bytecode/metadata",
+    ],
     dataFreshness: stale ? "stale" : "fresh",
-    diagnosticRankReason: enoughCoverage ? "candles available" : "insufficient candle coverage",
+    diagnosticRankReason: enoughCoverage ? `${historyQuality.analysisMode} history available` : "unusable or incomplete history",
   };
 }
 
@@ -3550,6 +5069,50 @@ function humanTokenAmount(raw: string | undefined, decimals: number): string | u
 }
 
 export function registerEusdcRotationTools(server: McpServer, config: AppConfig): void {
+  registerTool(server, config, {
+    name: "eusdc_rotation_history_sync",
+    description:
+      "Read-only public market-history backfill for the five eUSDC rotation candidates. Writes only normalized public swap history under data/eusdc-rotation-history, never calls Piteas, never proposes, signs, broadcasts, approves, or executes.",
+    category: "wallet",
+    inputSchema: {
+      lookbackMinutes: z.number().int().positive().optional().default(DEFAULT_HISTORY_LOOKBACK_MINUTES),
+      maximumBlocksPerChunk: z.number().int().positive().optional().default(DEFAULT_LOG_CHUNK_BLOCKS),
+      maximumPagesPerSource: z.number().int().positive().optional().default(DEFAULT_HISTORY_MAX_PAGES),
+      forceRecentBlockRecheck: z.boolean().optional().default(true),
+    },
+    handler: async (args, cfg) =>
+      ok(
+        neverReturnPrivateKey(
+          await runEusdcRotationHistorySync(cfg, {
+            lookbackMinutes: args.lookbackMinutes as number | undefined,
+            maximumBlocksPerChunk: args.maximumBlocksPerChunk as number | undefined,
+            maximumPagesPerSource: args.maximumPagesPerSource as number | undefined,
+            forceRecentBlockRecheck: args.forceRecentBlockRecheck as boolean | undefined,
+          }),
+        ),
+      ),
+  });
+
+  registerTool(server, config, {
+    name: "eusdc_rotation_history_status",
+    description:
+      "Read-only status for the public eUSDC rotation market-history store. Reports completeness, sparse/dense analysis mode, gaps, and scan readiness for all five candidates without wallet writes or Piteas calls.",
+    category: "wallet",
+    inputSchema: {
+      lookbackMinutes: z.number().int().positive().optional().default(DEFAULT_HISTORY_LOOKBACK_MINUTES),
+      candleMinutes: z.number().int().positive().optional().default(DEFAULT_CANDLE_MINUTES),
+    },
+    handler: async (args, cfg) =>
+      ok(
+        neverReturnPrivateKey(
+          await runEusdcRotationHistoryStatus(cfg, {
+            lookbackMinutes: args.lookbackMinutes as number | undefined,
+            candleMinutes: args.candleMinutes as number | undefined,
+          }),
+        ),
+      ),
+  });
+
   registerTool(server, config, {
     name: "eusdc_rotation_scan",
     description:

@@ -24,9 +24,12 @@ import {
   EUSDC_ROTATION_CANDIDATES,
   PRVX_ADDRESS,
   analyzeRotationCandles,
+  analyzeHistoricalReversions,
   buildCandidateScanRow,
   buildFiveMinuteCandles,
   calculatePairLiquidityEusdc,
+  calculatePriceContinuityPercent,
+  classifyHistoryAnalysisMode,
   computeScanEconomicFeasibility,
   computeRequiredFinalEusdcRaw,
   computeSimpleBalanceTargetRaw,
@@ -34,16 +37,20 @@ import {
   deriveRouteConnectivity,
   getRotationCandidate,
   getRotationCandidateRegistry,
+  mergeRotationHistoryRecords,
   normalizeTokenAmount,
   priceObservationFromSwap,
+  reduceLogChunkAfterRangeError,
   resetEusdcRotationForTests,
   runEusdcRotationProposeEntry,
   runEusdcRotationProposeExit,
   runEusdcRotationScan,
   selectRotationWinner,
+  shouldUseRpcLogFallback,
   type RotationPriceObservation,
   type RotationCandidateId,
   type RotationDeps,
+  type RotationHistoryRecord,
   type RotationMarketEvidence,
   type RotationTokenValidation,
 } from "../src/tools/wallet/eusdcRotation.js";
@@ -223,6 +230,38 @@ function observation(timestamp: number, price: number, id: string, volumeEusdc =
     volumeEusdc,
     swapId: id,
     source: "fixture",
+  };
+}
+
+function historyRecord(input: {
+  candidateId?: RotationCandidateId;
+  tx?: `0x${string}`;
+  logIndex?: number;
+  timestamp: number;
+  price?: number;
+  blockNumber?: string | null;
+  blockHash?: `0x${string}` | null;
+  source?: string;
+}): RotationHistoryRecord {
+  return {
+    chainId: 369,
+    candidateId: input.candidateId ?? "PLSX",
+    poolAddress: "0x3000000000000000000000000000000000000002",
+    factoryAddress: null,
+    protocol: "PulseX V2",
+    blockNumber: input.blockNumber ?? null,
+    blockHash: input.blockHash ?? null,
+    transactionHash: input.tx ?? (`0x${String(input.logIndex ?? 1).padStart(64, "0")}` as `0x${string}`),
+    logIndex: input.logIndex ?? 0,
+    timestamp: input.timestamp,
+    token0: PLSX_ADDRESS,
+    token1: EUSDC_TOKEN_ADDRESS,
+    amount0Raw: "1000000000000000000",
+    amount1Raw: "1000000",
+    candidatePriceEusdc: input.price ?? 1,
+    eusdcNotionalRaw: "1000000",
+    source: input.source ?? "fixture",
+    fetchedAt: new Date(BASE_NOW).toISOString(),
   };
 }
 
@@ -1268,6 +1307,260 @@ describe("eUSDC live scan hardening primitives", () => {
     expect(d.getPiteasQuote).not.toHaveBeenCalled();
     expect(d.proposeAgentTx).not.toHaveBeenCalled();
     expect(d.executeAgentTx).not.toHaveBeenCalled();
+  });
+});
+
+describe("eUSDC rotation public history sync primitives", () => {
+  it("plans block-log fallback when subgraph pagination truncates and reduces RPC chunks after range errors", () => {
+    expect(shouldUseRpcLogFallback({
+      candidateId: "PLSX",
+      poolAddress: "0x3000000000000000000000000000000000000002",
+      sourceEndpoint: "https://example.com/v2",
+      queryType: "PulseX V2 swaps(pair, first, skip)",
+      pageSize: 100,
+      maximumPageCount: 32,
+      cursorMechanism: "skip",
+      oldestReturnedRecord: "2026-08-05T11:00:00.000Z",
+      newestReturnedRecord: "2026-08-05T12:00:00.000Z",
+      requestedStartTime: "2026-08-04T12:00:00.000Z",
+      requestedEndTime: "2026-08-05T12:00:00.000Z",
+      totalRecordsRetrieved: 3200,
+      deduplicatedRecords: 3200,
+      boundaryCrossed: false,
+      truncationReason: "SOURCE_ROW_LIMIT",
+      sourceRepeatsOrCapsRecords: true,
+      historicalPaginationReliable: false,
+      fallbackUsed: "NONE",
+    })).toBe(true);
+    expect(reduceLogChunkAfterRangeError(50_000)).toBe(25_000);
+    expect(reduceLogChunkAfterRangeError(120)).toBe(100);
+  });
+
+  it("deduplicates records, replaces recent reorg rows, retains seven days, and keeps public-only fields", () => {
+    const old = historyRecord({
+      timestamp: Math.floor(BASE_NOW / 1000) - 9 * 24 * 60 * 60,
+      tx: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      logIndex: 0,
+    });
+    const existing = historyRecord({
+      timestamp: Math.floor(BASE_NOW / 1000) - 60,
+      tx: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      logIndex: 1,
+      blockNumber: "999",
+      blockHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+      price: 1,
+    });
+    const replacement = {
+      ...existing,
+      blockHash: "0x2222222222222222222222222222222222222222222222222222222222222222" as `0x${string}`,
+      candidatePriceEusdc: 1.01,
+    };
+    const fresh = historyRecord({
+      timestamp: Math.floor(BASE_NOW / 1000) - 30,
+      tx: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      logIndex: 2,
+      blockNumber: "1000",
+      blockHash: "0x3333333333333333333333333333333333333333333333333333333333333333",
+    });
+    const merged = mergeRotationHistoryRecords({
+      existing: [old, existing],
+      incoming: [replacement, fresh, fresh],
+      nowMs: BASE_NOW,
+      retentionDays: 7,
+      forceRecentBlockRecheck: true,
+      latestBlockNumber: 1000n,
+    });
+    expect(merged.added).toBe(1);
+    expect(merged.updated).toBe(1);
+    expect(merged.duplicates).toBe(1);
+    expect(merged.records.some((record) => record.transactionHash === old.transactionHash)).toBe(false);
+    expect(JSON.stringify(merged.records)).not.toMatch(/private_key|master_key|wallet_secret|raw_signed/i);
+  });
+
+  it("separates source completeness, active candle coverage, and price continuity", () => {
+    const now = Date.parse("2026-08-05T12:00:00.000Z");
+    const start = Math.floor(now / 1000) - 24 * 60 * 60;
+    const observations = [
+      observation(start + 60, 1, "a"),
+      observation(start + 12 * 60 * 60, 0.99, "b"),
+      observation(start + 23 * 60 * 60 + 30, 1.01, "c"),
+    ];
+    const { coverage } = buildFiveMinuteCandles({
+      observations,
+      lookbackMinutes: 1440,
+      candleMinutes: 5,
+      nowMs: now,
+    });
+    const continuity = calculatePriceContinuityPercent({
+      observations,
+      lookbackMinutes: 1440,
+      candleMinutes: 5,
+      nowMs: now,
+      maxCarryForwardMinutes: 60,
+    });
+    expect(coverage.expectedCandles).toBe(288);
+    expect(coverage.coveragePercent).toBeLessThan(2);
+    expect(continuity).toBeGreaterThan(0);
+    expect(continuity).toBeLessThan(20);
+  });
+
+  it("classifies dense, qualified sparse, stale, excessive-gap, and insufficient-swap histories", () => {
+    const base = {
+      sourceCompletenessPercent: 100,
+      priceContinuityPercent: 75,
+      latestTradeAgeMinutes: 5,
+      maximumObservedGapMinutes: 120,
+      routeConnected: true,
+      liquidityPasses: true,
+      priceDispersionPercent: 1,
+      sourceTruncated: false,
+    };
+    expect(classifyHistoryAnalysisMode({
+      ...base,
+      activeTradeCandlePercent: 85,
+      actualTradeCount: 260,
+    })).toBe("DENSE_CANDLES");
+    expect(classifyHistoryAnalysisMode({
+      ...base,
+      activeTradeCandlePercent: 25,
+      actualTradeCount: 30,
+    })).toBe("SPARSE_EVENT_TIME");
+    expect(classifyHistoryAnalysisMode({
+      ...base,
+      latestTradeAgeMinutes: 90,
+      activeTradeCandlePercent: 25,
+      actualTradeCount: 30,
+    })).toBe("UNUSABLE_HISTORY");
+    expect(classifyHistoryAnalysisMode({
+      ...base,
+      maximumObservedGapMinutes: 720,
+      activeTradeCandlePercent: 25,
+      actualTradeCount: 30,
+    })).toBe("UNUSABLE_HISTORY");
+    expect(classifyHistoryAnalysisMode({
+      ...base,
+      activeTradeCandlePercent: 25,
+      actualTradeCount: 5,
+    })).toBe("UNUSABLE_HISTORY");
+  });
+
+  it("uses only actual observations for dip/rebound; carry-forward continuity cannot create the signal", () => {
+    const now = Date.parse("2026-08-05T12:00:00.000Z");
+    const start = Math.floor(now / 1000) - 90 * 60;
+    const sparse = [
+      observation(start + 60, 1, "ref", 20),
+      observation(start + 35 * 60, 0.9899, "low", 20),
+    ];
+    const { candles } = buildFiveMinuteCandles({
+      observations: sparse,
+      lookbackMinutes: 90,
+      candleMinutes: 5,
+      nowMs: now,
+    });
+    const noRebound = analyzeRotationCandles({
+      candles,
+      scanInput: {
+        walletId: WALLET_ID,
+        lookbackMinutes: 90,
+        candleMinutes: 5,
+        minimumDipBps: 100,
+        minimumReboundConfirmationBps: 20,
+        minimumNetTargetBps: 100,
+      },
+      pageCount: 1,
+      truncated: false,
+    });
+    expect(noRebound.dipReboundEvidence.status).toBe("UNAVAILABLE");
+
+    const actualRebound = analyzeRotationCandles({
+      candles: buildFiveMinuteCandles({
+        observations: [...sparse, observation(start + 40 * 60, 0.993, "rebound", 20)],
+        lookbackMinutes: 90,
+        candleMinutes: 5,
+        nowMs: now,
+      }).candles,
+      scanInput: {
+        walletId: WALLET_ID,
+        lookbackMinutes: 90,
+        candleMinutes: 5,
+        minimumDipBps: 100,
+        minimumReboundConfirmationBps: 20,
+        minimumNetTargetBps: 100,
+      },
+      pageCount: 1,
+      truncated: false,
+    });
+    expect(actualRebound.dipReboundEvidence.status).toBe("AVAILABLE");
+    expect(actualRebound.dipReboundEvidence.reboundBps).toBeGreaterThanOrEqual(20);
+  });
+
+  it("calculates dynamic target evidence and rejects 1% moves when the cycle requires about 2%", () => {
+    const economic = computeScanEconomicFeasibility({
+      startingEusdcRaw: STARTING_EUSDC,
+      minimumNetTargetBps: 100,
+      wplsPriceEusdc: 0.0000086691666667,
+      estimatedGasPlsPerLeg: 1500,
+      approvalLegs: 2,
+      swapLegs: 2,
+      safetyBufferRaw: "1000",
+    });
+    expect(economic.simpleTargetRaw).toBe("5274899");
+    expect(economic.dynamicTargetRaw).toBe("5327915");
+    expect(economic.requiredGrossMoveBps).toBeCloseTo(201.51, 2);
+
+    const now = Math.floor(BASE_NOW / 1000);
+    const onePercent = [
+      observation(now - 600, 1, "h"),
+      observation(now - 300, 0.99, "l"),
+      observation(now, 1.0, "r"),
+    ];
+    const twoPointOne = [
+      observation(now - 900, 1, "h1"),
+      observation(now - 600, 0.979, "l1"),
+      observation(now - 300, 1.0001, "r1"),
+      observation(now - 100, 1.001, "r2"),
+    ];
+    expect(analyzeHistoricalReversions({
+      observations: onePercent,
+      targetBps: economic.requiredGrossMoveBps,
+      lookbackMinutes: 1440,
+    }).completedReversions).toBe(0);
+    expect(analyzeHistoricalReversions({
+      observations: twoPointOne,
+      targetBps: economic.requiredGrossMoveBps,
+      lookbackMinutes: 1440,
+    }).completedReversions).toBeGreaterThan(0);
+
+    const incompleteRow = buildCandidateScanRow({
+      candidate: getRotationCandidate("PLSX"),
+      tokenValidation: validation("PLSX"),
+      market: market({
+        historyQuality: {
+          sourceCompletenessPercent: 50,
+          activeTradeCandlePercent: 10,
+          priceContinuityPercent: 20,
+          analysisMode: "UNUSABLE_HISTORY",
+          latestTradeAgeMinutes: 5,
+          maximumObservedGapMinutes: 10,
+          actualTradeCount: 10,
+          sourceTruncated: true,
+          unresolvedGaps: ["source row limit"],
+          readinessForLiveScanning: false,
+        },
+      }),
+      scanInput: {
+        walletId: WALLET_ID,
+        lookbackMinutes: 1440,
+        candleMinutes: 5,
+        minimumDipBps: 100,
+        minimumReboundConfirmationBps: 20,
+        minimumNetTargetBps: 100,
+      },
+      state: "EUSDC_IDLE",
+      hasOpenCycle: false,
+    });
+    expect(incompleteRow.rankingStatus).toBe("UNRANKED_INCOMPLETE_HISTORY");
+    expect(selectRotationWinner([incompleteRow]).rankedCandidateIds).toEqual([]);
   });
 });
 
