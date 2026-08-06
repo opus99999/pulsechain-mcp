@@ -25,8 +25,10 @@ import {
   PRVX_ADDRESS,
   analyzeRotationCandles,
   analyzeHistoricalReversions,
+  advanceRecentRefreshCheckpoint,
   appendCompletedRecentRange,
   buildCandidateScanRow,
+  buildRecentRefreshTaskPlan,
   buildRecentSignalPoolTasks,
   buildFiveMinuteCandles,
   calculatePairLiquidityEusdc,
@@ -59,13 +61,18 @@ import {
   resolveEusdcRotationHistoryStorePath,
   resolveEusdcRotationRepositoryRoot,
   rotationCheckpointProgressFingerprint,
+  recentRefreshPlanFingerprint,
+  recentRefreshProgressFingerprint,
+  recentRefreshResumeToken,
   runEusdcRotationHistorySync,
   runEusdcRotationHistoryStatus,
   runEusdcRotationProposeEntry,
   runEusdcRotationProposeExit,
   runEusdcRotationScan,
   selectRotationWinner,
+  shouldStartRecentRefreshRange,
   shouldUseRpcLogFallback,
+  validateRecentRefreshCheckpointState,
   type RotationPriceObservation,
   type RotationCandidateId,
   type RotationDeps,
@@ -1827,6 +1834,431 @@ describe("eUSDC rotation public history sync primitives", () => {
       "CANDIDATE_WPLS",
     ]);
     expect(tasks[0]?.poolAddress).toBe("0x8ebe62d5e9d26b637673d91f56900233d6a4910d");
+  });
+
+  it("builds deterministic recent-refresh plans and advances completed ranges to the next task", () => {
+    const pls = getRotationCandidate("PLS");
+    const phex = getRotationCandidate("PHEX");
+    const anchor = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x8ebe62d5e9d26b637673d91f56900233d6a4910d",
+        token0: WPLS_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000000",
+        reserve1: "1000000",
+        reserveUSD: "2000000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 2_000_000,
+    });
+    const phexDirect = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0xc475332e92561cd58f278e4e2ed76c17d5b50f05",
+        token0: HEX_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000",
+        reserve1: "2000000",
+        reserveUSD: "4000000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 4_000_000,
+    });
+    const poolTasks = buildRecentSignalPoolTasks({
+      candidates: [pls, phex],
+      poolsByCandidate: new Map([
+        ["PLS", [anchor]],
+        ["PHEX", [phexDirect]],
+      ]),
+    });
+    const plan = buildRecentRefreshTaskPlan({
+      poolTasks,
+      fullRangeFromBlock: 1000n,
+      fullRangeToBlock: 1999n,
+      tipFromBlock: 1900n,
+      tipToBlock: 1999n,
+      maximumBlocksPerChunk: 500,
+    });
+
+    expect(plan[0]).toMatchObject({
+      phase: "SHARED_ANCHOR_TIP_REFRESH",
+      poolAddress: "0x8ebe62d5e9d26b637673d91f56900233d6a4910d",
+      fromBlock: "1900",
+      toBlock: "1999",
+      status: "PENDING",
+    });
+    expect(plan.some((task) => task.phase === "REQUIRED_SIGNAL_WINDOW_BACKFILL")).toBe(true);
+    expect(plan.findIndex((task) => task.candidateId === "PHEX")).toBeGreaterThan(0);
+
+    const planFingerprint = recentRefreshPlanFingerprint({
+      chainId: 369,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedStartTime: "2026-08-07T00:00:00.000Z",
+      requestedEndTime: "2026-08-08T00:00:00.000Z",
+      candidateIds: ["PLS", "PHEX"],
+      requiredPoolSet: poolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      storePath: "C:\\repo\\data\\eusdc-rotation-history\\market-history.json",
+      planTipBlock: "1999",
+      tasks: plan,
+    });
+    const checkpoint = {
+      schemaVersion: 1,
+      resumeToken: "0x" + "66".repeat(32),
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: "2026-08-07T00:00:00.000Z",
+        endTime: "2026-08-08T00:00:00.000Z",
+        lookbackMinutes: 1440,
+      },
+      resolvedStartBlock: "1000",
+      resolvedEndBlock: "1999",
+      candidateIds: ["PLS", "PHEX"],
+      requiredPoolSet: poolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      storePath: "C:\\repo\\data\\eusdc-rotation-history\\market-history.json",
+      chainId: 369,
+      phase: plan[0]!.phase,
+      planFingerprint,
+      planTipBlock: "1999",
+      currentTaskIndex: 0,
+      completedTaskIds: [],
+      taskPlan: plan,
+      candidateId: plan[0]!.candidateId,
+      poolAddress: plan[0]!.poolAddress,
+      nextBlock: plan[0]!.toBlock,
+      completedBlockRanges: [],
+      completedPools: [],
+      sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
+      storeFingerprintBeforeRun: "0x" + "67".repeat(32),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    } as const;
+    const completedRange = {
+      candidateId: plan[0]!.candidateId,
+      poolAddress: plan[0]!.poolAddress,
+      sourceVersion: plan[0]!.sourceVersion,
+      fromBlock: plan[0]!.fromBlock,
+      toBlock: plan[0]!.toBlock,
+      resultCount: 0,
+      validRecordCount: 0,
+      duplicateCount: 0,
+      completedAt: "2026-08-08T00:01:00.000Z",
+      source: "https://example.com/v2",
+      adapter: "PULSEX_V2_STYLE_SWAP",
+      success: true,
+    } as const;
+    const advanced = advanceRecentRefreshCheckpoint({
+      checkpoint,
+      taskResult: { taskId: plan[0]!.taskId, completedRange },
+      storeFingerprint: "0x" + "68".repeat(32),
+      updatedAt: "2026-08-08T00:01:00.000Z",
+    });
+
+    expect(advanced.completedPlan).toBe(false);
+    expect(advanced.checkpoint.currentTaskIndex).toBe(1);
+    expect(advanced.currentTask?.taskId).toBe(plan[1]!.taskId);
+    expect(advanced.currentTask?.taskId).not.toBe(plan[0]!.taskId);
+    expect(advanced.checkpoint.completedTaskIds).toContain(plan[0]!.taskId);
+    expect(advanced.checkpoint.completedBlockRanges).toHaveLength(1);
+    expect(advanced.checkpoint.phase).toBe(plan[1]!.phase);
+  });
+
+  it("does not allow a completed live stalled task to remain current", () => {
+    const candidate = getRotationCandidate("PLS");
+    const anchor = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x6753560538eca67617a9ce605178f788be7e524e",
+        token0: WPLS_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000000",
+        reserve1: "1000000",
+        reserveUSD: "2000000",
+      }),
+      sourceVersion: "PULSEX_V1",
+      liquidityEusdc: 2_000_000,
+    });
+    const poolTasks = buildRecentSignalPoolTasks({
+      candidates: [candidate],
+      poolsByCandidate: new Map([["PLS", [anchor]]]),
+    });
+    const plan = buildRecentRefreshTaskPlan({
+      poolTasks,
+      fullRangeFromBlock: 27207459n,
+      fullRangeToBlock: 27215743n,
+      tipFromBlock: 27215052n,
+      tipToBlock: 27215743n,
+      maximumBlocksPerChunk: 5000,
+    });
+    const planFingerprint = recentRefreshPlanFingerprint({
+      chainId: 369,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedStartTime: "2026-08-05T02:42:40.000Z",
+      requestedEndTime: "2026-08-06T02:42:40.000Z",
+      candidateIds: ["PLS"],
+      requiredPoolSet: poolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      storePath: "C:\\repo\\data\\eusdc-rotation-history\\market-history.json",
+      planTipBlock: "27215743",
+      tasks: plan,
+    });
+    const checkpoint = {
+      schemaVersion: 1,
+      resumeToken: "0x" + "69".repeat(32),
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: "2026-08-05T02:42:40.000Z",
+        endTime: "2026-08-06T02:42:40.000Z",
+        lookbackMinutes: 1440,
+      },
+      phase: plan[1]!.phase,
+      planFingerprint,
+      planTipBlock: "27215743",
+      currentTaskIndex: 1,
+      completedTaskIds: [plan[0]!.taskId],
+      taskPlan: plan,
+      candidateId: plan[0]!.candidateId,
+      poolAddress: plan[0]!.poolAddress,
+      completedBlockRanges: [{
+        candidateId: plan[0]!.candidateId,
+        poolAddress: plan[0]!.poolAddress,
+        sourceVersion: plan[0]!.sourceVersion,
+        fromBlock: plan[0]!.fromBlock,
+        toBlock: plan[0]!.toBlock,
+        success: true,
+      }],
+      completedPools: [],
+      sourceCursor: { candidateIndex: 1, poolIndex: 0, taskIndex: 1 },
+      storeFingerprintBeforeRun: "0x" + "70".repeat(32),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    } as const;
+
+    expect(validateRecentRefreshCheckpointState({
+      ...checkpoint,
+      sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
+    })).toMatch(/source cursor task index disagrees/i);
+    const corrected = advanceRecentRefreshCheckpoint({
+      checkpoint: { ...checkpoint, candidateId: plan[1]!.candidateId, poolAddress: plan[1]!.poolAddress },
+      storeFingerprint: "0x" + "71".repeat(32),
+      updatedAt: "2026-08-08T00:01:00.000Z",
+    });
+    expect(validateRecentRefreshCheckpointState(corrected.checkpoint)).toBeNull();
+    expect(corrected.currentTask?.taskId).toBe(plan[1]!.taskId);
+    expect(corrected.currentTask?.fromBlock).not.toBe(plan[0]!.fromBlock);
+  });
+
+  it("binds resume tokens to real cursor progress but not updatedAt", () => {
+    const requestedWindow = {
+      startTime: "2026-08-07T00:00:00.000Z",
+      endTime: "2026-08-08T00:00:00.000Z",
+      lookbackMinutes: 1440,
+    };
+    const tokenA = recentRefreshResumeToken({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow,
+      planFingerprint: "0x" + "72".repeat(32),
+      planTipBlock: "1999",
+      currentTaskIndex: 1,
+      completedTaskIds: ["task-a"],
+      storeFingerprint: "0x" + "73".repeat(32),
+    });
+    const tokenB = recentRefreshResumeToken({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow,
+      planFingerprint: "0x" + "72".repeat(32),
+      planTipBlock: "1999",
+      currentTaskIndex: 1,
+      completedTaskIds: ["task-a"],
+      storeFingerprint: "0x" + "73".repeat(32),
+    });
+    const tokenC = recentRefreshResumeToken({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow,
+      planFingerprint: "0x" + "72".repeat(32),
+      planTipBlock: "1999",
+      currentTaskIndex: 2,
+      completedTaskIds: ["task-a", "task-b"],
+      storeFingerprint: "0x" + "73".repeat(32),
+    });
+    const progressA = recentRefreshProgressFingerprint({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      phase: "CANDIDATE_TIP_REFRESH",
+      planFingerprint: "0x" + "72".repeat(32),
+      currentTaskIndex: 1,
+      completedTaskIds: ["task-a"],
+      completedBlockRanges: [],
+    });
+    const progressB = recentRefreshProgressFingerprint({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      phase: "REQUIRED_SIGNAL_WINDOW_BACKFILL",
+      planFingerprint: "0x" + "72".repeat(32),
+      currentTaskIndex: 2,
+      completedTaskIds: ["task-a", "task-b"],
+      completedBlockRanges: [],
+    });
+
+    expect(tokenA).toBe(tokenB);
+    expect(tokenA).not.toBe(tokenC);
+    expect(progressA).not.toBe(progressB);
+  });
+
+  it("starts the first recent-refresh range but refuses a late second range", () => {
+    const nowMs = Date.parse("2026-08-08T00:00:00.000Z");
+    const deadlineMs = nowMs + 120_000;
+    expect(shouldStartRecentRefreshRange({
+      nowMs,
+      deadlineMs,
+      maximumRuntimeMs: 120_000,
+      attemptedRanges: 0,
+    })).toBe(true);
+    expect(shouldStartRecentRefreshRange({
+      nowMs: nowMs + 35_000,
+      deadlineMs,
+      maximumRuntimeMs: 120_000,
+      attemptedRanges: 1,
+    })).toBe(false);
+  });
+
+  it("splits recent signal backfill below oversized caller chunk limits", () => {
+    const candidate = getRotationCandidate("PLS");
+    const anchor = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x6753560538eca67617a9ce605178f788be7e524e",
+        token0: WPLS_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000000",
+        reserve1: "1000000",
+        reserveUSD: "2000000",
+      }),
+      sourceVersion: "PULSEX_V1",
+      liquidityEusdc: 2_000_000,
+    });
+    const plan = buildRecentRefreshTaskPlan({
+      poolTasks: buildRecentSignalPoolTasks({
+        candidates: [candidate],
+        poolsByCandidate: new Map([["PLS", [anchor]]]),
+      }),
+      fullRangeFromBlock: 27207459n,
+      fullRangeToBlock: 27215743n,
+      tipFromBlock: 27215052n,
+      tipToBlock: 27215743n,
+      maximumBlocksPerChunk: 10_000,
+    });
+    const backfillRanges = plan.filter((task) => task.phase === "REQUIRED_SIGNAL_WINDOW_BACKFILL");
+    expect(backfillRanges.length).toBeGreaterThan(1);
+    expect(backfillRanges.every((task) =>
+      BigInt(task.toBlock) - BigInt(task.fromBlock) + 1n <= 500n
+    )).toBe(true);
+  });
+
+  it("keeps a pinned resume plan authoritative when fresh discovery would differ", () => {
+    const candidate = getRotationCandidate("PHEX");
+    const directA = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0xc475332e92561cd58f278e4e2ed76c17d5b50f05",
+        token0: HEX_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000",
+        reserve1: "2000000",
+        reserveUSD: "4000000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 4_000_000,
+    });
+    const directB = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x19bb45a7270177e303dee6eaa6f5ad700812ba98",
+        token0: HEX_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000",
+        reserve1: "1900000",
+        reserveUSD: "3800000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 3_800_000,
+    });
+    const originalPoolTasks = buildRecentSignalPoolTasks({
+      candidates: [candidate],
+      poolsByCandidate: new Map([["PHEX", [directA]]]),
+    });
+    const changedPoolTasks = buildRecentSignalPoolTasks({
+      candidates: [candidate],
+      poolsByCandidate: new Map([["PHEX", [directA, directB]]]),
+    });
+    const originalPlan = buildRecentRefreshTaskPlan({
+      poolTasks: originalPoolTasks,
+      fullRangeFromBlock: 1000n,
+      fullRangeToBlock: 1999n,
+      tipFromBlock: 1900n,
+      tipToBlock: 1999n,
+      maximumBlocksPerChunk: 500,
+    });
+    const changedPlan = buildRecentRefreshTaskPlan({
+      poolTasks: changedPoolTasks,
+      fullRangeFromBlock: 1000n,
+      fullRangeToBlock: 1999n,
+      tipFromBlock: 1900n,
+      tipToBlock: 1999n,
+      maximumBlocksPerChunk: 500,
+    });
+    const common = {
+      chainId: 369,
+      syncPurpose: "RECENT_SIGNAL_WINDOW" as const,
+      requestedStartTime: "2026-08-07T00:00:00.000Z",
+      requestedEndTime: "2026-08-08T00:00:00.000Z",
+      candidateIds: ["PHEX" as const],
+      storePath: "C:\\repo\\data\\eusdc-rotation-history\\market-history.json",
+      planTipBlock: "1999",
+    };
+    const originalFingerprint = recentRefreshPlanFingerprint({
+      ...common,
+      requiredPoolSet: originalPoolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      tasks: originalPlan,
+    });
+    const changedFingerprint = recentRefreshPlanFingerprint({
+      ...common,
+      requiredPoolSet: changedPoolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      tasks: changedPlan,
+    });
+    expect(changedFingerprint).not.toBe(originalFingerprint);
+    expect(validateRecentRefreshCheckpointState({
+      schemaVersion: 1,
+      resumeToken: "0x" + "74".repeat(32),
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: common.requestedStartTime,
+        endTime: common.requestedEndTime,
+        lookbackMinutes: 1440,
+      },
+      phase: originalPlan[0]!.phase,
+      planFingerprint: originalFingerprint,
+      planTipBlock: common.planTipBlock,
+      currentTaskIndex: 0,
+      completedTaskIds: [],
+      taskPlan: originalPlan,
+      candidateId: originalPlan[0]!.candidateId,
+      poolAddress: originalPlan[0]!.poolAddress,
+      completedBlockRanges: [],
+      completedPools: [],
+      sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
+      storeFingerprintBeforeRun: "0x" + "75".repeat(32),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    })).toBeNull();
   });
 
   it("keeps recent and historical checkpoints isolated by purpose and fixed window", () => {

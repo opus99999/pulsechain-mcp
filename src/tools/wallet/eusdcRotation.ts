@@ -299,6 +299,8 @@ const HISTORY_RUNTIME_GUARD_MS = 10_000;
 const HISTORY_SOURCE_REQUEST_TIMEOUT_MS = 5_000;
 const HISTORY_MIN_REQUEST_TIMEOUT_MS = 1_000;
 const HISTORY_CHECKPOINT_SCHEMA_VERSION = 1;
+const RECENT_REFRESH_PLAN_SCHEMA_VERSION = 3;
+const RECENT_REFRESH_MAX_BACKFILL_BLOCKS_PER_TASK = 500;
 const HISTORY_STORE_SCHEMA_VERSION = 1;
 const HISTORY_RECENT_REORG_BLOCKS = 64n;
 const ANCHOR_MAX_AGE_SECONDS = 15 * 60;
@@ -674,6 +676,9 @@ export type RotationHistorySyncCode =
   | "HISTORY_SYNC_BUSY"
   | "CHECKPOINT_WINDOW_MISMATCH"
   | "CHECKPOINT_STALLED"
+  | "CHECKPOINT_STATE_INCONSISTENT"
+  | "CHECKPOINT_REPLANNED"
+  | "READY_CANDIDATE_FOUND"
   | "SOURCE_ERROR"
   | RotationHistoryStoreReviewCode;
 
@@ -682,9 +687,25 @@ export type RotationHistorySyncPurpose =
   | "HISTORICAL_BACKFILL";
 
 export type RotationRecentRefreshPhase =
+  | "SHARED_ANCHOR_TIP_REFRESH"
+  | "CANDIDATE_TIP_REFRESH"
+  | "REQUIRED_SIGNAL_WINDOW_BACKFILL"
+  | "OPTIONAL_SIGNAL_WINDOW_BACKFILL"
+  | "COMPLETE"
   | "TIP_REFRESH"
   | "SIGNAL_WINDOW_BACKFILL"
   | "SIGNAL_WINDOW_COMPLETE";
+
+export type RotationRecentRefreshTaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "RANGE_COMPLETE"
+  | "POOL_COMPLETE"
+  | "CANDIDATE_PHASE_COMPLETE"
+  | "SKIPPED_OPTIONAL"
+  | "SOURCE_ERROR";
+
+export type RotationRecentRefreshScanDirection = "ASC" | "DESC";
 
 export type RotationTipFreshnessStatus =
   | "TIP_NOT_SCANNED"
@@ -863,6 +884,12 @@ export interface RotationHistorySyncCheckpoint {
   storePath?: string;
   chainId?: number;
   phase?: RotationRecentRefreshPhase;
+  planSchemaVersion?: number;
+  planFingerprint?: `0x${string}`;
+  planTipBlock?: string;
+  currentTaskIndex?: number;
+  completedTaskIds?: string[];
+  taskPlan?: RotationRecentRefreshPlanTask[];
   candidateId?: RotationCandidateId;
   poolAddress?: `0x${string}`;
   nextBlock?: string;
@@ -914,6 +941,21 @@ export interface RotationHistorySyncCheckpoint {
   updatedAt: string;
 }
 
+export interface RotationRecentRefreshPlanTask {
+  taskId: string;
+  phase: RotationRecentRefreshPhase;
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  poolRole: RotationRecentPoolRole;
+  sourceVersion: RotationHistorySourceVersion;
+  eventAdapter: RotationHistoryEventAdapter;
+  requiredAnchorPool?: `0x${string}` | null;
+  fromBlock: string;
+  toBlock: string;
+  scanDirection: RotationRecentRefreshScanDirection;
+  status: RotationRecentRefreshTaskStatus;
+}
+
 export interface RotationHistoryFile {
   schemaVersion: 1;
   chainId: number;
@@ -950,6 +992,7 @@ export interface RotationRecentRefreshInput {
   maximumPoolsPerRun?: number;
   resumeToken?: string;
   forceRecentBlockRecheck?: boolean;
+  stopWhenAnyCandidateReady?: boolean;
 }
 
 export interface RotationRecentRefreshResult extends RotationHistorySyncResult {
@@ -961,6 +1004,37 @@ export interface RotationRecentRefreshResult extends RotationHistorySyncResult {
   anchorLatestTimestamp: string | null;
   anchorLagBlocks: number | null;
   anchorLagMinutes: number | null;
+  planFingerprint?: `0x${string}`;
+  planTipBlock?: string;
+  currentPhase?: RotationRecentRefreshPhase;
+  currentTaskId?: string | null;
+  currentTaskIndex?: number;
+  totalTaskCount?: number;
+  pendingTaskCount?: number;
+  completedTaskCount?: number;
+  completedRangeCount?: number;
+  nextRange?: {
+    fromBlock: string;
+    toBlock: string;
+  } | null;
+  candidateTipStatus?: Partial<Record<RotationCandidateId, RotationTipFreshnessStatus>>;
+  candidateSignalWindowStatus?: Partial<Record<RotationCandidateId, boolean>>;
+  tasksAdvancedThisCall?: number;
+  rangesAdvancedThisCall?: number;
+  blocksScannedThisCall?: number;
+  sourceCallsThisCall?: number;
+  zeroLogRangesCompleted?: number;
+  duplicateOnlyRangesCompleted?: number;
+  previousProgressFingerprint?: `0x${string}` | null;
+  finalProgressFingerprint?: `0x${string}` | null;
+  earlyStopReason?: string;
+  readyCandidateId?: RotationCandidateId;
+  checkpointReplanned?: boolean;
+  archivedCheckpointPath?: string;
+  oldProgressFingerprint?: `0x${string}`;
+  newPlanFingerprint?: `0x${string}`;
+  rangesSafelyReused?: number;
+  rangesScheduledAgain?: number;
 }
 
 export interface RotationHistorySyncResult {
@@ -2231,6 +2305,25 @@ function readHistorySyncCheckpoint(config?: AppConfig): RotationHistorySyncCheck
 function writeHistorySyncCheckpoint(config: AppConfig, checkpoint: RotationHistorySyncCheckpoint): void {
   mkdirSync(historyStoreDirectory(config), { recursive: true });
   atomicWriteJson(historySyncCheckpointPath(config), checkpoint, { fsync: true });
+}
+
+function archiveHistorySyncCheckpoint(config: AppConfig, reason: string): string | null {
+  const file = historySyncCheckpointPath(config);
+  if (!existsSync(file)) return null;
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace("T", "T").replace("Z", "Z");
+  const archivePath = normalize(join(historyStoreDirectory(config), `sync-checkpoint.stalled-${timestamp}.json`));
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    atomicWriteJson(archivePath, {
+      ...parsed,
+      archivedAt: new Date().toISOString(),
+      archiveReason: reason,
+    }, { fsync: true });
+    unlinkSync(file);
+    return archivePath;
+  } catch {
+    return null;
+  }
 }
 
 function clearHistorySyncCheckpoint(config: AppConfig): void {
@@ -3888,6 +3981,13 @@ function recentPoolRolePriority(role: RotationRecentPoolRole): number {
   }
 }
 
+const RECENT_REFRESH_CANDIDATE_PRIORITY: readonly RotationCandidateId[] = ["PLS", "PHEX", "PRVX", "PLSX", "INC"];
+
+function recentRefreshCandidatePriority(candidateId: RotationCandidateId): number {
+  const index = RECENT_REFRESH_CANDIDATE_PRIORITY.indexOf(candidateId);
+  return index === -1 ? RECENT_REFRESH_CANDIDATE_PRIORITY.length : index;
+}
+
 export function buildRecentSignalPoolTasks(input: {
   candidates: RotationCandidateRegistryEntry[];
   poolsByCandidate: Map<RotationCandidateId, RotationHistorySourcePoolRef[]>;
@@ -3914,10 +4014,422 @@ export function buildRecentSignalPoolTasks(input: {
     const required = Number(b.sourcePool.classification === "REQUIRED_PRICE_POOL") -
       Number(a.sourcePool.classification === "REQUIRED_PRICE_POOL");
     if (required !== 0) return required;
+    const priority = recentRefreshCandidatePriority(a.candidateId) - recentRefreshCandidatePriority(b.candidateId);
+    if (priority !== 0) return priority;
     const candidate = (candidateOrder.get(a.candidateId) ?? 0) - (candidateOrder.get(b.candidateId) ?? 0);
     if (candidate !== 0) return candidate;
     return b.sourcePool.liquidityEusdc - a.sourcePool.liquidityEusdc;
   });
+}
+
+function recentRefreshTaskPhasePriority(phase: RotationRecentRefreshPhase): number {
+  switch (phase) {
+    case "SHARED_ANCHOR_TIP_REFRESH":
+      return 0;
+    case "CANDIDATE_TIP_REFRESH":
+      return 1;
+    case "REQUIRED_SIGNAL_WINDOW_BACKFILL":
+      return 2;
+    case "OPTIONAL_SIGNAL_WINDOW_BACKFILL":
+      return 3;
+    case "COMPLETE":
+    case "SIGNAL_WINDOW_COMPLETE":
+      return 4;
+    case "TIP_REFRESH":
+      return 1;
+    case "SIGNAL_WINDOW_BACKFILL":
+      return 2;
+  }
+}
+
+function recentRefreshTaskSortKey(task: RotationRecentRefreshPlanTask): [number, number, number, string, bigint] {
+  return [
+    recentRefreshTaskPhasePriority(task.phase),
+    recentRefreshCandidatePriority(task.candidateId),
+    recentPoolRolePriority(task.poolRole),
+    task.poolAddress.toLowerCase(),
+    BigInt(task.toBlock),
+  ];
+}
+
+function compareRecentRefreshPlanTasks(a: RotationRecentRefreshPlanTask, b: RotationRecentRefreshPlanTask): number {
+  const ak = recentRefreshTaskSortKey(a);
+  const bk = recentRefreshTaskSortKey(b);
+  for (let index = 0; index < ak.length; index += 1) {
+    const left = ak[index]!;
+    const right = bk[index]!;
+    if (typeof left === "bigint" && typeof right === "bigint") {
+      if (left !== right) return left > right ? -1 : 1;
+      continue;
+    }
+    if (left !== right) return left < right ? -1 : 1;
+  }
+  return a.taskId.localeCompare(b.taskId);
+}
+
+function blockRangeChunksDescending(input: {
+  fromBlock: bigint;
+  toBlock: bigint;
+  maximumBlocksPerChunk: number;
+}): Array<{ fromBlock: bigint; toBlock: bigint }> {
+  if (input.toBlock < input.fromBlock) return [];
+  const chunkSize = BigInt(Math.max(1, input.maximumBlocksPerChunk));
+  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+  let high = input.toBlock;
+  while (high >= input.fromBlock) {
+    const lowCandidate = high - chunkSize + 1n;
+    const low = lowCandidate < input.fromBlock ? input.fromBlock : lowCandidate;
+    ranges.push({ fromBlock: low, toBlock: high });
+    if (low === input.fromBlock) break;
+    high = low - 1n;
+  }
+  return ranges;
+}
+
+function uniqueRecentPoolTasks(tasks: RotationRecentPoolTask[]): RotationRecentPoolTask[] {
+  const seen = new Set<string>();
+  const unique: RotationRecentPoolTask[] = [];
+  for (const task of tasks) {
+    const key = `${task.poolAddress.toLowerCase()}:${task.sourceVersion}:${task.role}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(task);
+  }
+  return unique;
+}
+
+function recentRefreshTaskId(input: {
+  phase: RotationRecentRefreshPhase;
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  sourceVersion: RotationHistorySourceVersion;
+  fromBlock: string;
+  toBlock: string;
+}): string {
+  return fingerprint({
+    phase: input.phase,
+    candidateId: input.candidateId,
+    poolAddress: input.poolAddress.toLowerCase(),
+    sourceVersion: input.sourceVersion,
+    fromBlock: input.fromBlock,
+    toBlock: input.toBlock,
+  });
+}
+
+function planTaskFromPool(input: {
+  phase: RotationRecentRefreshPhase;
+  poolTask: RotationRecentPoolTask;
+  fromBlock: bigint;
+  toBlock: bigint;
+  scanDirection: RotationRecentRefreshScanDirection;
+  requiredAnchorPool?: `0x${string}` | null;
+}): RotationRecentRefreshPlanTask {
+  const fromBlock = input.fromBlock.toString();
+  const toBlock = input.toBlock.toString();
+  return {
+    taskId: recentRefreshTaskId({
+      phase: input.phase,
+      candidateId: input.poolTask.candidateId,
+      poolAddress: input.poolTask.poolAddress,
+      sourceVersion: input.poolTask.sourceVersion,
+      fromBlock,
+      toBlock,
+    }),
+    phase: input.phase,
+    candidateId: input.poolTask.candidateId,
+    poolAddress: input.poolTask.poolAddress,
+    poolRole: input.poolTask.role,
+    sourceVersion: input.poolTask.sourceVersion,
+    eventAdapter: input.poolTask.sourcePool.eventAdapter,
+    requiredAnchorPool: input.requiredAnchorPool ?? null,
+    fromBlock,
+    toBlock,
+    scanDirection: input.scanDirection,
+    status: "PENDING",
+  };
+}
+
+export function recentRefreshPlanFingerprint(input: {
+  chainId: number;
+  syncPurpose: RotationHistorySyncPurpose;
+  requestedStartTime: string;
+  requestedEndTime: string;
+  candidateIds: RotationCandidateId[];
+  requiredPoolSet: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    sourceVersion: RotationHistorySourceVersion;
+  }>;
+  storePath: string;
+  planTipBlock: string;
+  tasks: RotationRecentRefreshPlanTask[];
+}): `0x${string}` {
+  return fingerprint({
+    planSchemaVersion: RECENT_REFRESH_PLAN_SCHEMA_VERSION,
+    chainId: input.chainId,
+    syncPurpose: input.syncPurpose,
+    requestedStartTime: input.requestedStartTime,
+    requestedEndTime: input.requestedEndTime,
+    candidateIds: input.candidateIds,
+    requiredPoolSet: input.requiredPoolSet.map((pool) => ({
+      candidateId: pool.candidateId,
+      poolAddress: pool.poolAddress.toLowerCase(),
+      sourceVersion: pool.sourceVersion,
+    })),
+    storePath: input.storePath,
+    planTipBlock: input.planTipBlock,
+    tasks: input.tasks.map((task) => ({
+      taskId: task.taskId,
+      phase: task.phase,
+      candidateId: task.candidateId,
+      poolAddress: task.poolAddress.toLowerCase(),
+      role: task.poolRole,
+      sourceVersion: task.sourceVersion,
+      fromBlock: task.fromBlock,
+      toBlock: task.toBlock,
+      direction: task.scanDirection,
+    })),
+  });
+}
+
+export function buildRecentRefreshTaskPlan(input: {
+  poolTasks: RotationRecentPoolTask[];
+  fullRangeFromBlock: bigint;
+  fullRangeToBlock: bigint;
+  tipFromBlock: bigint;
+  tipToBlock: bigint;
+  maximumBlocksPerChunk: number;
+}): RotationRecentRefreshPlanTask[] {
+  const sharedAnchorTasks = uniqueRecentPoolTasks(
+    input.poolTasks.filter((task) => task.role === "WPLS_EUSDC_ANCHOR"),
+  );
+  const sharedAnchorPool = sharedAnchorTasks[0]?.poolAddress ?? null;
+  const requiredTasks = uniqueRecentPoolTasks(
+    input.poolTasks.filter((task) => task.sourcePool.classification === "REQUIRED_PRICE_POOL"),
+  );
+  const requiredCandidateTasks = requiredTasks.filter((task) => task.role !== "WPLS_EUSDC_ANCHOR");
+  const optionalTasks = uniqueRecentPoolTasks(
+    input.poolTasks.filter((task) => task.sourcePool.classification !== "REQUIRED_PRICE_POOL"),
+  );
+  const plan: RotationRecentRefreshPlanTask[] = [];
+
+  for (const task of sharedAnchorTasks) {
+    plan.push(planTaskFromPool({
+      phase: "SHARED_ANCHOR_TIP_REFRESH",
+      poolTask: task,
+      fromBlock: input.tipFromBlock,
+      toBlock: input.tipToBlock,
+      scanDirection: "ASC",
+    }));
+  }
+
+  for (const task of requiredCandidateTasks) {
+    plan.push(planTaskFromPool({
+      phase: "CANDIDATE_TIP_REFRESH",
+      poolTask: task,
+      fromBlock: input.tipFromBlock,
+      toBlock: input.tipToBlock,
+      scanDirection: "ASC",
+      requiredAnchorPool: task.role === "CANDIDATE_WPLS" ? sharedAnchorPool : null,
+    }));
+  }
+
+  const signalToBlock = input.tipFromBlock > input.fullRangeFromBlock
+    ? input.tipFromBlock - 1n
+    : input.fullRangeFromBlock - 1n;
+  const backfillChunkSize = Math.min(
+    Math.max(1, input.maximumBlocksPerChunk),
+    RECENT_REFRESH_MAX_BACKFILL_BLOCKS_PER_TASK,
+  );
+  for (const task of requiredTasks) {
+    for (const range of blockRangeChunksDescending({
+      fromBlock: input.fullRangeFromBlock,
+      toBlock: signalToBlock,
+      maximumBlocksPerChunk: backfillChunkSize,
+    })) {
+      plan.push(planTaskFromPool({
+        phase: "REQUIRED_SIGNAL_WINDOW_BACKFILL",
+        poolTask: task,
+        fromBlock: range.fromBlock,
+        toBlock: range.toBlock,
+        scanDirection: "DESC",
+        requiredAnchorPool: task.role === "CANDIDATE_WPLS" ? sharedAnchorPool : null,
+      }));
+    }
+  }
+
+  for (const task of optionalTasks) {
+    for (const range of blockRangeChunksDescending({
+      fromBlock: input.fullRangeFromBlock,
+      toBlock: signalToBlock,
+      maximumBlocksPerChunk: backfillChunkSize,
+    })) {
+      plan.push(planTaskFromPool({
+        phase: "OPTIONAL_SIGNAL_WINDOW_BACKFILL",
+        poolTask: task,
+        fromBlock: range.fromBlock,
+        toBlock: range.toBlock,
+        scanDirection: "DESC",
+        requiredAnchorPool: task.role === "CANDIDATE_WPLS" ? sharedAnchorPool : null,
+      }));
+    }
+  }
+
+  return plan.sort(compareRecentRefreshPlanTasks);
+}
+
+export function recentRefreshProgressFingerprint(input: {
+  syncPurpose: RotationHistorySyncPurpose;
+  phase: RotationRecentRefreshPhase;
+  planFingerprint: `0x${string}`;
+  currentTaskIndex: number;
+  completedTaskIds: string[];
+  completedBlockRanges: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
+  }>;
+}): `0x${string}` {
+  return fingerprint({
+    syncPurpose: input.syncPurpose,
+    phase: input.phase,
+    planFingerprint: input.planFingerprint,
+    currentTaskIndex: input.currentTaskIndex,
+    completedTaskIds: [...input.completedTaskIds].sort(),
+    completedBlockRanges: input.completedBlockRanges.map((range) => ({
+      c: range.candidateId,
+      p: range.poolAddress.toLowerCase(),
+      f: range.fromBlock,
+      t: range.toBlock,
+    })),
+  });
+}
+
+export function recentRefreshResumeToken(input: {
+  syncPurpose: RotationHistorySyncPurpose;
+  requestedWindow: RotationHistorySyncCheckpoint["requestedWindow"];
+  planFingerprint: `0x${string}`;
+  planTipBlock: string;
+  currentTaskIndex: number;
+  completedTaskIds: string[];
+  storeFingerprint: `0x${string}`;
+}): `0x${string}` {
+  return fingerprint({
+    syncPurpose: input.syncPurpose,
+    requestedWindow: input.requestedWindow,
+    planFingerprint: input.planFingerprint,
+    planTipBlock: input.planTipBlock,
+    currentTaskIndex: input.currentTaskIndex,
+    completedTaskIds: [...input.completedTaskIds].sort(),
+    storeFingerprint: input.storeFingerprint,
+  });
+}
+
+export function validateRecentRefreshCheckpointState(checkpoint: RotationHistorySyncCheckpoint): string | null {
+  if ((checkpoint.syncPurpose ?? "HISTORICAL_BACKFILL") !== "RECENT_SIGNAL_WINDOW") return null;
+  if (!checkpoint.taskPlan || !checkpoint.planFingerprint || checkpoint.currentTaskIndex === undefined) {
+    return "recent-refresh checkpoint has no deterministic task plan";
+  }
+  const cursorTaskIndex = checkpoint.sourceCursor?.taskIndex;
+  if (cursorTaskIndex !== undefined && cursorTaskIndex !== checkpoint.currentTaskIndex) {
+    return "source cursor task index disagrees with authoritative currentTaskIndex";
+  }
+  if (checkpoint.currentTaskIndex < 0 || checkpoint.currentTaskIndex > checkpoint.taskPlan.length) {
+    return "authoritative currentTaskIndex is outside the task plan";
+  }
+  const task = checkpoint.taskPlan[checkpoint.currentTaskIndex];
+  if (task && checkpoint.candidateId && checkpoint.candidateId !== task.candidateId) {
+    return "diagnostic candidateId disagrees with authoritative current task";
+  }
+  if (task && checkpoint.poolAddress && !sameAddress(checkpoint.poolAddress, task.poolAddress)) {
+    return "diagnostic poolAddress disagrees with authoritative current task";
+  }
+  return null;
+}
+
+export function advanceRecentRefreshCheckpoint(input: {
+  checkpoint: RotationHistorySyncCheckpoint;
+  taskResult?: {
+    taskId: string;
+    completedRange?: RotationHistorySyncCheckpoint["completedBlockRanges"][number];
+  };
+  storeFingerprint: `0x${string}`;
+  updatedAt: string;
+}): {
+  checkpoint: RotationHistorySyncCheckpoint;
+  advanced: boolean;
+  completedPlan: boolean;
+  currentTask: RotationRecentRefreshPlanTask | null;
+  progressFingerprint: `0x${string}`;
+  resumeToken: `0x${string}`;
+} {
+  const taskPlan = input.checkpoint.taskPlan ?? [];
+  const completed = new Set(input.checkpoint.completedTaskIds ?? []);
+  const completedBlockRanges = [...input.checkpoint.completedBlockRanges];
+  if (input.taskResult) {
+    completed.add(input.taskResult.taskId);
+    const completedRange = input.taskResult.completedRange;
+    if (completedRange) {
+      const rangeKey = (range: RotationHistorySyncCheckpoint["completedBlockRanges"][number]) =>
+        `${range.candidateId}:${range.poolAddress.toLowerCase()}:${range.sourceVersion}:${range.fromBlock}:${range.toBlock}`;
+      const existing = new Set(completedBlockRanges.map(rangeKey));
+      if (!existing.has(rangeKey(completedRange))) completedBlockRanges.push(completedRange);
+    }
+  }
+  const completedTaskIds = [...completed].sort();
+  const currentTaskIndex = taskPlan.findIndex((task) => !completed.has(task.taskId));
+  const completedPlan = currentTaskIndex === -1;
+  const normalizedTaskIndex = completedPlan ? taskPlan.length : currentTaskIndex;
+  const currentTask = completedPlan ? null : taskPlan[normalizedTaskIndex]!;
+  const phase = currentTask?.phase ?? "COMPLETE";
+  const planFingerprint = input.checkpoint.planFingerprint ?? fingerprint({ taskPlan });
+  const progressFingerprint = recentRefreshProgressFingerprint({
+    syncPurpose: input.checkpoint.syncPurpose ?? "RECENT_SIGNAL_WINDOW",
+    phase,
+    planFingerprint,
+    currentTaskIndex: normalizedTaskIndex,
+    completedTaskIds,
+    completedBlockRanges,
+  });
+  const requestedWindow = input.checkpoint.requestedWindow;
+  const resumeToken = recentRefreshResumeToken({
+    syncPurpose: input.checkpoint.syncPurpose ?? "RECENT_SIGNAL_WINDOW",
+    requestedWindow,
+    planFingerprint,
+    planTipBlock: input.checkpoint.planTipBlock ?? input.checkpoint.resolvedEndBlock ?? "0",
+    currentTaskIndex: normalizedTaskIndex,
+    completedTaskIds,
+    storeFingerprint: input.storeFingerprint,
+  });
+  const nextCheckpoint: RotationHistorySyncCheckpoint = {
+    ...input.checkpoint,
+    resumeToken,
+    phase,
+    currentTaskIndex: normalizedTaskIndex,
+    completedTaskIds,
+    completedBlockRanges,
+    candidateId: currentTask?.candidateId,
+    poolAddress: currentTask?.poolAddress,
+    nextBlock: currentTask?.toBlock,
+    sourceCursor: {
+      candidateIndex: normalizedTaskIndex,
+      poolIndex: 0,
+      taskIndex: normalizedTaskIndex,
+    },
+    progressFingerprint,
+    previousProgressFingerprint: input.checkpoint.progressFingerprint,
+    updatedAt: input.updatedAt,
+  };
+  return {
+    checkpoint: nextCheckpoint,
+    advanced: progressFingerprint !== input.checkpoint.progressFingerprint ||
+      resumeToken !== input.checkpoint.resumeToken,
+    completedPlan,
+    currentTask,
+    progressFingerprint,
+    resumeToken,
+  };
 }
 
 export function rotationCheckpointProgressFingerprint(input: {
@@ -4096,6 +4608,21 @@ export function checkpointWouldStall(input: {
     input.nextProgressFingerprint !== undefined &&
     input.nextProgressFingerprint !== null &&
     input.previousProgressFingerprint === input.nextProgressFingerprint;
+}
+
+export function shouldStartRecentRefreshRange(input: {
+  nowMs: number;
+  deadlineMs?: number;
+  maximumRuntimeMs: number;
+  attemptedRanges: number;
+}): boolean {
+  if (input.deadlineMs === undefined) return true;
+  if (input.attemptedRanges === 0) return input.nowMs + HISTORY_RUNTIME_GUARD_MS < input.deadlineMs;
+  const nextRangeGuardMs = Math.min(
+    90_000,
+    Math.max(20_000, Math.floor(input.maximumRuntimeMs * 0.75)),
+  );
+  return input.nowMs + nextRangeGuardMs < input.deadlineMs;
 }
 
 export function checkpointWindowMatches(input: {
@@ -5123,6 +5650,7 @@ type NormalizedRecentRefreshInput = {
   maximumPoolsPerRun: number;
   resumeToken?: string;
   forceRecentBlockRecheck: boolean;
+  stopWhenAnyCandidateReady: boolean;
 };
 
 function normalizeHistorySyncInput(input: RotationHistorySyncInput): NormalizedHistorySyncInput {
@@ -5157,6 +5685,7 @@ function normalizeRecentRefreshInput(input: RotationRecentRefreshInput): Normali
     maximumPoolsPerRun: input.maximumPoolsPerRun ?? 6,
     ...(input.resumeToken ? { resumeToken: input.resumeToken } : {}),
     forceRecentBlockRecheck: input.forceRecentBlockRecheck ?? true,
+    stopWhenAnyCandidateReady: input.stopWhenAnyCandidateReady ?? true,
   };
 }
 
@@ -5973,10 +6502,19 @@ export async function runEusdcRotationRecentRefresh(
   const normalized = normalizeRecentRefreshInput(input);
   const nowMs = Date.now();
   const deadlineMs = nowMs + normalized.maximumRuntimeMs;
-  const checkpointBeforeWindow = normalized.resumeToken ? readHistorySyncCheckpoint(config) : null;
+  const checkpointBeforeWindow = readHistorySyncCheckpoint(config);
+  const requestedCandidateKey = normalized.candidateIds ? [...normalized.candidateIds].sort().join(",") : null;
+  const checkpointCandidateKey = checkpointBeforeWindow?.candidateIds ? [...checkpointBeforeWindow.candidateIds].sort().join(",") : null;
   const resumeWindow = checkpointBeforeWindow &&
-    checkpointBeforeWindow.resumeToken === normalized.resumeToken &&
-    (checkpointBeforeWindow.syncPurpose ?? "HISTORICAL_BACKFILL") === "RECENT_SIGNAL_WINDOW"
+    (checkpointBeforeWindow.syncPurpose ?? "HISTORICAL_BACKFILL") === "RECENT_SIGNAL_WINDOW" &&
+    (
+      (normalized.resumeToken && checkpointBeforeWindow.resumeToken === normalized.resumeToken) ||
+      (
+        !normalized.resumeToken &&
+        checkpointBeforeWindow.requestedWindow.lookbackMinutes === normalized.lookbackMinutes &&
+        (requestedCandidateKey === null || requestedCandidateKey === checkpointCandidateKey)
+      )
+    )
       ? checkpointBeforeWindow.requestedWindow
       : null;
   const endTimestamp = resumeWindow
@@ -6060,6 +6598,7 @@ export async function runEusdcRotationRecentRefresh(
       const chainId = await getChainId(runtimeConfig);
       const checkpointBefore = readHistorySyncCheckpoint(config);
       let resumeCheckpoint: RotationHistorySyncCheckpoint | null = null;
+      let checkpointToReplan: RotationHistorySyncCheckpoint | null = null;
       if (normalized.resumeToken) {
         if (!checkpointBefore || checkpointBefore.resumeToken !== normalized.resumeToken) {
           return blockedResult(
@@ -6086,17 +6625,26 @@ export async function runEusdcRotationRecentRefresh(
             lock.acquiredStatus,
           );
         }
-        resumeCheckpoint = checkpointBefore;
+        if (
+          !checkpointBefore.taskPlan ||
+          !checkpointBefore.planFingerprint ||
+          checkpointBefore.planSchemaVersion !== RECENT_REFRESH_PLAN_SCHEMA_VERSION
+        ) {
+          checkpointToReplan = checkpointBefore;
+        } else {
+          resumeCheckpoint = checkpointBefore;
+        }
       }
 
       const client = getPublicClient(runtimeConfig) as unknown as HistoryPublicClient;
       const latestBlockNumber = await client.getBlockNumber();
-      const fullRange = resumeCheckpoint?.resolvedStartBlock && resumeCheckpoint.resolvedEndBlock
+      const rangeCheckpoint = resumeCheckpoint ?? checkpointToReplan;
+      const fullRange = rangeCheckpoint?.resolvedStartBlock && rangeCheckpoint.resolvedEndBlock
         ? {
             requestedStartTimestamp: startTimestamp,
             requestedEndTimestamp: endTimestamp,
-            resolvedStartBlock: BigInt(resumeCheckpoint.resolvedStartBlock),
-            resolvedEndBlock: BigInt(resumeCheckpoint.resolvedEndBlock),
+            resolvedStartBlock: BigInt(rangeCheckpoint.resolvedStartBlock),
+            resolvedEndBlock: BigInt(rangeCheckpoint.resolvedEndBlock),
             resolvedStartBlockTimestamp: startTimestamp,
             resolvedEndBlockTimestamp: endTimestamp,
             maximumTimestampResolutionErrorSeconds: 0,
@@ -6141,6 +6689,51 @@ export async function runEusdcRotationRecentRefresh(
           { unresolvedGaps: discoveryErrors },
         );
       }
+      const discoveredPlanTasks = buildRecentRefreshTaskPlan({
+        poolTasks: tasks,
+        fullRangeFromBlock: fullRange.resolvedStartBlock,
+        fullRangeToBlock: fullRange.resolvedEndBlock,
+        tipFromBlock: tipRange.resolvedStartBlock,
+        tipToBlock: tipRange.resolvedEndBlock,
+        maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
+      });
+      if (discoveredPlanTasks.length === 0 && !resumeCheckpoint?.taskPlan) {
+        return blockedResult(
+          false,
+          "SOURCE_ERROR",
+          "no block ranges were available for recent refresh",
+          lock.acquiredStatus,
+          { unresolvedGaps: discoveryErrors },
+        );
+      }
+      const discoveredRequiredPoolSet = tasks
+        .filter((task) => task.sourcePool.classification === "REQUIRED_PRICE_POOL")
+        .map((task) => ({
+          candidateId: task.candidateId,
+          poolAddress: task.poolAddress,
+          sourceVersion: task.sourceVersion,
+        }));
+      const requiredPoolSet = resumeCheckpoint?.requiredPoolSet ?? discoveredRequiredPoolSet;
+      const planTasks = resumeCheckpoint?.taskPlan ?? discoveredPlanTasks;
+      const planTipBlock = (resumeCheckpoint?.planTipBlock ?? latestBlockNumber.toString());
+      const planFingerprint = resumeCheckpoint?.planFingerprint ?? recentRefreshPlanFingerprint({
+        chainId,
+        syncPurpose: "RECENT_SIGNAL_WINDOW",
+        requestedStartTime,
+        requestedEndTime,
+        candidateIds: candidates.map((candidate) => candidate.candidateId),
+        requiredPoolSet,
+        storePath: resolvedStore.path,
+        planTipBlock,
+        tasks: planTasks,
+      });
+      const sourcePoolByTaskKey = new Map<string, RotationRecentPoolTask>();
+      for (const task of tasks) {
+        sourcePoolByTaskKey.set(
+          `${task.candidateId}:${task.poolAddress.toLowerCase()}:${task.sourceVersion}:${task.role}`,
+          task,
+        );
+      }
 
       let workingStore = existingAtStart;
       const reportsByCandidate = new Map<RotationCandidateId, RotationHistoryPoolSyncStatus[]>();
@@ -6153,16 +6746,82 @@ export async function runEusdcRotationRecentRefresh(
           reportsByCandidate.set(row.candidateId, [...row.pools]);
         }
       }
+      let checkpointReplanned = false;
+      let archivedCheckpointPath: string | null = null;
+      let oldProgressFingerprint: `0x${string}` | undefined;
+      let rangesSafelyReused = 0;
+      let rangesScheduledAgain = 0;
+      const checkpointForReplan = checkpointToReplan ?? (
+        !normalized.resumeToken && checkpointBefore &&
+        (checkpointBefore.syncPurpose ?? "HISTORICAL_BACKFILL") === "RECENT_SIGNAL_WINDOW"
+          ? checkpointBefore
+          : null
+      );
+      if (
+        checkpointForReplan &&
+        (
+          !checkpointForReplan.taskPlan ||
+          !checkpointForReplan.planFingerprint ||
+          checkpointForReplan.planSchemaVersion !== RECENT_REFRESH_PLAN_SCHEMA_VERSION
+        )
+      ) {
+        oldProgressFingerprint = checkpointForReplan.progressFingerprint;
+        archivedCheckpointPath = archiveHistorySyncCheckpoint(
+          config,
+          "incompatible recent-refresh checkpoint had no current deterministic task plan",
+        );
+        checkpointReplanned = true;
+      }
+      const safeCompletedRanges = checkpointForReplan && checkpointReplanned
+        ? checkpointForReplan.completedBlockRanges.filter((range) =>
+            planTasks.some((task) =>
+              task.candidateId === range.candidateId &&
+              sameAddress(task.poolAddress, range.poolAddress) &&
+              task.sourceVersion === range.sourceVersion &&
+              task.fromBlock === range.fromBlock &&
+              task.toBlock === range.toBlock,
+            )
+          )
+        : [];
+      const completedTaskIdsFromReplan = new Set<string>();
+      for (const range of safeCompletedRanges) {
+        const matchedTask = planTasks.find((task) =>
+          task.candidateId === range.candidateId &&
+          sameAddress(task.poolAddress, range.poolAddress) &&
+          task.sourceVersion === range.sourceVersion &&
+          task.fromBlock === range.fromBlock &&
+          task.toBlock === range.toBlock
+        );
+        if (matchedTask) completedTaskIdsFromReplan.add(matchedTask.taskId);
+      }
+      rangesSafelyReused = safeCompletedRanges.length;
+      rangesScheduledAgain = checkpointReplanned ? planTasks.length - completedTaskIdsFromReplan.size : 0;
+      if (resumeCheckpoint) {
+        const checkpointIssue = validateRecentRefreshCheckpointState(resumeCheckpoint);
+        if (checkpointIssue) {
+          return blockedResult(
+            false,
+            "CHECKPOINT_STATE_INCONSISTENT",
+            checkpointIssue,
+            lock.acquiredStatus,
+            { planFingerprint, planTipBlock },
+          );
+        }
+      }
       let checkpoint: RotationHistorySyncCheckpoint = resumeCheckpoint ?? {
         schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
-        resumeToken: fingerprint({
+        resumeToken: recentRefreshResumeToken({
           syncPurpose: "RECENT_SIGNAL_WINDOW",
-          requestedStartTime,
-          requestedEndTime,
-          candidateIds: candidates.map((candidate) => candidate.candidateId),
-          storePath: resolvedStore.path,
-          chainId,
-          createdAt: fetchedAt,
+          requestedWindow: {
+            startTime: requestedStartTime,
+            endTime: requestedEndTime,
+            lookbackMinutes: normalized.lookbackMinutes,
+          },
+          planFingerprint,
+          planTipBlock,
+          currentTaskIndex: 0,
+          completedTaskIds: [...completedTaskIdsFromReplan],
+          storeFingerprint: rotationHistoryFingerprint(existingAtStart),
         }),
         syncPurpose: "RECENT_SIGNAL_WINDOW",
         requestedWindow: {
@@ -6173,33 +6832,55 @@ export async function runEusdcRotationRecentRefresh(
         resolvedStartBlock: fullRange.resolvedStartBlock.toString(),
         resolvedEndBlock: fullRange.resolvedEndBlock.toString(),
         candidateIds: candidates.map((candidate) => candidate.candidateId),
-        requiredPoolSet: tasks
-          .filter((task) => task.sourcePool.classification === "REQUIRED_PRICE_POOL")
-          .map((task) => ({
-            candidateId: task.candidateId,
-            poolAddress: task.poolAddress,
-            sourceVersion: task.sourceVersion,
-          })),
+        requiredPoolSet,
         storePath: resolvedStore.path,
         chainId,
-        phase: "TIP_REFRESH",
-        completedBlockRanges: [],
+        phase: planTasks[0]?.phase ?? "COMPLETE",
+        planSchemaVersion: RECENT_REFRESH_PLAN_SCHEMA_VERSION,
+        planFingerprint,
+        planTipBlock,
+        currentTaskIndex: 0,
+        completedTaskIds: [...completedTaskIdsFromReplan],
+        taskPlan: planTasks,
+        candidateId: planTasks[0]?.candidateId,
+        poolAddress: planTasks[0]?.poolAddress,
+        nextBlock: planTasks[0]?.toBlock,
+        completedBlockRanges: safeCompletedRanges,
         completedPools: [],
         sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
         storeFingerprintBeforeRun: rotationHistoryFingerprint(existingAtStart),
         updatedAt: fetchedAt,
       };
-      const progressFingerprintBefore = checkpoint.progressFingerprint ?? null;
-      let phase: RotationRecentRefreshPhase = checkpoint.phase ?? "TIP_REFRESH";
-      let taskIndex = checkpoint.sourceCursor?.taskIndex ?? checkpoint.sourceCursor?.candidateIndex ?? 0;
+      if (!resumeCheckpoint && completedTaskIdsFromReplan.size > 0) {
+        checkpoint = advanceRecentRefreshCheckpoint({
+          checkpoint,
+          storeFingerprint: rotationHistoryFingerprint(existingAtStart),
+          updatedAt: fetchedAt,
+        }).checkpoint;
+      }
+      const progressFingerprintBefore = checkpoint.progressFingerprint ?? recentRefreshProgressFingerprint({
+        syncPurpose: "RECENT_SIGNAL_WINDOW",
+        phase: checkpoint.phase ?? "CANDIDATE_TIP_REFRESH",
+        planFingerprint,
+        currentTaskIndex: checkpoint.currentTaskIndex ?? 0,
+        completedTaskIds: checkpoint.completedTaskIds ?? [],
+        completedBlockRanges: checkpoint.completedBlockRanges,
+      });
+      let phase: RotationRecentRefreshPhase = checkpoint.phase ?? "CANDIDATE_TIP_REFRESH";
+      let taskIndex = checkpoint.currentTaskIndex ?? checkpoint.sourceCursor?.taskIndex ?? 0;
       let blocksScanned = 0;
       let rangesCompleted = 0;
       let rangesWithZeroLogs = 0;
       let recordsRetrieved = 0;
       let checkpointAdvanced = false;
+      let tasksAdvancedThisCall = 0;
+      let sourceCallsThisCall = 0;
+      let duplicateOnlyRangesCompleted = 0;
       let recordsAdded = 0;
       let recordsUpdated = 0;
       let duplicateRecordsIgnored = 0;
+      let earlyStopReason: string | undefined;
+      let readyCandidateId: RotationCandidateId | undefined;
       const unresolvedGaps = [...discoveryErrors];
       const anchorPoolAddress = tasks.find((task) => task.role === "WPLS_EUSDC_ANCHOR")?.poolAddress ?? null;
       const coverageForTask = (task: RotationRecentPoolTask, fromBlock: bigint, toBlock: bigint) =>
@@ -6285,69 +6966,66 @@ export async function runEusdcRotationRecentRefresh(
       };
 
       let attemptedRanges = 0;
-      while (phase !== "SIGNAL_WINDOW_COMPLETE" && attemptedRanges < normalized.maximumPoolsPerRun) {
-        if (historyRuntimeDeadlineReached(deadlineMs)) break;
-        if (taskIndex >= tasks.length) {
-          if (phase === "TIP_REFRESH") {
-            phase = "SIGNAL_WINDOW_BACKFILL";
-            taskIndex = 0;
-            checkpoint = {
-              ...checkpoint,
-              phase,
-              nextBlock: tipRange.resolvedStartBlock > fullRange.resolvedStartBlock
-                ? (tipRange.resolvedStartBlock - 1n).toString()
-                : undefined,
-              sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
-              updatedAt: new Date().toISOString(),
-            };
-            continue;
-          }
-          phase = "SIGNAL_WINDOW_COMPLETE";
+      let sourceErrorReason: string | undefined;
+      while (attemptedRanges < normalized.maximumPoolsPerRun) {
+        if (!shouldStartRecentRefreshRange({
+          nowMs: Date.now(),
+          deadlineMs,
+          maximumRuntimeMs: normalized.maximumRuntimeMs,
+          attemptedRanges,
+        })) break;
+        const completedTaskIds = new Set(checkpoint.completedTaskIds ?? []);
+        const nextTaskIndex = planTasks.findIndex((task) => !completedTaskIds.has(task.taskId));
+        if (nextTaskIndex === -1) {
+          const completed = advanceRecentRefreshCheckpoint({
+            checkpoint,
+            storeFingerprint: rotationHistoryFingerprint(workingStore),
+            updatedAt: new Date().toISOString(),
+          });
+          checkpoint = completed.checkpoint;
+          phase = "COMPLETE";
+          taskIndex = planTasks.length;
+          checkpointAdvanced = checkpointAdvanced || completed.advanced;
           break;
         }
-        const task = tasks[taskIndex]!;
-        let rangeFrom: bigint;
-        let rangeTo: bigint;
-        let nextBlockAfterSuccess: string | undefined;
-        let nextTaskIndex = taskIndex + 1;
-        if (phase === "TIP_REFRESH") {
-          rangeFrom = tipRange.resolvedStartBlock;
-          rangeTo = tipRange.resolvedEndBlock;
-          const alreadyComplete = coverageForTask(task, rangeFrom, rangeTo) >= 99.999;
-          if (alreadyComplete) {
-            taskIndex += 1;
-            continue;
-          }
-        } else {
-          const high = checkpoint.nextBlock && checkpoint.sourceCursor?.taskIndex === taskIndex
-            ? BigInt(checkpoint.nextBlock)
-            : tipRange.resolvedStartBlock - 1n;
-          if (high < fullRange.resolvedStartBlock) {
-            taskIndex += 1;
-            checkpoint = { ...checkpoint, nextBlock: undefined, sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex } };
-            continue;
-          }
-          rangeTo = high;
-          const chunkFrom = high - BigInt(Math.max(1, normalized.maximumBlocksPerChunk) - 1);
-          rangeFrom = chunkFrom < fullRange.resolvedStartBlock ? fullRange.resolvedStartBlock : chunkFrom;
-          if (rangeFrom > fullRange.resolvedStartBlock) {
-            nextBlockAfterSuccess = (rangeFrom - 1n).toString();
-            nextTaskIndex = taskIndex;
-          }
+        if (checkpoint.currentTaskIndex !== nextTaskIndex) {
+          const advanced = advanceRecentRefreshCheckpoint({
+            checkpoint,
+            storeFingerprint: rotationHistoryFingerprint(workingStore),
+            updatedAt: new Date().toISOString(),
+          });
+          checkpoint = advanced.checkpoint;
+          checkpointAdvanced = checkpointAdvanced || advanced.advanced;
+          tasksAdvancedThisCall += advanced.advanced ? 1 : 0;
+          writeCheckpoint(checkpoint);
         }
+        const planTask = planTasks[nextTaskIndex]!;
+        const task = sourcePoolByTaskKey.get(
+          `${planTask.candidateId}:${planTask.poolAddress.toLowerCase()}:${planTask.sourceVersion}:${planTask.poolRole}`,
+        );
+        if (!task) {
+          sourceErrorReason = `source pool missing for task ${planTask.taskId}`;
+          unresolvedGaps.push(sourceErrorReason);
+          break;
+        }
+        const rangeFrom = BigInt(planTask.fromBlock);
+        const rangeTo = BigInt(planTask.toBlock);
+        phase = planTask.phase;
+        taskIndex = nextTaskIndex;
         checkpoint = {
           ...checkpoint,
           phase,
-          candidateId: task.candidateId,
-          poolAddress: task.poolAddress,
+          currentTaskIndex: taskIndex,
+          candidateId: planTask.candidateId,
+          poolAddress: planTask.poolAddress,
           lastAttemptedRange: {
-            candidateId: task.candidateId,
-            poolAddress: task.poolAddress,
-            fromBlock: rangeFrom.toString(),
-            toBlock: rangeTo.toString(),
+            candidateId: planTask.candidateId,
+            poolAddress: planTask.poolAddress,
+            fromBlock: planTask.fromBlock,
+            toBlock: planTask.toBlock,
           },
           sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex },
-          nextBlock: phase === "SIGNAL_WINDOW_BACKFILL" ? rangeTo.toString() : undefined,
+          nextBlock: planTask.toBlock,
           updatedAt: new Date().toISOString(),
         };
         writeHistorySyncCheckpoint(config, checkpoint);
@@ -6355,6 +7033,7 @@ export async function runEusdcRotationRecentRefresh(
         const anchorObservations = observationsFromHistory(
           recordsForCandidate(workingStore, getRotationCandidate("PLS"), startTimestamp, endTimestamp),
         ).filter((obs) => obs.priceEusdc > 0);
+        sourceCallsThisCall += 1;
         const scan = await scanV2SwapLogBlockRange({
           config,
           chainId,
@@ -6383,24 +7062,12 @@ export async function runEusdcRotationRecentRefresh(
           rangesCompleted += 1;
           recordsRetrieved += scan.report.totalRecordsRetrieved;
           if (scan.report.totalRecordsRetrieved === 0) rangesWithZeroLogs += 1;
+          if (scan.report.totalRecordsRetrieved > 0 && (scan.report.recordsAdded ?? 0) === 0) duplicateOnlyRangesCompleted += 1;
           const completedRange = completedRangeFromReport({
             candidateId: task.candidateId,
             report: scan.report,
             completedAt: new Date().toISOString(),
           });
-          if (completedRange) {
-            const appended = appendCompletedRecentRange({
-              checkpoint,
-              completedRange,
-              phase,
-              nextBlock: nextBlockAfterSuccess,
-              taskIndex: nextTaskIndex,
-              anchorTipComplete: anchorTipComplete(),
-              updatedAt: new Date().toISOString(),
-            });
-            checkpointAdvanced = checkpointAdvanced || appended.advanced;
-            writeCheckpoint(appended.checkpoint);
-          }
           const updatedReport = updateReportCoverage(task, scan.report);
           const rows = reportsByCandidate.get(task.candidateId) ?? [];
           reportsByCandidate.set(task.candidateId, [
@@ -6434,52 +7101,87 @@ export async function runEusdcRotationRecentRefresh(
             records: merged.records,
           };
           persistStore();
-          taskIndex = nextTaskIndex;
+          const advanced = advanceRecentRefreshCheckpoint({
+            checkpoint,
+            taskResult: {
+              taskId: planTask.taskId,
+              ...(completedRange ? { completedRange } : {}),
+            },
+            storeFingerprint: rotationHistoryFingerprint(workingStore),
+            updatedAt: new Date().toISOString(),
+          });
+          checkpointAdvanced = checkpointAdvanced || advanced.advanced;
+          tasksAdvancedThisCall += advanced.advanced ? 1 : 0;
+          writeCheckpoint(advanced.checkpoint);
+          checkpoint = advanced.checkpoint;
+          phase = checkpoint.phase ?? "COMPLETE";
+          taskIndex = checkpoint.currentTaskIndex ?? planTasks.length;
+          if (normalized.stopWhenAnyCandidateReady) {
+            const ready = candidates
+              .map((candidate) => statusForCandidateFromStore({
+                store: workingStore,
+                candidate,
+                lookbackMinutes: normalized.lookbackMinutes,
+                candleMinutes: DEFAULT_CANDLE_MINUTES,
+                nowMs,
+              }))
+              .find((candidate) => candidate.readinessForLiveScanning);
+            if (ready) {
+              readyCandidateId = ready.candidateId;
+              earlyStopReason = `${ready.candidateId} independently ready after required recent-refresh task advancement`;
+              break;
+            }
+          }
         } else {
           const rows = reportsByCandidate.get(task.candidateId) ?? [];
           reportsByCandidate.set(task.candidateId, [...rows, scan.report]);
+          sourceErrorReason = scan.errors.join("; ") || scan.report.error || "source range did not complete";
           break;
         }
       }
 
       const sourceCompleteness = persistStore();
-      const allTasksComplete = phase === "SIGNAL_WINDOW_COMPLETE" ||
-        (phase === "SIGNAL_WINDOW_BACKFILL" && taskIndex >= tasks.length);
-      const progressFingerprintAfter = rotationCheckpointProgressFingerprint({
+      const completedTaskIds = new Set(checkpoint.completedTaskIds ?? []);
+      const pendingTasks = planTasks.filter((task) => !completedTaskIds.has(task.taskId));
+      const pendingRequiredTasks = pendingTasks.filter((task) => task.phase !== "OPTIONAL_SIGNAL_WINDOW_BACKFILL");
+      const allRequiredTasksComplete = pendingRequiredTasks.length === 0;
+      const progressFingerprintAfter = checkpoint.progressFingerprint ?? recentRefreshProgressFingerprint({
         syncPurpose: "RECENT_SIGNAL_WINDOW",
-        phase: allTasksComplete ? "SIGNAL_WINDOW_COMPLETE" : phase,
-        candidateId: tasks[taskIndex]?.candidateId,
-        poolAddress: tasks[taskIndex]?.poolAddress,
-        nextBlock: checkpoint.nextBlock ?? null,
+        phase: checkpoint.phase ?? "COMPLETE",
+        planFingerprint,
+        currentTaskIndex: checkpoint.currentTaskIndex ?? planTasks.length,
+        completedTaskIds: checkpoint.completedTaskIds ?? [],
         completedBlockRanges: checkpoint.completedBlockRanges,
-        anchorTipComplete: anchorTipComplete(),
       });
-      const stalled = checkpointWouldStall({
-        code: "PARTIAL_PROGRESS",
-        previousProgressFingerprint: progressFingerprintBefore,
-        nextProgressFingerprint: progressFingerprintAfter,
-      });
-      let code: RotationHistorySyncCode = allTasksComplete ? "COMPLETE" : stalled ? "CHECKPOINT_STALLED" : "PARTIAL_PROGRESS";
+      const stalled = pendingTasks.length > 0 &&
+        sourceCallsThisCall === 0 &&
+        !checkpointAdvanced &&
+        !sourceErrorReason &&
+        progressFingerprintBefore === progressFingerprintAfter;
+      let code: RotationHistorySyncCode = readyCandidateId
+        ? "READY_CANDIDATE_FOUND"
+        : sourceErrorReason
+          ? "SOURCE_ERROR"
+          : allRequiredTasksComplete
+            ? "COMPLETE"
+            : checkpointReplanned
+              ? "CHECKPOINT_REPLANNED"
+              : stalled
+                ? "CHECKPOINT_STALLED"
+                : "PARTIAL_PROGRESS";
       let resumeToken: string | undefined;
       let checkpointUpdatedAt: string | undefined;
-      if (code === "COMPLETE") {
+      if (code === "COMPLETE" || code === "READY_CANDIDATE_FOUND") {
         clearHistorySyncCheckpoint(config);
       } else {
-        resumeToken = stalled && resumeCheckpoint ? resumeCheckpoint.resumeToken : fingerprint({
-          syncPurpose: "RECENT_SIGNAL_WINDOW",
-          requestedStartTime,
-          requestedEndTime,
-          phase,
-          taskIndex,
-          nextBlock: checkpoint.nextBlock ?? null,
-          progressFingerprintAfter,
-        });
+        resumeToken = checkpoint.resumeToken;
         checkpointUpdatedAt = new Date().toISOString();
         writeCheckpoint({
           ...checkpoint,
-          resumeToken,
-          phase,
-          sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex },
+          resumeToken: checkpoint.resumeToken,
+          phase: checkpoint.phase ?? phase,
+          currentTaskIndex: checkpoint.currentTaskIndex ?? taskIndex,
+          sourceCursor: { candidateIndex: checkpoint.currentTaskIndex ?? taskIndex, poolIndex: 0, taskIndex: checkpoint.currentTaskIndex ?? taskIndex },
           progressFingerprint: progressFingerprintAfter,
           previousProgressFingerprint: progressFingerprintBefore ?? undefined,
           repeatedRange: stalled ? checkpoint.lastAttemptedRange : undefined,
@@ -6505,13 +7207,27 @@ export async function runEusdcRotationRecentRefresh(
       const anchorLagMinutes = anchorLatestTimestamp
         ? round((latestBlockInfo.timestamp - Math.floor(Date.parse(anchorLatestTimestamp) / 1000)) / 60, 4)
         : null;
+      const finalCurrentTask = checkpoint.currentTaskIndex !== undefined
+        ? planTasks[checkpoint.currentTaskIndex] ?? null
+        : null;
+      const candidateTipStatus: Partial<Record<RotationCandidateId, RotationTipFreshnessStatus>> = {};
+      const candidateSignalWindowStatus: Partial<Record<RotationCandidateId, boolean>> = {};
+      for (const row of sourceCompleteness) {
+        if (row.tipFreshnessStatus) candidateTipStatus[row.candidateId] = row.tipFreshnessStatus;
+        candidateSignalWindowStatus[row.candidateId] =
+          (row.signalWindowCompletenessPercent ?? row.retrievalCompletenessPercent ?? row.sourceCompletenessPercent) >= 99.999 &&
+          row.requiredPoolsComplete !== false;
+      }
       return {
         ok: true,
         code,
         ...(code === "PARTIAL_PROGRESS" ? { reason: "recent signal-window refresh made bounded progress and returned before timeout" } : {}),
+        ...(code === "CHECKPOINT_REPLANNED" ? { reason: "incompatible recent-refresh checkpoint archived and replaced with a deterministic task plan" } : {}),
+        ...(code === "READY_CANDIDATE_FOUND" ? { reason: earlyStopReason ?? "ready candidate found after recent refresh" } : {}),
+        ...(code === "SOURCE_ERROR" ? { reason: sourceErrorReason ?? "recent refresh source error" } : {}),
         ...(code === "CHECKPOINT_STALLED"
           ? {
-              reason: "recent refresh checkpoint did not make effective block-range progress",
+              reason: "recent refresh scheduler found pending work but selected no source range and did not advance its cursor",
               repeatedRange: checkpoint.lastAttemptedRange,
             }
           : {}),
@@ -6531,7 +7247,7 @@ export async function runEusdcRotationRecentRefresh(
         unresolvedGaps: [...new Set(unresolvedGaps)],
         syncPurpose: "RECENT_SIGNAL_WINDOW",
         tipRefreshMinutes: normalized.tipRefreshMinutes,
-        phase: code === "COMPLETE" ? "SIGNAL_WINDOW_COMPLETE" : phase,
+        phase: code === "COMPLETE" ? "COMPLETE" : checkpoint.phase ?? phase,
         anchorTipComplete: anchorTipComplete(),
         anchorLatestBlock,
         anchorLatestTimestamp,
@@ -6548,6 +7264,38 @@ export async function runEusdcRotationRecentRefresh(
         tipLagMinutesAfter: anchorLagMinutes,
         progressFingerprintBefore,
         progressFingerprintAfter,
+        previousProgressFingerprint: progressFingerprintBefore,
+        finalProgressFingerprint: progressFingerprintAfter,
+        planFingerprint,
+        planTipBlock,
+        currentPhase: checkpoint.phase ?? phase,
+        currentTaskId: finalCurrentTask?.taskId ?? null,
+        currentTaskIndex: checkpoint.currentTaskIndex ?? planTasks.length,
+        totalTaskCount: planTasks.length,
+        pendingTaskCount: pendingTasks.length,
+        completedTaskCount: checkpoint.completedTaskIds?.length ?? 0,
+        completedRangeCount: checkpoint.completedBlockRanges.length,
+        nextRange: finalCurrentTask ? { fromBlock: finalCurrentTask.fromBlock, toBlock: finalCurrentTask.toBlock } : null,
+        candidateTipStatus,
+        candidateSignalWindowStatus,
+        tasksAdvancedThisCall,
+        rangesAdvancedThisCall: rangesCompleted,
+        blocksScannedThisCall: blocksScanned,
+        sourceCallsThisCall,
+        zeroLogRangesCompleted: rangesWithZeroLogs,
+        duplicateOnlyRangesCompleted,
+        ...(earlyStopReason ? { earlyStopReason } : {}),
+        ...(readyCandidateId ? { readyCandidateId } : {}),
+        ...(checkpointReplanned
+          ? {
+              checkpointReplanned,
+              ...(archivedCheckpointPath ? { archivedCheckpointPath } : {}),
+              ...(oldProgressFingerprint ? { oldProgressFingerprint } : {}),
+              newPlanFingerprint: planFingerprint,
+              rangesSafelyReused,
+              rangesScheduledAgain,
+            }
+          : {}),
         repositoryRoot: diagnostics.repositoryRoot,
         currentWorkingDirectory: diagnostics.currentWorkingDirectory,
         historyStoreDirectory: diagnostics.historyStoreDirectory,
@@ -8400,6 +9148,7 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
       maximumPoolsPerRun: z.number().int().positive().optional().default(6),
       resumeToken: z.string().optional(),
       forceRecentBlockRecheck: z.boolean().optional().default(true),
+      stopWhenAnyCandidateReady: z.boolean().optional().default(true),
     },
     handler: async (args, cfg) =>
       ok(
@@ -8413,6 +9162,7 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
             maximumPoolsPerRun: args.maximumPoolsPerRun as number | undefined,
             resumeToken: args.resumeToken as string | undefined,
             forceRecentBlockRecheck: args.forceRecentBlockRecheck as boolean | undefined,
+            stopWhenAnyCandidateReady: args.stopWhenAnyCandidateReady as boolean | undefined,
           }),
         ),
       ),
