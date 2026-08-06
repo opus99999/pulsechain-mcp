@@ -66,6 +66,8 @@ import {
   recentRefreshResumeToken,
   runEusdcRotationHistorySync,
   runEusdcRotationHistoryStatus,
+  runEusdcRotationRecentRefresh,
+  runEusdcRotationRefreshPerformance,
   runEusdcRotationProposeEntry,
   runEusdcRotationProposeExit,
   runEusdcRotationScan,
@@ -2119,10 +2121,18 @@ describe("eUSDC rotation public history sync primitives", () => {
       attemptedRanges: 0,
     })).toBe(true);
     expect(shouldStartRecentRefreshRange({
-      nowMs: nowMs + 35_000,
+      nowMs: nowMs + 20_000,
       deadlineMs,
       maximumRuntimeMs: 120_000,
       attemptedRanges: 1,
+      averageCompletedTaskMs: 5_000,
+    })).toBe(true);
+    expect(shouldStartRecentRefreshRange({
+      nowMs: nowMs + 90_000,
+      deadlineMs,
+      maximumRuntimeMs: 120_000,
+      attemptedRanges: 1,
+      averageCompletedTaskMs: 20_000,
     })).toBe(false);
   });
 
@@ -2156,6 +2166,150 @@ describe("eUSDC rotation public history sync primitives", () => {
     expect(backfillRanges.every((task) =>
       BigInt(task.toBlock) - BigInt(task.fromBlock) + 1n <= 500n
     )).toBe(true);
+  });
+
+  it("reports read-only recent-refresh performance from the public checkpoint", async () => {
+    const cfg = testConfig();
+    const historyDir = join(mkdtempSync(join(tmpdir(), "eusdc-history-performance-")), "history");
+    tempDirs.push(dirname(historyDir));
+    const withOverride: AppConfig = { ...cfg, eusdcRotationHistoryDir: historyDir };
+    writeHistoryFixture(historyDir, [historyRecord({ timestamp: Math.floor(BASE_NOW / 1000), logIndex: 21 })]);
+
+    const candidate = getRotationCandidate("PLS");
+    const anchor = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x6753560538eca67617a9ce605178f788be7e524e",
+        token0: WPLS_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000000",
+        reserve1: "1000000",
+        reserveUSD: "2000000",
+      }),
+      sourceVersion: "PULSEX_V1",
+      liquidityEusdc: 2_000_000,
+    });
+    const poolTasks = buildRecentSignalPoolTasks({
+      candidates: [candidate],
+      poolsByCandidate: new Map([["PLS", [anchor]]]),
+    });
+    const plan = buildRecentRefreshTaskPlan({
+      poolTasks,
+      fullRangeFromBlock: 1000n,
+      fullRangeToBlock: 2499n,
+      tipFromBlock: 2400n,
+      tipToBlock: 2499n,
+      maximumBlocksPerChunk: 10_000,
+    });
+    const planFingerprint = recentRefreshPlanFingerprint({
+      chainId: 369,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedStartTime: "2026-08-07T00:00:00.000Z",
+      requestedEndTime: "2026-08-08T00:00:00.000Z",
+      candidateIds: ["PLS"],
+      requiredPoolSet: poolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      storePath: join(historyDir, "market-history.json"),
+      planTipBlock: "2499",
+      tasks: plan,
+    });
+    atomicWriteJson(join(historyDir, "sync-checkpoint.json"), {
+      schemaVersion: 1,
+      resumeToken: "0x" + "90".repeat(32),
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: "2026-08-07T00:00:00.000Z",
+        endTime: "2026-08-08T00:00:00.000Z",
+        lookbackMinutes: 1440,
+      },
+      resolvedStartBlock: "1000",
+      resolvedEndBlock: "2499",
+      candidateIds: ["PLS"],
+      requiredPoolSet: poolTasks.map((task) => ({
+        candidateId: task.candidateId,
+        poolAddress: task.poolAddress,
+        sourceVersion: task.sourceVersion,
+      })),
+      storePath: join(historyDir, "market-history.json"),
+      chainId: 369,
+      phase: plan[1]!.phase,
+      planSchemaVersion: 4,
+      planFingerprint,
+      planTipBlock: "2499",
+      currentTaskIndex: 1,
+      completedTaskIds: [plan[0]!.taskId],
+      taskPlan: plan,
+      candidateId: plan[1]!.candidateId,
+      poolAddress: plan[1]!.poolAddress,
+      nextBlock: plan[1]!.toBlock,
+      completedBlockRanges: [{
+        candidateId: plan[0]!.candidateId,
+        poolAddress: plan[0]!.poolAddress,
+        sourceVersion: plan[0]!.sourceVersion,
+        fromBlock: plan[0]!.fromBlock,
+        toBlock: plan[0]!.toBlock,
+        resultCount: 20,
+        validRecordCount: 10,
+        duplicateCount: 10,
+        completedAt: "2026-08-08T00:01:00.000Z",
+        source: "https://example.com/v2",
+        adapter: "PULSEX_V2_STYLE_SWAP",
+        success: true,
+      }],
+      completedPools: [],
+      sourceCursor: { candidateIndex: 1, poolIndex: 0, taskIndex: 1 },
+      storeFingerprintBeforeRun: "0x" + "91".repeat(32),
+      lastRefreshPerformance: {
+        totalElapsedMs: 20_000,
+        lockWaitMs: 1,
+        planningMs: 2,
+        sourceReadMs: 1000,
+        logDecodeMs: 20,
+        blockHeaderReadMs: 500,
+        anchorJoinMs: 5,
+        storeReadMs: 10,
+        mergeMs: 30,
+        storeWriteMs: 40,
+        checkpointWriteMs: 8,
+        finalizationMs: 90,
+        tasksAttempted: 5,
+        tasksCompleted: 5,
+        rangesCompleted: 5,
+        blocksScanned: 2500,
+        sourceCalls: 5,
+        blockHeaderCalls: 12,
+        blockHeaderCacheHits: 3,
+        logsRetrieved: 20,
+        recordsProduced: 10,
+        recordsAdded: 0,
+        duplicatesIgnored: 10,
+        blocksPerSecond: 125,
+        recordsPerSecond: 0.5,
+        maximumConcurrentSourceCalls: 1,
+        finalizationReserveMs: 25_000,
+        taskTimings: [],
+        performanceFingerprint: "0x" + "92".repeat(32),
+      },
+      updatedAt: "2026-08-08T00:01:00.000Z",
+    });
+
+    const status = await runEusdcRotationRefreshPerformance(withOverride);
+
+    expect(status.ok).toBe(true);
+    expect(status.currentPlanSchema).toBe(4);
+    expect(status.completedRanges).toBe(1);
+    expect(status.lastCallPerformance).toMatchObject({
+      rangesCompleted: 5,
+      blocksScanned: 2500,
+      blockHeaderCalls: 12,
+      blockHeaderCacheHits: 3,
+    });
+    expect(status.projectedBoundedCallsForAllFiveCandidates).toBeGreaterThan(0);
+    expect(status.quoteCallCount).toBe(0);
+    expect(status.noWalletWrite).toBe(true);
+    expect(status.noLiveTransaction).toBe(true);
   });
 
   it("keeps a pinned resume plan authoritative when fresh discovery would differ", () => {

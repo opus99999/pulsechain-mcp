@@ -299,8 +299,10 @@ const HISTORY_RUNTIME_GUARD_MS = 10_000;
 const HISTORY_SOURCE_REQUEST_TIMEOUT_MS = 5_000;
 const HISTORY_MIN_REQUEST_TIMEOUT_MS = 1_000;
 const HISTORY_CHECKPOINT_SCHEMA_VERSION = 1;
-const RECENT_REFRESH_PLAN_SCHEMA_VERSION = 3;
+const RECENT_REFRESH_PLAN_SCHEMA_VERSION = 4;
 const RECENT_REFRESH_MAX_BACKFILL_BLOCKS_PER_TASK = 500;
+const RECENT_REFRESH_FINALIZATION_RESERVE_MS = 25_000;
+const RECENT_REFRESH_BLOCK_HEADER_CONCURRENCY = 4;
 const HISTORY_STORE_SCHEMA_VERSION = 1;
 const HISTORY_RECENT_REORG_BLOCKS = 64n;
 const ANCHOR_MAX_AGE_SECONDS = 15 * 60;
@@ -938,6 +940,7 @@ export interface RotationHistorySyncCheckpoint {
     toBlock: string;
   };
   storeFingerprintBeforeRun: `0x${string}`;
+  lastRefreshPerformance?: RotationRefreshPerformance;
   updatedAt: string;
 }
 
@@ -954,6 +957,70 @@ export interface RotationRecentRefreshPlanTask {
   toBlock: string;
   scanDirection: RotationRecentRefreshScanDirection;
   status: RotationRecentRefreshTaskStatus;
+}
+
+export interface RotationRefreshTaskPerformance {
+  taskId?: string;
+  phase?: RotationRecentRefreshPhase;
+  candidateId?: RotationCandidateId;
+  poolAddress?: `0x${string}`;
+  fromBlock?: string;
+  toBlock?: string;
+  taskSelectionMs: number;
+  poolMetadataMs: number;
+  boundaryResolutionMs: number;
+  sourceReadMs: number;
+  logDecodeMs: number;
+  blockHeaderReadMs: number;
+  anchorJoinMs: number;
+  recordNormalizationMs: number;
+  storeReadMs: number;
+  mergeMs: number;
+  storeWriteMs: number;
+  checkpointWriteMs: number;
+  lockMs: number;
+  totalTaskMs: number;
+  rpcCallCountByMethod: Record<string, number>;
+  uniqueBlockHeaderCount: number;
+  duplicateBlockHeaderRequestCount: number;
+  blockHeaderCacheHits: number;
+  logsRetrieved: number;
+  validRecordsProduced: number;
+  recordsAdded: number;
+  duplicatesIgnored: number;
+  blocksScanned: number;
+}
+
+export interface RotationRefreshPerformance {
+  totalElapsedMs: number;
+  lockWaitMs: number;
+  planningMs: number;
+  sourceReadMs: number;
+  logDecodeMs: number;
+  blockHeaderReadMs: number;
+  anchorJoinMs: number;
+  storeReadMs: number;
+  mergeMs: number;
+  storeWriteMs: number;
+  checkpointWriteMs: number;
+  finalizationMs: number;
+  tasksAttempted: number;
+  tasksCompleted: number;
+  rangesCompleted: number;
+  blocksScanned: number;
+  sourceCalls: number;
+  blockHeaderCalls: number;
+  blockHeaderCacheHits: number;
+  logsRetrieved: number;
+  recordsProduced: number;
+  recordsAdded: number;
+  duplicatesIgnored: number;
+  blocksPerSecond: number;
+  recordsPerSecond: number;
+  maximumConcurrentSourceCalls: number;
+  finalizationReserveMs: number;
+  taskTimings: RotationRefreshTaskPerformance[];
+  performanceFingerprint: `0x${string}`;
 }
 
 export interface RotationHistoryFile {
@@ -1035,6 +1102,7 @@ export interface RotationRecentRefreshResult extends RotationHistorySyncResult {
   newPlanFingerprint?: `0x${string}`;
   rangesSafelyReused?: number;
   rangesScheduledAgain?: number;
+  performance?: RotationRefreshPerformance;
 }
 
 export interface RotationHistorySyncResult {
@@ -4615,14 +4683,38 @@ export function shouldStartRecentRefreshRange(input: {
   deadlineMs?: number;
   maximumRuntimeMs: number;
   attemptedRanges: number;
+  averageCompletedTaskMs?: number;
 }): boolean {
   if (input.deadlineMs === undefined) return true;
-  if (input.attemptedRanges === 0) return input.nowMs + HISTORY_RUNTIME_GUARD_MS < input.deadlineMs;
-  const nextRangeGuardMs = Math.min(
-    90_000,
-    Math.max(20_000, Math.floor(input.maximumRuntimeMs * 0.75)),
+  const reserveMs = Math.min(
+    30_000,
+    Math.max(RECENT_REFRESH_FINALIZATION_RESERVE_MS, Math.floor(input.maximumRuntimeMs * 0.2)),
   );
-  return input.nowMs + nextRangeGuardMs < input.deadlineMs;
+  const estimatedTaskMs = input.attemptedRanges === 0
+    ? HISTORY_RUNTIME_GUARD_MS
+    : Math.min(
+        45_000,
+        Math.max(HISTORY_RUNTIME_GUARD_MS, Math.ceil((input.averageCompletedTaskMs ?? HISTORY_RUNTIME_GUARD_MS) * 1.25)),
+      );
+  return input.nowMs + reserveMs + estimatedTaskMs < input.deadlineMs;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length) as R[];
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      out[index] = await fn(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 export function checkpointWindowMatches(input: {
@@ -5342,8 +5434,38 @@ async function scanV2SwapLogBlockRange(input: {
   records: RotationHistoryRecord[];
   report: RotationHistoryPoolSyncStatus;
   errors: string[];
+  performance: RotationRefreshTaskPerformance;
 }> {
   const started = Date.now();
+  const performance: RotationRefreshTaskPerformance = {
+    taskSelectionMs: 0,
+    poolMetadataMs: 0,
+    boundaryResolutionMs: 0,
+    sourceReadMs: 0,
+    logDecodeMs: 0,
+    blockHeaderReadMs: 0,
+    anchorJoinMs: 0,
+    recordNormalizationMs: 0,
+    storeReadMs: 0,
+    mergeMs: 0,
+    storeWriteMs: 0,
+    checkpointWriteMs: 0,
+    lockMs: 0,
+    totalTaskMs: 0,
+    rpcCallCountByMethod: {},
+    uniqueBlockHeaderCount: 0,
+    duplicateBlockHeaderRequestCount: 0,
+    blockHeaderCacheHits: 0,
+    logsRetrieved: 0,
+    validRecordsProduced: 0,
+    recordsAdded: 0,
+    duplicatesIgnored: 0,
+    blocksScanned: Number(input.toBlock - input.fromBlock + 1n),
+  };
+  const finishPerformance = (): RotationRefreshTaskPerformance => ({
+    ...performance,
+    totalTaskMs: Date.now() - started,
+  });
   const pair = input.sourcePool.pair;
   const poolAddress = pair.id.toLowerCase() as `0x${string}`;
   const token0 = pairTokenAddress(pair, 0);
@@ -5405,6 +5527,7 @@ async function scanV2SwapLogBlockRange(input: {
         exactRemainingTruncationCause: "UNSUPPORTED_EVENT_ABI",
         elapsedMs: Date.now() - started,
       },
+      performance: finishPerformance(),
     };
   }
 
@@ -5429,17 +5552,21 @@ async function scanV2SwapLogBlockRange(input: {
         errors: ["HISTORY_RUNTIME_DEADLINE_REACHED"],
         elapsedMs: Date.now() - started,
       },
+      performance: finishPerformance(),
     };
   }
 
   let logs: Awaited<ReturnType<HistoryPublicClient["getLogs"]>>;
   try {
+    const sourceReadStarted = Date.now();
     logs = await client.getLogs({
       address: poolAddress,
       event: v2SwapEventAbi,
       fromBlock: input.fromBlock,
       toBlock: input.toBlock,
     });
+    performance.sourceReadMs += Date.now() - sourceReadStarted;
+    performance.rpcCallCountByMethod.eth_getLogs = (performance.rpcCallCountByMethod.eth_getLogs ?? 0) + 1;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -5462,22 +5589,44 @@ async function scanV2SwapLogBlockRange(input: {
         exactRemainingTruncationCause: "SOURCE_ERROR",
         elapsedMs: Date.now() - started,
       },
+      performance: finishPerformance(),
     };
   }
+  performance.logsRetrieved = logs.length;
 
   const recordsByKey = new Map<string, RotationHistoryRecord>();
   const sourceTradeTimestamps: number[] = [];
   let unsupportedLogs = 0;
   let anchorRecordsUsed = 0;
+  const blockNumbers = logs
+    .map((log) => log.blockNumber)
+    .filter((blockNumber): blockNumber is bigint => blockNumber !== undefined);
+  const uniqueBlockNumbers = [...new Set(blockNumbers.map((blockNumber) => blockNumber.toString()))]
+    .map((blockNumber) => BigInt(blockNumber));
+  performance.uniqueBlockHeaderCount = uniqueBlockNumbers.length;
+  performance.duplicateBlockHeaderRequestCount = Math.max(0, blockNumbers.length - uniqueBlockNumbers.length);
+  const blockInfoByNumber = new Map<string, { timestamp: number; hash: `0x${string}` | null }>();
+  const headerStarted = Date.now();
+  await mapWithConcurrency(uniqueBlockNumbers, RECENT_REFRESH_BLOCK_HEADER_CONCURRENCY, async (blockNumber) => {
+    const cacheHit = input.blockTimestampCache.has(blockNumber);
+    if (cacheHit) performance.blockHeaderCacheHits += 1;
+    else performance.rpcCallCountByMethod.eth_getBlockByNumber =
+      (performance.rpcCallCountByMethod.eth_getBlockByNumber ?? 0) + 1;
+    try {
+      const info = await cachedBlockInfo(client, blockNumber, input.blockTimestampCache);
+      blockInfoByNumber.set(blockNumber.toString(), info);
+    } catch {
+      // The per-log loop records these as unsupported logs.
+    }
+  });
+  performance.blockHeaderReadMs += Date.now() - headerStarted;
   for (const log of logs) {
     if (log.blockNumber === undefined || log.transactionHash === undefined) {
       unsupportedLogs += 1;
       continue;
     }
-    let info: { timestamp: number; hash: `0x${string}` | null };
-    try {
-      info = await cachedBlockInfo(client, log.blockNumber, input.blockTimestampCache);
-    } catch (err) {
+    const info = blockInfoByNumber.get(log.blockNumber.toString());
+    if (!info) {
       unsupportedLogs += 1;
       continue;
     }
@@ -5491,6 +5640,7 @@ async function scanV2SwapLogBlockRange(input: {
       };
     };
     try {
+      const decodeStarted = Date.now();
       decoded = decodeEventLog({
         abi: [v2SwapEventAbi],
         data: log.data,
@@ -5503,10 +5653,12 @@ async function scanV2SwapLogBlockRange(input: {
           amount1Out: bigint;
         };
       };
+      performance.logDecodeMs += Date.now() - decodeStarted;
     } catch {
       unsupportedLogs += 1;
       continue;
     }
+    const normalizeStarted = Date.now();
     const amount0Raw = (decoded.args.amount0In + decoded.args.amount0Out).toString();
     const amount1Raw = (decoded.args.amount1In + decoded.args.amount1Out).toString();
     if (BigInt(amount0Raw) > 0n || BigInt(amount1Raw) > 0n) sourceTradeTimestamps.push(info.timestamp);
@@ -5531,12 +5683,14 @@ async function scanV2SwapLogBlockRange(input: {
     if (candidateAmount > 0 && eusdcAmount > 0) {
       price = eusdcAmount / candidateAmount;
     } else if (candidateAmount > 0 && wplsAmount > 0) {
+      const anchorStarted = Date.now();
       anchor = nearestAnchorPrice(
         input.anchorObservations,
         info.timestamp,
         ANCHOR_MAX_AGE_SECONDS,
         log.blockNumber.toString(),
       );
+      performance.anchorJoinMs += Date.now() - anchorStarted;
       if (!anchor) continue;
       price = (wplsAmount / candidateAmount) * anchor.price;
       volumeEusdc = wplsAmount * anchor.price;
@@ -5569,6 +5723,7 @@ async function scanV2SwapLogBlockRange(input: {
       fetchedAt: input.fetchedAt,
     };
     recordsByKey.set(historyRecordKey(record), record);
+    performance.recordNormalizationMs += Date.now() - normalizeStarted;
   }
 
   const records = [...recordsByKey.values()];
@@ -5581,7 +5736,19 @@ async function scanV2SwapLogBlockRange(input: {
   const tipRangeTouched = input.toBlock >= input.tipStartBlock && input.fromBlock <= input.tipEndBlock;
   const tipRangeComplete = tipRangeTouched && input.fromBlock <= input.tipStartBlock && input.toBlock >= input.tipEndBlock;
   const recentTradesFound = newest !== null && newest >= input.requestedEndTimestamp - 30 * 60;
-  const toInfo = await cachedBlockInfo(client, input.toBlock, input.blockTimestampCache);
+  let toInfo = blockInfoByNumber.get(input.toBlock.toString());
+  if (!toInfo) {
+    const headerStartedForEnd = Date.now();
+    const cacheHit = input.blockTimestampCache.has(input.toBlock);
+    if (cacheHit) performance.blockHeaderCacheHits += 1;
+    else performance.rpcCallCountByMethod.eth_getBlockByNumber =
+      (performance.rpcCallCountByMethod.eth_getBlockByNumber ?? 0) + 1;
+    toInfo = await cachedBlockInfo(client, input.toBlock, input.blockTimestampCache);
+    performance.blockHeaderReadMs += Date.now() - headerStartedForEnd;
+  }
+  performance.validRecordsProduced = records.length;
+  performance.recordsAdded = Math.max(0, records.length - duplicateRecordsIgnored);
+  performance.duplicatesIgnored = duplicateRecordsIgnored;
   return {
     records,
     errors: [],
@@ -5626,6 +5793,7 @@ async function scanV2SwapLogBlockRange(input: {
       exactRemainingTruncationCause: "PARTIAL_PROGRESS",
       elapsedMs: Date.now() - started,
     },
+    performance: finishPerformance(),
   };
 }
 
@@ -6501,7 +6669,24 @@ export async function runEusdcRotationRecentRefresh(
 ): Promise<RotationRecentRefreshResult> {
   const normalized = normalizeRecentRefreshInput(input);
   const nowMs = Date.now();
+  const refreshStartedMs = nowMs;
   const deadlineMs = nowMs + normalized.maximumRuntimeMs;
+  const taskTimings: RotationRefreshTaskPerformance[] = [];
+  const performanceAccumulator = {
+    lockWaitMs: 0,
+    planningMs: 0,
+    sourceReadMs: 0,
+    logDecodeMs: 0,
+    blockHeaderReadMs: 0,
+    anchorJoinMs: 0,
+    storeReadMs: 0,
+    mergeMs: 0,
+    storeWriteMs: 0,
+    checkpointWriteMs: 0,
+    finalizationMs: 0,
+    blockHeaderCalls: 0,
+    blockHeaderCacheHits: 0,
+  };
   const checkpointBeforeWindow = readHistorySyncCheckpoint(config);
   const requestedCandidateKey = normalized.candidateIds ? [...normalized.candidateIds].sort().join(",") : null;
   const checkpointCandidateKey = checkpointBeforeWindow?.candidateIds ? [...checkpointBeforeWindow.candidateIds].sort().join(",") : null;
@@ -6591,10 +6776,16 @@ export async function runEusdcRotationRecentRefresh(
   return withHistoryLock(resolvedStore.path, async () => {
     let release: (() => RotationHistoryCrossProcessLockStatus) | null = null;
     try {
+      const lockStarted = Date.now();
       const lock = acquireHistoryWriteLock(config);
+      performanceAccumulator.lockWaitMs += Date.now() - lockStarted;
       release = lock.release;
       const runtimeConfig = boundedHistoryRequestConfig(config, deadlineMs);
+      const storeReadStarted = Date.now();
       const existingAtStart = readRotationHistoryStore(config);
+      performanceAccumulator.storeReadMs += Date.now() - storeReadStarted;
+      const existingStoreFingerprint = rotationHistoryFingerprint(existingAtStart);
+      const planningStarted = Date.now();
       const chainId = await getChainId(runtimeConfig);
       const checkpointBefore = readHistorySyncCheckpoint(config);
       let resumeCheckpoint: RotationHistorySyncCheckpoint | null = null;
@@ -6734,8 +6925,12 @@ export async function runEusdcRotationRecentRefresh(
           task,
         );
       }
+      performanceAccumulator.planningMs += Date.now() - planningStarted;
 
       let workingStore = existingAtStart;
+      const existingKeys = new Set(existingAtStart.records.map((record) => historyRecordKey(record)));
+      const stagedRecords: RotationHistoryRecord[] = [];
+      const previewRecordsByKey = new Map(existingAtStart.records.map((record) => [historyRecordKey(record), record]));
       const reportsByCandidate = new Map<RotationCandidateId, RotationHistoryPoolSyncStatus[]>();
       if (
         workingStore.lastSync?.syncPurpose === "RECENT_SIGNAL_WINDOW" &&
@@ -6821,7 +7016,7 @@ export async function runEusdcRotationRecentRefresh(
           planTipBlock,
           currentTaskIndex: 0,
           completedTaskIds: [...completedTaskIdsFromReplan],
-          storeFingerprint: rotationHistoryFingerprint(existingAtStart),
+          storeFingerprint: existingStoreFingerprint,
         }),
         syncPurpose: "RECENT_SIGNAL_WINDOW",
         requestedWindow: {
@@ -6848,13 +7043,13 @@ export async function runEusdcRotationRecentRefresh(
         completedBlockRanges: safeCompletedRanges,
         completedPools: [],
         sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
-        storeFingerprintBeforeRun: rotationHistoryFingerprint(existingAtStart),
+        storeFingerprintBeforeRun: existingStoreFingerprint,
         updatedAt: fetchedAt,
       };
       if (!resumeCheckpoint && completedTaskIdsFromReplan.size > 0) {
         checkpoint = advanceRecentRefreshCheckpoint({
           checkpoint,
-          storeFingerprint: rotationHistoryFingerprint(existingAtStart),
+          storeFingerprint: existingStoreFingerprint,
           updatedAt: fetchedAt,
         }).checkpoint;
       }
@@ -6926,10 +7121,6 @@ export async function runEusdcRotationRecentRefresh(
           nextResumeBlock: fullComplete ? null : report.nextResumeBlock,
         };
       };
-      const writeCheckpoint = (nextCheckpoint: RotationHistorySyncCheckpoint) => {
-        checkpoint = nextCheckpoint;
-        writeHistorySyncCheckpoint(config, checkpoint);
-      };
       const summarizeAll = (): RotationHistoryCandidateSyncStatus[] =>
         candidates.map((candidate) => summarizeCandidateSync({
           candidate,
@@ -6942,14 +7133,74 @@ export async function runEusdcRotationRecentRefresh(
           latestBlockNumber,
           syncPurpose: "RECENT_SIGNAL_WINDOW",
         }));
-      const persistStore = () => {
+      const stagePreviewRecord = (record: RotationHistoryRecord) => {
+        const retentionSeconds = (existingAtStart.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS) * 24 * 60 * 60;
+        const retentionFloor = Math.floor(nowMs / 1000) - retentionSeconds;
+        const floor = Math.min(retentionFloor, startTimestamp);
+        if (record.timestamp < floor) return;
+        const key = historyRecordKey(record);
+        const prior = previewRecordsByKey.get(key);
+        const block = record.blockNumber ? BigInt(record.blockNumber) : null;
+        const recent =
+          normalized.forceRecentBlockRecheck &&
+          latestBlockNumber !== undefined &&
+          block !== null &&
+          latestBlockNumber >= block &&
+          latestBlockNumber - block <= HISTORY_RECENT_REORG_BLOCKS;
+        if (!prior) previewRecordsByKey.set(key, record);
+        else if (recent && prior.blockHash !== record.blockHash) previewRecordsByKey.set(key, { ...record, timestamp: prior.timestamp });
+      };
+      const previewStoreForStatus = (): RotationHistoryFile => {
+        const records = [...previewRecordsByKey.values()].sort((a, b) =>
+          a.timestamp - b.timestamp ||
+          a.transactionHash.localeCompare(b.transactionHash) ||
+          a.logIndex - b.logIndex,
+        );
+        const priorWorkingStore = workingStore;
+        workingStore = { ...workingStore, records };
+        const candidatesForPreview = summarizeAll();
+        workingStore = priorWorkingStore;
+        return {
+          ...workingStore,
+          records,
+          lastSync: {
+            syncPurpose: "RECENT_SIGNAL_WINDOW",
+            requestedStartTime,
+            requestedEndTime,
+            historyStoreFingerprint: existingStoreFingerprint,
+            candidates: candidatesForPreview,
+          },
+        };
+      };
+      const persistStore = (): { sourceCompleteness: RotationHistoryCandidateSyncStatus[]; historyStoreFingerprint: `0x${string}` } => {
+        const mergeStarted = Date.now();
+        const merged = mergeRotationHistoryRecords({
+          existing: existingAtStart.records,
+          incoming: stagedRecords,
+          nowMs,
+          retentionDays: existingAtStart.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+          protectedStartTimestamp: startTimestamp,
+          forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+          latestBlockNumber,
+        });
+        performanceAccumulator.mergeMs += Date.now() - mergeStarted;
+        recordsAdded = merged.added;
+        recordsUpdated = merged.updated;
+        duplicateRecordsIgnored = merged.duplicates;
+        workingStore = {
+          ...existingAtStart,
+          chainId,
+          updatedAt: fetchedAt,
+          retentionDays: existingAtStart.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+          records: merged.records,
+        };
         const sourceCompleteness = summarizeAll();
         const next: RotationHistoryFile = {
           schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
           chainId,
           updatedAt: fetchedAt,
-          retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
-          records: workingStore.records,
+          retentionDays: workingStore.retentionDays,
+          records: merged.records,
           lastSync: {
             syncPurpose: "RECENT_SIGNAL_WINDOW",
             requestedStartTime,
@@ -6960,12 +7211,15 @@ export async function runEusdcRotationRecentRefresh(
         };
         const historyStoreFingerprint = rotationHistoryFingerprint(next);
         next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
+        const writeStarted = Date.now();
         writeRotationHistoryStore(config, next);
-        workingStore = readRotationHistoryStore(config);
-        return sourceCompleteness;
+        performanceAccumulator.storeWriteMs += Date.now() - writeStarted;
+        workingStore = next;
+        return { sourceCompleteness, historyStoreFingerprint };
       };
 
       let attemptedRanges = 0;
+      let completedTaskElapsedTotalMs = 0;
       let sourceErrorReason: string | undefined;
       while (attemptedRanges < normalized.maximumPoolsPerRun) {
         if (!shouldStartRecentRefreshRange({
@@ -6973,6 +7227,7 @@ export async function runEusdcRotationRecentRefresh(
           deadlineMs,
           maximumRuntimeMs: normalized.maximumRuntimeMs,
           attemptedRanges,
+          averageCompletedTaskMs: attemptedRanges > 0 ? completedTaskElapsedTotalMs / attemptedRanges : undefined,
         })) break;
         const completedTaskIds = new Set(checkpoint.completedTaskIds ?? []);
         const nextTaskIndex = planTasks.findIndex((task) => !completedTaskIds.has(task.taskId));
@@ -6997,7 +7252,6 @@ export async function runEusdcRotationRecentRefresh(
           checkpoint = advanced.checkpoint;
           checkpointAdvanced = checkpointAdvanced || advanced.advanced;
           tasksAdvancedThisCall += advanced.advanced ? 1 : 0;
-          writeCheckpoint(checkpoint);
         }
         const planTask = planTasks[nextTaskIndex]!;
         const task = sourcePoolByTaskKey.get(
@@ -7028,12 +7282,16 @@ export async function runEusdcRotationRecentRefresh(
           nextBlock: planTask.toBlock,
           updatedAt: new Date().toISOString(),
         };
-        writeHistorySyncCheckpoint(config, checkpoint);
-        const existingKeys = new Set(workingStore.records.map((record) => historyRecordKey(record)));
         const anchorObservations = observationsFromHistory(
-          recordsForCandidate(workingStore, getRotationCandidate("PLS"), startTimestamp, endTimestamp),
+          recordsForCandidate(
+            { ...workingStore, records: [...workingStore.records, ...stagedRecords] },
+            getRotationCandidate("PLS"),
+            startTimestamp,
+            endTimestamp,
+          ),
         ).filter((obs) => obs.priceEusdc > 0);
         sourceCallsThisCall += 1;
+        const taskStarted = Date.now();
         const scan = await scanV2SwapLogBlockRange({
           config,
           chainId,
@@ -7055,6 +7313,22 @@ export async function runEusdcRotationRecentRefresh(
           existingKeys,
           deadlineMs,
         });
+        completedTaskElapsedTotalMs += Date.now() - taskStarted;
+        taskTimings.push({
+          ...scan.performance,
+          taskId: planTask.taskId,
+          phase: planTask.phase,
+          candidateId: planTask.candidateId,
+          poolAddress: planTask.poolAddress,
+          fromBlock: planTask.fromBlock,
+          toBlock: planTask.toBlock,
+        });
+        performanceAccumulator.sourceReadMs += scan.performance.sourceReadMs;
+        performanceAccumulator.logDecodeMs += scan.performance.logDecodeMs;
+        performanceAccumulator.blockHeaderReadMs += scan.performance.blockHeaderReadMs;
+        performanceAccumulator.anchorJoinMs += scan.performance.anchorJoinMs;
+        performanceAccumulator.blockHeaderCalls += scan.performance.rpcCallCountByMethod.eth_getBlockByNumber ?? 0;
+        performanceAccumulator.blockHeaderCacheHits += scan.performance.blockHeaderCacheHits;
         unresolvedGaps.push(...scan.errors.map((error) => `${task.candidateId}: ${task.poolAddress}: ${error}`));
         if (scan.report.completedRangeScanned) {
           attemptedRanges += 1;
@@ -7063,6 +7337,11 @@ export async function runEusdcRotationRecentRefresh(
           recordsRetrieved += scan.report.totalRecordsRetrieved;
           if (scan.report.totalRecordsRetrieved === 0) rangesWithZeroLogs += 1;
           if (scan.report.totalRecordsRetrieved > 0 && (scan.report.recordsAdded ?? 0) === 0) duplicateOnlyRangesCompleted += 1;
+          for (const record of scan.records) {
+            stagedRecords.push(record);
+            existingKeys.add(historyRecordKey(record));
+            stagePreviewRecord(record);
+          }
           const completedRange = completedRangeFromReport({
             candidateId: task.candidateId,
             report: scan.report,
@@ -7081,45 +7360,25 @@ export async function runEusdcRotationRecentRefresh(
             ),
             updatedReport,
           ]);
-          const merged = mergeRotationHistoryRecords({
-            existing: workingStore.records,
-            incoming: scan.records,
-            nowMs,
-            retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
-            protectedStartTimestamp: startTimestamp,
-            forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
-            latestBlockNumber,
-          });
-          recordsAdded += merged.added;
-          recordsUpdated += merged.updated;
-          duplicateRecordsIgnored += merged.duplicates;
-          workingStore = {
-            ...workingStore,
-            chainId,
-            updatedAt: fetchedAt,
-            retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
-            records: merged.records,
-          };
-          persistStore();
           const advanced = advanceRecentRefreshCheckpoint({
             checkpoint,
             taskResult: {
               taskId: planTask.taskId,
               ...(completedRange ? { completedRange } : {}),
             },
-            storeFingerprint: rotationHistoryFingerprint(workingStore),
+            storeFingerprint: existingStoreFingerprint,
             updatedAt: new Date().toISOString(),
           });
           checkpointAdvanced = checkpointAdvanced || advanced.advanced;
           tasksAdvancedThisCall += advanced.advanced ? 1 : 0;
-          writeCheckpoint(advanced.checkpoint);
           checkpoint = advanced.checkpoint;
           phase = checkpoint.phase ?? "COMPLETE";
           taskIndex = checkpoint.currentTaskIndex ?? planTasks.length;
           if (normalized.stopWhenAnyCandidateReady) {
+            const previewStore = previewStoreForStatus();
             const ready = candidates
               .map((candidate) => statusForCandidateFromStore({
-                store: workingStore,
+                store: previewStore,
                 candidate,
                 lookbackMinutes: normalized.lookbackMinutes,
                 candleMinutes: DEFAULT_CANDLE_MINUTES,
@@ -7140,12 +7399,37 @@ export async function runEusdcRotationRecentRefresh(
         }
       }
 
-      const sourceCompleteness = persistStore();
+      const finalizationStarted = Date.now();
+      const persisted = persistStore();
+      let sourceCompleteness = persisted.sourceCompleteness;
+      const finalStoreFingerprintForCheckpoint = persisted.historyStoreFingerprint;
+      const refreshedCheckpoint = advanceRecentRefreshCheckpoint({
+        checkpoint,
+        storeFingerprint: finalStoreFingerprintForCheckpoint,
+        updatedAt: new Date().toISOString(),
+      });
+      checkpoint = refreshedCheckpoint.checkpoint;
+      checkpointAdvanced = checkpointAdvanced || refreshedCheckpoint.advanced;
+      if (normalized.stopWhenAnyCandidateReady && !sourceErrorReason) {
+        const ready = candidates
+          .map((candidate) => statusForCandidateFromStore({
+            store: workingStore,
+            candidate,
+            lookbackMinutes: normalized.lookbackMinutes,
+            candleMinutes: DEFAULT_CANDLE_MINUTES,
+            nowMs,
+          }))
+          .find((candidate) => candidate.readinessForLiveScanning);
+        if (ready) {
+          readyCandidateId = ready.candidateId;
+          earlyStopReason = `${ready.candidateId} independently ready after required recent-refresh task advancement`;
+        }
+      }
       const completedTaskIds = new Set(checkpoint.completedTaskIds ?? []);
       const pendingTasks = planTasks.filter((task) => !completedTaskIds.has(task.taskId));
       const pendingRequiredTasks = pendingTasks.filter((task) => task.phase !== "OPTIONAL_SIGNAL_WINDOW_BACKFILL");
       const allRequiredTasksComplete = pendingRequiredTasks.length === 0;
-      const progressFingerprintAfter = checkpoint.progressFingerprint ?? recentRefreshProgressFingerprint({
+      const progressFingerprintAfter = checkpoint.progressFingerprint ?? refreshedCheckpoint.progressFingerprint ?? recentRefreshProgressFingerprint({
         syncPurpose: "RECENT_SIGNAL_WINDOW",
         phase: checkpoint.phase ?? "COMPLETE",
         planFingerprint,
@@ -7169,14 +7453,69 @@ export async function runEusdcRotationRecentRefresh(
               : stalled
                 ? "CHECKPOINT_STALLED"
                 : "PARTIAL_PROGRESS";
+      const buildPerformance = (): RotationRefreshPerformance => {
+        const totalElapsedMs = Date.now() - refreshStartedMs;
+        const recordsProduced = taskTimings.reduce((sum, row) => sum + row.validRecordsProduced, 0);
+        const data = {
+          totalElapsedMs,
+          lockWaitMs: performanceAccumulator.lockWaitMs,
+          planningMs: performanceAccumulator.planningMs,
+          sourceReadMs: performanceAccumulator.sourceReadMs,
+          logDecodeMs: performanceAccumulator.logDecodeMs,
+          blockHeaderReadMs: performanceAccumulator.blockHeaderReadMs,
+          anchorJoinMs: performanceAccumulator.anchorJoinMs,
+          storeReadMs: performanceAccumulator.storeReadMs,
+          mergeMs: performanceAccumulator.mergeMs,
+          storeWriteMs: performanceAccumulator.storeWriteMs,
+          checkpointWriteMs: performanceAccumulator.checkpointWriteMs,
+          finalizationMs: performanceAccumulator.finalizationMs,
+          tasksAttempted: attemptedRanges,
+          tasksCompleted: rangesCompleted,
+          rangesCompleted,
+          blocksScanned,
+          sourceCalls: sourceCallsThisCall,
+          blockHeaderCalls: performanceAccumulator.blockHeaderCalls,
+          blockHeaderCacheHits: performanceAccumulator.blockHeaderCacheHits,
+          logsRetrieved: recordsRetrieved,
+          recordsProduced,
+          recordsAdded,
+          duplicatesIgnored: duplicateRecordsIgnored,
+          blocksPerSecond: totalElapsedMs > 0 ? round(blocksScanned / (totalElapsedMs / 1000), 4) : 0,
+          recordsPerSecond: totalElapsedMs > 0 ? round(recordsProduced / (totalElapsedMs / 1000), 4) : 0,
+          maximumConcurrentSourceCalls: 1,
+          finalizationReserveMs: RECENT_REFRESH_FINALIZATION_RESERVE_MS,
+          taskTimings: taskTimings.slice(0, 20),
+        };
+        return {
+          ...data,
+          performanceFingerprint: fingerprint({
+            ...data,
+            taskTimings: data.taskTimings.map((row) => ({
+              taskId: row.taskId,
+              candidateId: row.candidateId,
+              poolAddress: row.poolAddress?.toLowerCase(),
+              fromBlock: row.fromBlock,
+              toBlock: row.toBlock,
+              blocksScanned: row.blocksScanned,
+              logsRetrieved: row.logsRetrieved,
+              validRecordsProduced: row.validRecordsProduced,
+              totalTaskMs: row.totalTaskMs,
+            })),
+          }),
+        };
+      };
+      const performanceBeforeCheckpointWrite = buildPerformance();
       let resumeToken: string | undefined;
       let checkpointUpdatedAt: string | undefined;
       if (code === "COMPLETE" || code === "READY_CANDIDATE_FOUND") {
+        const checkpointStarted = Date.now();
         clearHistorySyncCheckpoint(config);
+        performanceAccumulator.checkpointWriteMs += Date.now() - checkpointStarted;
       } else {
         resumeToken = checkpoint.resumeToken;
         checkpointUpdatedAt = new Date().toISOString();
-        writeCheckpoint({
+        const checkpointStarted = Date.now();
+        writeHistorySyncCheckpoint(config, {
           ...checkpoint,
           resumeToken: checkpoint.resumeToken,
           phase: checkpoint.phase ?? phase,
@@ -7185,15 +7524,19 @@ export async function runEusdcRotationRecentRefresh(
           progressFingerprint: progressFingerprintAfter,
           previousProgressFingerprint: progressFingerprintBefore ?? undefined,
           repeatedRange: stalled ? checkpoint.lastAttemptedRange : undefined,
+          lastRefreshPerformance: performanceBeforeCheckpointWrite,
           updatedAt: checkpointUpdatedAt,
         });
+        performanceAccumulator.checkpointWriteMs += Date.now() - checkpointStarted;
       }
+      performanceAccumulator.finalizationMs += Date.now() - finalizationStarted;
+      const performance = buildPerformance();
 
       const released = release();
       release = null;
       const diagnostics = historyPathDiagnostics(config, released);
-      const finalStore = readRotationHistoryStore(config);
-      const historyStoreFingerprint = rotationHistoryFingerprint(finalStore);
+      const finalStore = workingStore;
+      const historyStoreFingerprint = finalStoreFingerprintForCheckpoint;
       const timestamps = finalStore.records.map((record) => record.timestamp);
       const anchorRecords = anchorPoolAddress
         ? finalStore.records.filter((record) => sameAddress(record.poolAddress, anchorPoolAddress))
@@ -7284,6 +7627,7 @@ export async function runEusdcRotationRecentRefresh(
         sourceCallsThisCall,
         zeroLogRangesCompleted: rangesWithZeroLogs,
         duplicateOnlyRangesCompleted,
+        performance,
         ...(earlyStopReason ? { earlyStopReason } : {}),
         ...(readyCandidateId ? { readyCandidateId } : {}),
         ...(checkpointReplanned
@@ -7434,6 +7778,100 @@ export async function runEusdcRotationHistoryStatus(
     activeStoreRecordCount: diagnostics.activeStoreRecordCount,
     crossProcessLockStatus: diagnostics.crossProcessLockStatus,
     historyStoreFingerprint,
+    quoteCallCount: 0,
+    noPiteasQuoteUsed: true,
+    noWalletWrite: true,
+    noLiveTransaction: true,
+  };
+}
+
+function percentile(values: number[], percentileValue: number): number | null {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentileValue / 100 * sorted.length) - 1));
+  return sorted[index]!;
+}
+
+export async function runEusdcRotationRefreshPerformance(config: AppConfig): Promise<Record<string, unknown>> {
+  const lockPath = join(historyStoreDirectory(config), "market-history.lock");
+  const diagnostics = historyPathDiagnostics(config, inspectHistoryWriteLock(lockPath));
+  const checkpoint = readHistorySyncCheckpoint(config);
+  const storeReadStarted = Date.now();
+  const store = readRotationHistoryStore(config);
+  const storeReadMs = Date.now() - storeReadStarted;
+  const taskPlan = checkpoint?.taskPlan ?? [];
+  const completedTaskIds = new Set(checkpoint?.completedTaskIds ?? []);
+  const pendingTasks = taskPlan.filter((task) => !completedTaskIds.has(task.taskId));
+  const completedRanges = checkpoint?.completedBlockRanges ?? [];
+  const lastPerformance = checkpoint?.lastRefreshPerformance;
+  const rangeDurations = lastPerformance?.taskTimings.map((row) => row.totalTaskMs) ?? [];
+  const completedPerCall = Math.max(1, lastPerformance?.rangesCompleted ?? 1);
+  const remainingRequired = pendingTasks.filter((task) => task.phase !== "OPTIONAL_SIGNAL_WINDOW_BACKFILL").length;
+  const remainingAll = pendingTasks.length;
+  const projectedPlsRanges = pendingTasks.filter((task) => task.candidateId === "PLS").length;
+  const performanceFingerprint = fingerprint({
+    schema: checkpoint?.planSchemaVersion ?? null,
+    plan: checkpoint?.planFingerprint ?? null,
+    cursor: checkpoint?.currentTaskIndex ?? null,
+    completedRanges: completedRanges.length,
+    remainingAll,
+    lastPerformanceFingerprint: lastPerformance?.performanceFingerprint ?? null,
+    storeFingerprint: rotationHistoryFingerprint(store),
+  });
+  return {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    currentPlanSchema: checkpoint?.planSchemaVersion ?? null,
+    syncPurpose: checkpoint?.syncPurpose ?? null,
+    planFingerprint: checkpoint?.planFingerprint ?? null,
+    planTipBlock: checkpoint?.planTipBlock ?? null,
+    currentCursor: {
+      currentTaskIndex: checkpoint?.currentTaskIndex ?? null,
+      currentTask: checkpoint?.currentTaskIndex !== undefined ? taskPlan[checkpoint.currentTaskIndex] ?? null : null,
+      resumeToken: checkpoint?.resumeToken ?? null,
+    },
+    taskCounts: {
+      total: taskPlan.length,
+      completed: completedTaskIds.size,
+      pending: pendingTasks.length,
+      pendingRequired: remainingRequired,
+    },
+    completedRanges: completedRanges.length,
+    remainingRanges: remainingAll,
+    averageRangeRuntimeMs: rangeDurations.length > 0
+      ? round(rangeDurations.reduce((sum, value) => sum + value, 0) / rangeDurations.length, 4)
+      : null,
+    p50RangeRuntimeMs: percentile(rangeDurations, 50),
+    p95RangeRuntimeMs: percentile(rangeDurations, 95),
+    averageBlocksPerSecond: lastPerformance?.blocksPerSecond ?? null,
+    blockHeaderCacheStatistics: {
+      blockHeaderCalls: lastPerformance?.blockHeaderCalls ?? 0,
+      blockHeaderCacheHits: lastPerformance?.blockHeaderCacheHits ?? 0,
+    },
+    storeTiming: {
+      currentStoreReadMs: storeReadMs,
+      lastStoreReadMs: lastPerformance?.storeReadMs ?? null,
+      lastStoreWriteMs: lastPerformance?.storeWriteMs ?? null,
+      lastMergeMs: lastPerformance?.mergeMs ?? null,
+      lastCheckpointWriteMs: lastPerformance?.checkpointWriteMs ?? null,
+    },
+    recentProviderRangeSizeState: {
+      planRangeBlocks: taskPlan[checkpoint?.currentTaskIndex ?? 0]
+        ? Number(BigInt(taskPlan[checkpoint?.currentTaskIndex ?? 0]!.toBlock) - BigInt(taskPlan[checkpoint?.currentTaskIndex ?? 0]!.fromBlock) + 1n)
+        : null,
+      maximumConcurrentSourceCalls: lastPerformance?.maximumConcurrentSourceCalls ?? 1,
+      finalizationReserveMs: lastPerformance?.finalizationReserveMs ?? RECENT_REFRESH_FINALIZATION_RESERVE_MS,
+    },
+    projectedBoundedCallsToCompleteRequiredPlsHistory: Math.ceil(projectedPlsRanges / completedPerCall),
+    projectedBoundedCallsForAllFiveCandidates: Math.ceil(remainingAll / completedPerCall),
+    lastCallPerformance: lastPerformance ?? null,
+    lastCallPerformanceFingerprint: lastPerformance?.performanceFingerprint ?? null,
+    performanceFingerprint,
+    repositoryRoot: diagnostics.repositoryRoot,
+    historyStorePath: diagnostics.historyStorePath,
+    historyStorePathSource: diagnostics.historyStorePathSource,
+    activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+    crossProcessLockStatus: diagnostics.crossProcessLockStatus,
     quoteCallCount: 0,
     noPiteasQuoteUsed: true,
     noWalletWrite: true,
@@ -9184,6 +9622,20 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
             lookbackMinutes: args.lookbackMinutes as number | undefined,
             candleMinutes: args.candleMinutes as number | undefined,
           }),
+        ),
+      ),
+  });
+
+  registerTool(server, config, {
+    name: "eusdc_rotation_refresh_performance",
+    description:
+      "Read-only performance status for the recent eUSDC rotation-history refresh scheduler. Reports checkpoint cursor, throughput telemetry, projected remaining calls, and public store timing; never calls Piteas or writes wallet/blockchain state.",
+    category: "analytics",
+    inputSchema: {},
+    handler: async (_args, cfg) =>
+      ok(
+        neverReturnPrivateKey(
+          await runEusdcRotationRefreshPerformance(cfg),
         ),
       ),
   });
