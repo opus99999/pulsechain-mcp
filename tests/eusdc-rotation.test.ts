@@ -37,6 +37,7 @@ import {
   deriveRouteConnectivity,
   getRotationCandidate,
   getRotationCandidateRegistry,
+  isCandidateReadyForSelection,
   mergeRotationHistoryRecords,
   normalizeTokenAmount,
   priceObservationFromSwap,
@@ -60,6 +61,7 @@ import {
   type RotationPriceObservation,
   type RotationCandidateId,
   type RotationDeps,
+  type RotationHistoryQuality,
   type RotationHistoryRecord,
   type RotationHistorySourcePoolRef,
   type RotationMarketEvidence,
@@ -168,8 +170,64 @@ function market(overrides: Partial<RotationMarketEvidence> = {}): RotationMarket
     evidenceFresh: true,
     dataSourceErrors: [],
     tokenPath: [EUSDC_TOKEN_ADDRESS, WPLS_ADDRESS],
+    historyQuality: readyHistory(),
     ...overrides,
   };
+}
+
+function scanInput() {
+  return {
+    walletId: WALLET_ID,
+    lookbackMinutes: 1440,
+    candleMinutes: 5,
+    minimumDipBps: 100,
+    minimumReboundConfirmationBps: 20,
+    minimumNetTargetBps: 100,
+  };
+}
+
+function readyHistory(overrides: Partial<RotationHistoryQuality> = {}): RotationHistoryQuality {
+  return {
+    sourceCompletenessPercent: 99.25,
+    activeTradeCandlePercent: 99,
+    priceContinuityPercent: 99,
+    analysisMode: "DENSE_CANDLES",
+    latestTradeAgeMinutes: 5,
+    maximumObservedGapMinutes: 10,
+    actualTradeCount: 300,
+    sourceTruncated: false,
+    unresolvedGaps: [],
+    readinessForLiveScanning: true,
+    ...overrides,
+  };
+}
+
+function incompleteHistory(overrides: Partial<RotationHistoryQuality> = {}): RotationHistoryQuality {
+  return readyHistory({
+    sourceCompletenessPercent: 50,
+    activeTradeCandlePercent: 10,
+    priceContinuityPercent: 20,
+    analysisMode: "UNUSABLE_HISTORY",
+    actualTradeCount: 10,
+    sourceTruncated: true,
+    unresolvedGaps: ["source row limit"],
+    readinessForLiveScanning: false,
+    ...overrides,
+  });
+}
+
+function rowForSelection(
+  candidateId: RotationCandidateId,
+  marketOverrides: Partial<RotationMarketEvidence> = {},
+) {
+  return buildCandidateScanRow({
+    candidate: getRotationCandidate(candidateId),
+    tokenValidation: validation(candidateId),
+    market: market(marketOverrides),
+    scanInput: scanInput(),
+    state: "EUSDC_IDLE",
+    hasOpenCycle: false,
+  });
 }
 
 function pairFixture(input: {
@@ -1341,6 +1399,199 @@ describe("eUSDC live scan hardening primitives", () => {
     expect(d.getPiteasQuote).not.toHaveBeenCalled();
     expect(d.proposeAgentTx).not.toHaveBeenCalled();
     expect(d.executeAgentTx).not.toHaveBeenCalled();
+  });
+});
+
+describe("eUSDC rotation ready candidate selection", () => {
+  it("keeps incomplete candidates diagnostic while a ready candidate reaches the selection scope", () => {
+    const rows = EUSDC_ROTATION_CANDIDATES.map((candidate) =>
+      candidate.candidateId === "PLS"
+        ? rowForSelection("PLS", {
+            distanceFromOneHourHighBps: -20,
+            reboundFromRecentLocalLowBps: 0,
+            historyQuality: readyHistory({
+              sourceCompletenessPercent: 99.2593,
+              unresolvedGaps: ["oldest stored record does not cross requested start boundary"],
+            }),
+          })
+        : rowForSelection(candidate.candidateId, {
+            historyQuality: incompleteHistory(),
+            dataFreshness: candidate.candidateId === "PHEX" ? "partial" : "stale",
+          })
+    );
+
+    const selected = selectRotationWinner(rows);
+    expect(selected.historyReady).toBe(true);
+    expect(selected.readyCandidateIds).toEqual(["PLS"]);
+    expect(selected.selectionCandidateIds).toEqual(["PLS"]);
+    expect(selected.incompleteCandidateIds).toEqual(["PLSX", "INC", "PHEX", "PRVX"]);
+    expect(selected.diagnosticOrdering).toHaveLength(5);
+    expect(selected.readyCandidateRanking).toEqual(["PLS"]);
+    expect(selected.eligibleCandidateRanking).toEqual([]);
+    expect(selected.decision).not.toBe("INSUFFICIENT_HISTORY");
+    expect(["INSUFFICIENT_EVIDENCE", "HOLD_EUSDC"]).toContain(selected.decision);
+
+    const plsReadiness = selected.candidateReadiness.find((row) => row.candidateId === "PLS");
+    expect(plsReadiness?.ready).toBe(true);
+    expect(plsReadiness?.currentSignalWindowReady).toBe(true);
+    expect(plsReadiness?.sevenDayStatisticsReady).toBe(false);
+    expect(plsReadiness?.warnings.join("; ")).toMatch(/oldest stored record/);
+  });
+
+  it("selects one eligible ready candidate even when incomplete peers have stronger diagnostics", () => {
+    const pls = rowForSelection("PLS", {
+      historyQuality: readyHistory(),
+      meanReversionScore: 70,
+      liquidityScore: 70,
+      volumeScore: 70,
+    });
+    const incompleteHighScore = {
+      ...rowForSelection("PLSX", {
+        historyQuality: incompleteHistory(),
+        meanReversionScore: 100,
+        liquidityScore: 100,
+        volumeScore: 100,
+        routeQualityScore: 100,
+      }),
+      score: 100,
+    };
+    const selected = selectRotationWinner([pls, incompleteHighScore]);
+
+    expect(selected.decision).toBe("CANDIDATE_SELECTED");
+    expect(selected.winner).toBe("PLS");
+    expect(selected.readyCandidateIds).toEqual(["PLS"]);
+    expect(selected.readyCandidateRanking).toEqual(["PLS"]);
+    expect(selected.eligibleCandidateRanking).toEqual(["PLS"]);
+    expect(selected.incompleteCandidateIds).toEqual(["PLSX"]);
+  });
+
+  it("returns insufficient history only when the ready subset is empty", () => {
+    const selected = selectRotationWinner([
+      rowForSelection("PLS", { historyQuality: incompleteHistory() }),
+      rowForSelection("PLSX", { historyQuality: incompleteHistory() }),
+    ]);
+    expect(selected.historyReady).toBe(false);
+    expect(selected.readyCandidateIds).toEqual([]);
+    expect(selected.decision).toBe("INSUFFICIENT_HISTORY");
+  });
+
+  it("keeps candidate-scoped source failures from blocking a ready candidate globally", () => {
+    const selected = selectRotationWinner([
+      rowForSelection("PLS", { historyQuality: readyHistory() }),
+      rowForSelection("PLSX", {
+        historyQuality: incompleteHistory(),
+        dataSourceErrors: ["subgraph timeout"],
+      }),
+    ]);
+
+    expect(selected.decision).toBe("CANDIDATE_SELECTED");
+    expect(selected.winner).toBe("PLS");
+    expect(selected.incompleteCandidateIds).toEqual(["PLSX"]);
+  });
+
+  it("returns a global data-source failure only when every candidate is blocked by source failures", () => {
+    const selected = selectRotationWinner([
+      rowForSelection("PLS", {
+        historyQuality: incompleteHistory({ unresolvedGaps: ["RPC range error"] }),
+        dataSourceErrors: ["RPC range error"],
+      }),
+      rowForSelection("PLSX", {
+        historyQuality: incompleteHistory({ unresolvedGaps: ["source row limit"] }),
+        dataSourceErrors: ["source row limit"],
+      }),
+    ]);
+
+    expect(selected.decision).toBe("DATA_SOURCE_FAILURE");
+    expect(selected.readyCandidateIds).toEqual([]);
+  });
+
+  it("holds on ties among ready eligible candidates and ignores ties among incomplete candidates", () => {
+    const readyTie = selectRotationWinner([
+      rowForSelection("PLS", { historyQuality: readyHistory() }),
+      rowForSelection("PHEX", { historyQuality: readyHistory() }),
+    ]);
+    expect(readyTie.decision).toBe("HOLD_EUSDC");
+    expect(readyTie.tiedCandidateIds).toEqual(["PLS", "PHEX"]);
+
+    const incompleteTie = selectRotationWinner([
+      rowForSelection("PLS", { historyQuality: readyHistory() }),
+      {
+        ...rowForSelection("PLSX", { historyQuality: incompleteHistory() }),
+        score: 100,
+      },
+      {
+        ...rowForSelection("INC", { historyQuality: incompleteHistory() }),
+        score: 100,
+      },
+    ]);
+    expect(incompleteTie.decision).toBe("CANDIDATE_SELECTED");
+    expect(incompleteTie.winner).toBe("PLS");
+    expect(incompleteTie.tiedCandidateIds).toBeUndefined();
+  });
+
+  it("blocks required current-window history gaps but not optional seven-day gaps", () => {
+    const optionalGap = rowForSelection("PLS", {
+      historyQuality: readyHistory({
+        sourceCompletenessPercent: 99.2593,
+        unresolvedGaps: ["oldest stored record does not cross requested start boundary"],
+      }),
+    });
+    const requiredGap = rowForSelection("PLSX", {
+      historyQuality: readyHistory({
+        sourceCompletenessPercent: 75,
+        sourceTruncated: true,
+        unresolvedGaps: ["SOURCE_ROW_LIMIT required pool 0xabc"],
+        readinessForLiveScanning: false,
+        analysisMode: "UNUSABLE_HISTORY",
+      }),
+    });
+
+    expect(isCandidateReadyForSelection(optionalGap)).toMatchObject({
+      ready: true,
+      currentSignalWindowReady: true,
+      sevenDayStatisticsReady: false,
+    });
+    expect(isCandidateReadyForSelection(requiredGap)).toMatchObject({
+      ready: false,
+      currentSignalWindowReady: false,
+    });
+  });
+
+  it("includes readiness fields in scan results and fingerprints readiness changes", async () => {
+    const cfg = testConfig();
+    const readyDeps = deps({
+      fetchCandidateMarketEvidence: vi.fn(async (_config, candidate) =>
+        candidate.candidateId === "PLS"
+          ? market({
+              distanceFromOneHourHighBps: -20,
+              reboundFromRecentLocalLowBps: 0,
+              historyQuality: readyHistory(),
+            })
+          : market({ historyQuality: incompleteHistory() }),
+      ),
+    });
+    const readyScan = await runEusdcRotationScan(cfg, { walletId: WALLET_ID }, readyDeps);
+
+    resetEusdcRotationForTests();
+    const incompleteDeps = deps({
+      fetchCandidateMarketEvidence: vi.fn(async () =>
+        market({ historyQuality: incompleteHistory() }),
+      ),
+    });
+    const incompleteScan = await runEusdcRotationScan(cfg, { walletId: WALLET_ID }, incompleteDeps);
+
+    expect(readyScan.historyReady).toBe(true);
+    expect(readyScan.readyCandidateIds).toEqual(["PLS"]);
+    expect(readyScan.selectionScope).toBe("READY_CANDIDATES_ONLY");
+    expect(readyScan.candidateReadiness).toHaveLength(5);
+    expect(readyScan.decision).not.toBe("INSUFFICIENT_HISTORY");
+    expect(readyScan.quoteCallCount).toBe(0);
+    expect(readyDeps.getPiteasQuote).not.toHaveBeenCalled();
+    expect(readyDeps.proposeAgentTx).not.toHaveBeenCalled();
+    expect(readyDeps.executeAgentTx).not.toHaveBeenCalled();
+    expect(incompleteScan.historyReady).toBe(false);
+    expect(incompleteScan.decision).toBe("INSUFFICIENT_HISTORY");
+    expect(readyScan.scanFingerprint).not.toBe(incompleteScan.scanFingerprint);
   });
 });
 

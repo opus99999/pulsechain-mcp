@@ -447,6 +447,16 @@ export interface RotationCandidateScanRow {
   rankingStatus?: "ELIGIBLE_RANKED" | "UNRANKED_NO_EVIDENCE" | "UNRANKED_INCOMPLETE_HISTORY" | "TIED";
 }
 
+export interface RotationCandidateSelectionReadiness {
+  candidateId: RotationCandidateId;
+  ready: boolean;
+  analysisMode: RotationAnalysisMode | null;
+  currentSignalWindowReady: boolean;
+  sevenDayStatisticsReady: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
 export interface RotationScanResult {
   ok: boolean;
   decision: RotationScanDecision;
@@ -461,7 +471,15 @@ export interface RotationScanResult {
   winner?: RotationCandidateId;
   rankedCandidateIds: RotationCandidateId[];
   diagnosticOrdering?: RotationCandidateId[];
+  readyCandidateRanking?: RotationCandidateId[];
   eligibleCandidateRanking?: RotationCandidateId[];
+  historyReady: boolean;
+  readyCandidateIds: RotationCandidateId[];
+  incompleteCandidateIds: RotationCandidateId[];
+  selectionCandidateIds: RotationCandidateId[];
+  selectionScope: "READY_CANDIDATES_ONLY";
+  candidateReadiness: RotationCandidateSelectionReadiness[];
+  historyDecisionReason: string;
   tiedCandidateIds?: RotationCandidateId[];
   economicFeasibility?: RotationEconomicFeasibility;
   noPiteasQuoteUsed: true;
@@ -2863,6 +2881,123 @@ function isRouteConnected(status: RotationRouteAvailabilityStatus): boolean {
     status === "both_directions";
 }
 
+const READY_SELECTION_ANALYSIS_MODES: ReadonlySet<RotationAnalysisMode> = new Set([
+  "DENSE_CANDLES",
+  "SPARSE_EVENT_TIME",
+]);
+
+function isCurrentSignalBlockingHistoryGap(gap: string): boolean {
+  const normalized = gap.toLowerCase();
+  if (normalized.includes("oldest stored record does not cross requested start boundary")) {
+    return false;
+  }
+  return true;
+}
+
+function isSourceFailureReadinessBlocker(blocker: string): boolean {
+  return /data source failure|candidate market data source failure|rpc range error|lock|failed|error|unsupported/i.test(blocker);
+}
+
+function metricAvailable(value: number | null | undefined): boolean {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function requiredSignalMetricsAvailable(row: RotationCandidateScanRow): boolean {
+  return metricAvailable(row.fiveMinuteReturnBps) &&
+    metricAvailable(row.fifteenMinuteReturnBps) &&
+    metricAvailable(row.oneHourReturnBps) &&
+    metricAvailable(row.sixHourReturnBps) &&
+    metricAvailable(row.distanceFromRollingOneHourHighBps) &&
+    metricAvailable(row.reboundFromMostRecentLocalLowBps) &&
+    metricAvailable(row.realizedVolatilityBps);
+}
+
+export function isCandidateReadyForSelection(
+  row: RotationCandidateScanRow,
+): RotationCandidateSelectionReadiness {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const historyQuality = row.historyQuality;
+
+  if (!historyQuality) {
+    blockers.push("historyQuality missing");
+  } else {
+    if (!historyQuality.readinessForLiveScanning) {
+      blockers.push("historyQuality.readinessForLiveScanning is false");
+    }
+    if (!READY_SELECTION_ANALYSIS_MODES.has(historyQuality.analysisMode)) {
+      blockers.push(`analysis mode ${historyQuality.analysisMode} is not selectable`);
+    }
+    if (historyQuality.sourceCompletenessPercent < 95) {
+      blockers.push("current 24-hour source completeness below 95%");
+    }
+    if (historyQuality.sourceTruncated) {
+      blockers.push("current 24-hour source range is truncated");
+    }
+    if (
+      historyQuality.latestTradeAgeMinutes === null ||
+      historyQuality.latestTradeAgeMinutes > FRESH_TRADE_MAX_AGE_MINUTES
+    ) {
+      blockers.push("latest trade is stale or unavailable");
+    }
+    if (historyQuality.actualTradeCount < SPARSE_MIN_ACTUAL_SWAPS) {
+      blockers.push("insufficient actual trade count");
+    }
+    if (
+      historyQuality.maximumObservedGapMinutes !== null &&
+      historyQuality.maximumObservedGapMinutes > SPARSE_MAX_GAP_MINUTES
+    ) {
+      blockers.push("excessive observed trade gap");
+    }
+    for (const gap of historyQuality.unresolvedGaps) {
+      if (isCurrentSignalBlockingHistoryGap(gap)) {
+        blockers.push(`history gap: ${gap}`);
+      } else {
+        warnings.push(`history gap: ${gap}`);
+      }
+    }
+  }
+
+  if (!row.addressValidation.ok) {
+    blockers.push("token identity validation failed");
+  }
+  if (!isRouteConnected(row.routeAvailabilityStatus)) {
+    blockers.push("route evidence missing in one or both directions");
+  }
+  if (!requiredSignalMetricsAvailable(row)) {
+    blockers.push("required entry metrics are unavailable");
+  }
+  if (row.rejectionReasons.includes("market data source failure")) {
+    blockers.push("candidate market data source failure");
+  }
+  if (row.rejectionReasons.includes("market evidence is stale or incomplete")) {
+    blockers.push("market evidence is stale or incomplete");
+  }
+
+  const currentSignalWindowReady = blockers.length === 0;
+  const sevenDayStatisticsReady = Boolean(
+    historyQuality &&
+      READY_SELECTION_ANALYSIS_MODES.has(historyQuality.analysisMode) &&
+      historyQuality.sourceCompletenessPercent >= 99.5 &&
+      !historyQuality.sourceTruncated &&
+      historyQuality.unresolvedGaps.length === 0 &&
+      historyQuality.priceContinuityPercent >= 95,
+  );
+  if (currentSignalWindowReady && !sevenDayStatisticsReady) {
+    warnings.push("seven-day statistics are incomplete or diagnostic-only");
+  }
+
+  return {
+    candidateId: row.candidateId,
+    ready: currentSignalWindowReady,
+    analysisMode: historyQuality?.analysisMode ?? null,
+    currentSignalWindowReady,
+    sevenDayStatisticsReady,
+    blockers: [...new Set(blockers)],
+    warnings: [...new Set(warnings)],
+  };
+}
+
 export function buildCandidateScanRow(input: {
   candidate: RotationCandidateRegistryEntry;
   tokenValidation: RotationTokenValidation;
@@ -2933,7 +3068,9 @@ export function buildCandidateScanRow(input: {
       rejectionReasons.push("excessive observed trade gap");
     }
     for (const gap of market.historyQuality.unresolvedGaps) {
-      rejectionReasons.push(`history gap: ${gap}`);
+      if (isCurrentSignalBlockingHistoryGap(gap)) {
+        rejectionReasons.push(`history gap: ${gap}`);
+      }
     }
   }
   if (market.dipReboundEvidence?.status === "AVAILABLE") {
@@ -3048,7 +3185,15 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
   winner?: RotationCandidateId;
   rankedCandidateIds: RotationCandidateId[];
   diagnosticOrdering: RotationCandidateId[];
+  readyCandidateRanking: RotationCandidateId[];
   eligibleCandidateRanking: RotationCandidateId[];
+  historyReady: boolean;
+  readyCandidateIds: RotationCandidateId[];
+  incompleteCandidateIds: RotationCandidateId[];
+  selectionCandidateIds: RotationCandidateId[];
+  selectionScope: "READY_CANDIDATES_ONLY";
+  candidateReadiness: RotationCandidateSelectionReadiness[];
+  historyDecisionReason: string;
   tiedCandidateIds?: RotationCandidateId[];
   reason?: string;
 } {
@@ -3059,39 +3204,77 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
       (a.aggregateLiquidityEusdc ?? a.aggregateLiquidityUsd);
     return liquidityDelta;
   });
-  const eligible = diagnostic.filter((row) => row.eligibility);
-  if (rows.some((row) => row.rejectionReasons.includes("market data source failure"))) {
+  const candidateReadiness = rows.map((row) => isCandidateReadyForSelection(row));
+  const readinessByCandidate = new Map(candidateReadiness.map((row) => [row.candidateId, row]));
+  const readyRows = diagnostic.filter((row) => readinessByCandidate.get(row.candidateId)?.ready);
+  const readyCandidateRanking = readyRows.map((row) => row.candidateId);
+  const readyCandidateIds = rows
+    .filter((row) => readinessByCandidate.get(row.candidateId)?.ready)
+    .map((row) => row.candidateId);
+  const incompleteCandidateIds = rows
+    .filter((row) => !readinessByCandidate.get(row.candidateId)?.ready)
+    .map((row) => row.candidateId);
+  const selectionCandidateIds = readyCandidateIds;
+  const selectionBase = {
+    diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+    readyCandidateRanking,
+    historyReady: readyRows.length > 0,
+    readyCandidateIds,
+    incompleteCandidateIds,
+    selectionCandidateIds,
+    selectionScope: "READY_CANDIDATES_ONLY" as const,
+    candidateReadiness,
+  };
+  const eligible = readyRows.filter((row) => row.eligibility);
+
+  if (
+    readyRows.length === 0 &&
+    candidateReadiness.length > 0 &&
+    candidateReadiness.every((row) => row.blockers.some(isSourceFailureReadinessBlocker))
+  ) {
     return {
       decision: "DATA_SOURCE_FAILURE",
       rankedCandidateIds: [],
-      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      ...selectionBase,
       eligibleCandidateRanking: [],
-      reason: "one or more candidate data sources failed",
+      historyDecisionReason: "all candidates are blocked by required source failures",
+      reason: "all candidates are blocked by required source failures",
     };
   }
-  if (rows.some((row) => row.rankingStatus === "UNRANKED_INCOMPLETE_HISTORY" ||
-    row.rejectionReasons.some((reason) =>
-      /insufficient candle coverage|pagination truncation|returnBps unavailable|volatility|source completeness|unusable price history|latest trade|trade count|history gap/i.test(reason),
-    ))) {
+  if (readyRows.length === 0) {
     return {
       decision: "INSUFFICIENT_HISTORY",
       rankedCandidateIds: [],
-      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      ...selectionBase,
       eligibleCandidateRanking: [],
-      reason: "candle coverage or required return metrics are insufficient",
+      historyDecisionReason: "no candidate has independently ready current signal-window history",
+      reason: "no candidate has independently ready current signal-window history",
     };
   }
   if (eligible.length === 0) {
-    const allInsufficient = rows.every((row) =>
+    const readyRejections = readyRows.flatMap((row) => row.rejectionReasons);
+    const allTargetEconomic = readyRows.length > 0 &&
+      readyRows.every((row) =>
+        row.rejectionReasons.some((reason) =>
+          /dynamic gross target|dynamic-target reversion|economic/i.test(reason),
+        ),
+      );
+    const allInsufficient = readyRows.every((row) =>
       row.rejectionReasons.some((reason) =>
         /evidence|liquidity|volume|route|declined|rebound|impact/i.test(reason),
       ),
     );
+    const decision: RotationScanDecision = allTargetEconomic
+      ? "TARGET_ECONOMICALLY_INFEASIBLE"
+      : allInsufficient || readyRejections.length > 0
+        ? "INSUFFICIENT_EVIDENCE"
+        : "HOLD_EUSDC";
     return {
-      decision: allInsufficient ? "INSUFFICIENT_EVIDENCE" : "HOLD_EUSDC",
+      decision,
       rankedCandidateIds: [],
-      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      ...selectionBase,
       eligibleCandidateRanking: [],
+      historyDecisionReason: "ready candidates exist; none satisfied the guarded entry signal",
       reason: "no candidate satisfied the guarded entry signal",
     };
   }
@@ -3101,9 +3284,10 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
     return {
       decision: "HOLD_EUSDC",
       rankedCandidateIds: [],
-      diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+      ...selectionBase,
       eligibleCandidateRanking: eligible.map((row) => row.candidateId),
       tiedCandidateIds: tied,
+      historyDecisionReason: "ready candidates were evaluated; eligible candidates tied",
       reason: "eligible candidates tied; no registry-order tie-break applied",
     };
   }
@@ -3111,8 +3295,9 @@ export function selectRotationWinner(rows: RotationCandidateScanRow[]): {
     decision: "CANDIDATE_SELECTED",
     winner: eligible[0]!.candidateId,
     rankedCandidateIds: eligible.map((row) => row.candidateId),
-    diagnosticOrdering: diagnostic.map((row) => row.candidateId),
+    ...selectionBase,
     eligibleCandidateRanking: eligible.map((row) => row.candidateId),
+    historyDecisionReason: "ready candidates were evaluated for selection",
   };
 }
 
@@ -5491,8 +5676,14 @@ export async function runEusdcRotationScan(
       scanInput,
       state,
       candidates: rows.map(stableScanPayload),
+      selectionScope: selection.selectionScope,
+      candidateReadiness: selection.candidateReadiness,
+      readyCandidateIds: selection.readyCandidateIds,
+      incompleteCandidateIds: selection.incompleteCandidateIds,
+      selectionCandidateIds: selection.selectionCandidateIds,
       decision: finalDecision,
       winner: selection.winner ?? null,
+      historyDecisionReason: selection.historyDecisionReason,
       economicFeasibility,
     }),
     quoteCallCount: quoteCounter.count,
@@ -5500,7 +5691,15 @@ export async function runEusdcRotationScan(
     ...(finalDecision === "CANDIDATE_SELECTED" && selection.winner ? { winner: selection.winner } : {}),
     rankedCandidateIds: finalDecision === "CANDIDATE_SELECTED" ? selection.rankedCandidateIds : [],
     diagnosticOrdering: selection.diagnosticOrdering,
+    readyCandidateRanking: selection.readyCandidateRanking,
     eligibleCandidateRanking: selection.eligibleCandidateRanking,
+    historyReady: selection.historyReady,
+    readyCandidateIds: selection.readyCandidateIds,
+    incompleteCandidateIds: selection.incompleteCandidateIds,
+    selectionCandidateIds: selection.selectionCandidateIds,
+    selectionScope: selection.selectionScope,
+    candidateReadiness: selection.candidateReadiness,
+    historyDecisionReason: selection.historyDecisionReason,
     ...(selection.tiedCandidateIds ? { tiedCandidateIds: selection.tiedCandidateIds } : {}),
     economicFeasibility,
     noPiteasQuoteUsed: true,
