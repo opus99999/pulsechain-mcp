@@ -25,10 +25,17 @@ import {
   PRVX_ADDRESS,
   analyzeRotationCandles,
   analyzeHistoricalReversions,
+  appendCompletedRecentRange,
   buildCandidateScanRow,
+  buildRecentSignalPoolTasks,
   buildFiveMinuteCandles,
   calculatePairLiquidityEusdc,
   calculatePriceContinuityPercent,
+  checkpointWindowMatches,
+  checkpointWouldStall,
+  classifyTipFreshness,
+  completedBlockCoveragePercent,
+  completedRangeFromReport,
   classifyHistoryAnalysisMode,
   computeScanEconomicFeasibility,
   computeRequiredFinalEusdcRaw,
@@ -51,6 +58,7 @@ import {
   resetEusdcRotationForTests,
   resolveEusdcRotationHistoryStorePath,
   resolveEusdcRotationRepositoryRoot,
+  rotationCheckpointProgressFingerprint,
   runEusdcRotationHistorySync,
   runEusdcRotationHistoryStatus,
   runEusdcRotationProposeEntry,
@@ -1767,6 +1775,214 @@ describe("eUSDC rotation public history sync primitives", () => {
       sourceVersion: "PULSEX_V1",
     });
     expect(swapQueryPlanForSourcePool(v1).version).not.toBe("v2");
+  });
+
+  it("orders recent signal refresh newest-edge pools anchor-first", () => {
+    const candidate = getRotationCandidate("PLSX");
+    const anchor = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x8ebe62d5e9d26b637673d91f56900233d6a4910d",
+        token0: WPLS_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "100000000000",
+        reserve1: "1000000",
+        reserveUSD: "2000000",
+      }),
+      sourceVersion: "PULSEX_V1",
+      liquidityEusdc: 2_000_000,
+    });
+    const direct = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x2000000000000000000000000000000000000002",
+        token0: PLSX_ADDRESS,
+        token1: EUSDC_TOKEN_ADDRESS,
+        reserve0: "1000000000",
+        reserve1: "2000000",
+        reserveUSD: "4000000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 4_000_000,
+    });
+    const candidateWpls = sourcePoolFixture({
+      pair: pairFixture({
+        id: "0x2000000000000000000000000000000000000003",
+        token0: PLSX_ADDRESS,
+        token1: WPLS_ADDRESS,
+        reserve0: "1000000000",
+        reserve1: "50000000000",
+        reserveUSD: "1500000",
+      }),
+      sourceVersion: "PULSEX_V2",
+      liquidityEusdc: 1_500_000,
+    });
+
+    const tasks = buildRecentSignalPoolTasks({
+      candidates: [candidate],
+      poolsByCandidate: new Map([["PLSX", [candidateWpls, direct, anchor]]]),
+    });
+
+    expect(tasks.map((task) => task.role)).toEqual([
+      "WPLS_EUSDC_ANCHOR",
+      "DIRECT_CANDIDATE_EUSDC",
+      "CANDIDATE_WPLS",
+    ]);
+    expect(tasks[0]?.poolAddress).toBe("0x8ebe62d5e9d26b637673d91f56900233d6a4910d");
+  });
+
+  it("keeps recent and historical checkpoints isolated by purpose and fixed window", () => {
+    const checkpoint = {
+      schemaVersion: 1,
+      resumeToken: "0x" + "11".repeat(32),
+      syncPurpose: "HISTORICAL_BACKFILL",
+      requestedWindow: {
+        startTime: "2026-08-01T00:00:00.000Z",
+        endTime: "2026-08-08T00:00:00.000Z",
+        lookbackMinutes: 10080,
+      },
+      completedBlockRanges: [],
+      completedPools: [],
+      storePath: "C:\\repo\\data\\eusdc-rotation-history\\market-history.json",
+      chainId: 369,
+      storeFingerprintBeforeRun: "0x" + "22".repeat(32),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    } as const;
+
+    expect(checkpointWindowMatches({
+      checkpoint,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedStartTime: "2026-08-07T00:00:00.000Z",
+      requestedEndTime: "2026-08-08T00:00:00.000Z",
+      lookbackMinutes: 1440,
+      candidateIds: ["PLS"],
+      storePath: checkpoint.storePath,
+      chainId: 369,
+    })).toBe(false);
+
+    const recentCheckpoint = {
+      ...checkpoint,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: "2026-08-07T00:00:00.000Z",
+        endTime: "2026-08-08T00:00:00.000Z",
+        lookbackMinutes: 1440,
+      },
+      candidateIds: ["PLS"],
+    } as const;
+    expect(checkpointWindowMatches({
+      checkpoint: recentCheckpoint,
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedStartTime: "2026-08-07T00:00:00.000Z",
+      requestedEndTime: "2026-08-08T00:05:00.000Z",
+      lookbackMinutes: 1440,
+      candidateIds: ["PLS"],
+      storePath: checkpoint.storePath,
+      chainId: 369,
+    })).toBe(false);
+  });
+
+  it("advances checkpoint coverage for zero-log ranges without changing resume token semantics falsely", () => {
+    const pool = "0x6753560538eca67617a9ce605178f788be7e524e" as const;
+    const completed = completedRangeFromReport({
+      candidateId: "PLS",
+      report: {
+        poolAddress: pool,
+        sourceVersion: "PULSEX_V1",
+        eventAdapter: "PULSEX_V2_STYLE_SWAP",
+        scannedFromBlock: "100",
+        scannedToBlock: "199",
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        duplicateRecordsIgnored: 0,
+        sourceEndpoint: "https://example.com/v1",
+        completedRangeScanned: true,
+      },
+      completedAt: "2026-08-08T00:00:00.000Z",
+    });
+    expect(completed).not.toBeNull();
+    expect(completed?.resultCount).toBe(0);
+    const checkpoint = {
+      schemaVersion: 1,
+      resumeToken: "0x" + "33".repeat(32),
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      requestedWindow: {
+        startTime: "2026-08-07T00:00:00.000Z",
+        endTime: "2026-08-08T00:00:00.000Z",
+        lookbackMinutes: 1440,
+      },
+      completedBlockRanges: [],
+      completedPools: [],
+      phase: "SIGNAL_WINDOW_BACKFILL",
+      storeFingerprintBeforeRun: "0x" + "44".repeat(32),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    } as const;
+    const before = rotationCheckpointProgressFingerprint({
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      phase: "SIGNAL_WINDOW_BACKFILL",
+      candidateId: "PLS",
+      poolAddress: pool,
+      nextBlock: "99",
+      completedBlockRanges: [],
+      anchorTipComplete: true,
+    });
+    const appended = appendCompletedRecentRange({
+      checkpoint: { ...checkpoint, progressFingerprint: before },
+      completedRange: completed!,
+      phase: "SIGNAL_WINDOW_BACKFILL",
+      nextBlock: "99",
+      taskIndex: 0,
+      anchorTipComplete: true,
+      updatedAt: "2026-08-08T00:01:00.000Z",
+    });
+
+    expect(appended.checkpoint.completedBlockRanges).toHaveLength(1);
+    expect(appended.advanced).toBe(true);
+    expect(completedBlockCoveragePercent({
+      completedRanges: appended.checkpoint.completedBlockRanges,
+      candidateId: "PLS",
+      poolAddress: pool,
+      sourceVersion: "PULSEX_V1",
+      fromBlock: 100n,
+      toBlock: 199n,
+    })).toBe(100);
+    expect(completedBlockCoveragePercent({
+      completedRanges: appended.checkpoint.completedBlockRanges,
+      candidateId: "PLS",
+      poolAddress: pool,
+      sourceVersion: "PULSEX_V1",
+      fromBlock: 100n,
+      toBlock: 299n,
+    })).toBeCloseTo(50, 4);
+  });
+
+  it("detects stalled checkpoints and separates pipeline-stale from quiet markets", () => {
+    const same = "0x" + "55".repeat(32) as `0x${string}`;
+    expect(checkpointWouldStall({
+      code: "PARTIAL_PROGRESS",
+      previousProgressFingerprint: same,
+      nextProgressFingerprint: same,
+    })).toBe(true);
+    expect(checkpointWouldStall({
+      code: "PARTIAL_PROGRESS",
+      previousProgressFingerprint: same,
+      nextProgressFingerprint: "0x" + "56".repeat(32) as `0x${string}`,
+    })).toBe(false);
+    expect(classifyTipFreshness({
+      tipScanned: false,
+      recentTradesFound: false,
+    })).toBe("PIPELINE_STALE");
+    expect(classifyTipFreshness({
+      tipScanned: true,
+      recentTradesFound: false,
+    })).toBe("MARKET_QUIET");
+    expect(classifyTipFreshness({
+      tipScanned: true,
+      recentTradesFound: true,
+    })).toBe("TIP_SCANNED_RECENT_TRADES_FOUND");
+    expect(classifyTipFreshness({
+      tipScanned: true,
+      recentTradesFound: true,
+      anchorComplete: false,
+    })).toBe("ANCHOR_TIP_INCOMPLETE");
   });
 
   it("proves complete empty-trade ranges from scanned block boundaries, not observed swaps", () => {

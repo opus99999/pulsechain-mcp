@@ -160,7 +160,7 @@ describe("protocol bootstrap: dual-era createMcpHandler", () => {
     });
   });
 
-  it("lists all 110 tools and 5 resources on modern path with serverInfo stamp", async () => {
+  it("lists all 111 tools and 5 resources on modern path with serverInfo stamp", async () => {
     const handler = createMcpHandler(() => createServer(smokeConfig), {
       legacy: "stateless",
     });
@@ -171,13 +171,14 @@ describe("protocol bootstrap: dual-era createMcpHandler", () => {
       tools: Array<{ name: string }>;
       _meta?: Record<string, unknown>;
     };
-    expect(toolsResult.tools.length).toBe(110);
+    expect(toolsResult.tools.length).toBe(111);
     expect(toolsResult._meta?.[SERVER_INFO_META_KEY]).toEqual({
       name: SERVER_NAME,
       version: SERVER_VERSION,
     });
 
     const names = new Set(toolsResult.tools.map((t) => t.name));
+    expect(names.has("eusdc_rotation_recent_refresh")).toBe(true);
     expect(names.has("pulsechain_health")).toBe(true);
     expect(names.has("phiat_dashboard")).toBe(true);
     expect(names.has("phiat_shadow_buy")).toBe(true);

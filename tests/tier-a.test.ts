@@ -792,6 +792,6 @@ describe("Tier A tool registration", () => {
       expect(t?.write).toBe(false);
     }
     // Prior inventory + in-process Piteas wallet proposal + six rotation tools + two history tools
-    expect(meta.length).toBe(110);
+    expect(meta.length).toBe(111);
   });
 });

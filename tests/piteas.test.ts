@@ -467,6 +467,6 @@ describe("Piteas tool registration", () => {
     expect(proposalTool?.category).toBe("wallet");
     expect(proposalTool?.write).toBe(true);
     expect(proposalTool?.description).toMatch(/never signs|raw calldata/i);
-    expect(meta.length).toBe(110);
+    expect(meta.length).toBe(111);
   });
 });

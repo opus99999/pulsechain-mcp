@@ -615,6 +615,6 @@ describe("Switch tool registration", () => {
       /piteas|SWITCH_API_KEY|request-api-key/i,
     );
     // Existing inventory plus in-process Piteas wallet proposal, rotation tools, and history tools.
-    expect(meta.length).toBe(110);
+    expect(meta.length).toBe(111);
   });
 });

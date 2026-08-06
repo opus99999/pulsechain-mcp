@@ -13,20 +13,30 @@ The v1 rotation engine scans exactly five eUSDC-facing candidates every cycle:
 The normal read-only workflow is:
 
 ```text
-eusdc_rotation_history_sync
+eusdc_rotation_recent_refresh
 eusdc_rotation_history_status
 eusdc_rotation_scan
 ```
 
+Historical repair and seven-day statistics still use:
+
+```text
+eusdc_rotation_history_sync
+```
+
+`eusdc_rotation_recent_refresh` is the live signal-window refresher. It uses `syncPurpose: RECENT_SIGNAL_WINDOW`, a fixed requested window for resume tokens, newest-edge-first block scheduling, and WPLS/eUSDC anchor-first pool ordering. It refreshes the tip interval before older current-window gaps, then backfills from the newest unscanned range toward the 24-hour start boundary. It writes only public market-history records and public checkpoint metadata, calls Piteas zero times, creates no approval or proposal, and performs no signing or broadcast.
+
 `eusdc_rotation_history_sync` backfills public market history into `data/eusdc-rotation-history/`. The store contains only normalized public chain data: chain id, candidate id, pool address, protocol, block/transaction/log identifiers, timestamp, token addresses, raw swap amounts, candidate/eUSDC price, eUSDC notional, source, and fetch timestamp. It must not contain wallet keys, wallet records, `.env.wallet` contents, credentials, signed transactions, approvals, proposals, or execution state.
 
-History sync is bounded and resumable. The sync input accepts `maximumRuntimeMs` (default `180000`, capped below the Codex host tool timeout), optional `candidateIds`, optional `maximumPoolsPerRun`, and optional `resumeToken`. If the runtime budget is nearly exhausted, the tool returns `PARTIAL_PROGRESS`, releases `market-history.lock`, writes any idempotently merged public records, and persists a public checkpoint at:
+History sync and recent refresh are bounded and resumable. The historical sync input accepts `maximumRuntimeMs` (default `180000`, capped below the Codex host tool timeout), optional `candidateIds`, optional `maximumPoolsPerRun`, optional `resumeToken`, and `syncPurpose` (`HISTORICAL_BACKFILL` by default). Recent refresh accepts `lookbackMinutes`, `tipRefreshMinutes`, `candidateIds`, `maximumRuntimeMs`, `maximumBlocksPerChunk`, `maximumPoolsPerRun`, `resumeToken`, and `forceRecentBlockRecheck`. If the runtime budget is nearly exhausted, the tool returns `PARTIAL_PROGRESS`, releases `market-history.lock`, writes any idempotently merged public records, and persists a public checkpoint at:
 
 ```text
 <resolved history directory>/sync-checkpoint.json
 ```
 
-The checkpoint contains only public metadata: schema version, requested window, candidate/pool cursor, next block when applicable, completed block ranges, source cursor, the pre-run store fingerprint, and update time. A later sync with the returned `resumeToken` resumes from the checkpoint instead of restarting completed work. There is no hidden continuation after the tool response ends.
+The checkpoint contains only public metadata: schema version, sync purpose, requested window, resolved block window, candidate set, required pool set, store path, chain id, candidate/pool cursor, phase, next block when applicable, completed block ranges, source cursor, the pre-run store fingerprint, progress fingerprint, and update time. A later call with the returned `resumeToken` resumes from the checkpoint instead of restarting completed work. A seven-day historical token is rejected for a 24-hour recent refresh, and a recent token for a different fixed end block/window returns `CHECKPOINT_WINDOW_MISMATCH`. There is no hidden continuation after the tool response ends.
+
+Recent refresh checkpoint progress is block-range based, not record-count based. A successful empty, duplicate-only, or out-of-retention range is still persisted as completed coverage and advances the next block. Returned progress includes `blocksScanned`, `rangesCompleted`, `rangesWithZeroLogs`, `recordsRetrieved`, `recordsAdded`, `duplicateRecordsIgnored`, `checkpointAdvanced`, tip lag before/after, and progress fingerprints. If two consecutive bounded calls return `PARTIAL_PROGRESS` with the same effective checkpoint fingerprint, the tool returns `CHECKPOINT_STALLED` with the repeated candidate, pool, range, and next-block evidence instead of issuing a new-looking resume token.
 
 Existing public history records are preserved during sync. The retention window is applied to newly fetched records before insertion, but an older record already present in the authoritative store is not pruned or moved by routine synchronization.
 
@@ -62,6 +72,8 @@ Source-boundary proof is based on the queried block interval, not the timestamp 
 
 Supported price-history shapes are direct candidate/eUSDC, WPLS/eUSDC anchor, and candidate/WPLS anchored pricing. Candidate/WPLS RPC logs do not require eUSDC in the same pool: sync retrieves WPLS/eUSDC anchor observations, aligns by block number when possible, otherwise uses a bounded timestamp distance, rejects stale or missing anchors, and stores anchored RPC provenance plus anchor age.
 
+Recent refresh processes shared WPLS/eUSDC anchors before direct candidate/eUSDC pools, candidate/WPLS pools, and optional diagnostic pools. Candidate/WPLS records are not considered current when the corresponding anchor tip is incomplete.
+
 The scanner builds five-minute candles over the requested lookback from persisted public history when available. Swaps are deduplicated by chain id, transaction hash, and log index, sorted chronologically, converted into candidate/eUSDC observations, and aggregated into OHLCV candles. Direct candidate/eUSDC swaps are preferred. Candidate/WPLS prices are multiplied by historical WPLS/eUSDC anchor observations only when the anchor is within a bounded timestamp window; stale anchors are rejected.
 
 Coverage has separate meanings:
@@ -77,6 +89,8 @@ priceContinuityPercent            = buckets with a usable bounded carry-forward 
 Sparse carry-forward may support chart continuity and elapsed-time calculations, but it is not counted as a trade, volume, new high, new low, dip, or rebound.
 
 Pools are classified as `REQUIRED_PRICE_POOL`, `OPTIONAL_DIAGNOSTIC_POOL`, or `EXCLUDED_POOL`. Required price pools must have supported bytecode/factory/adapter semantics, positive priced reserves, fresh activity, enough liquidity/volume contribution, and bounded price dispersion. Optional diagnostic pools and tiny/stale/unsupported pools are still reported, but they do not permanently poison candidate source completeness. Current 24-hour signal readiness is evaluated separately from seven-day reversion-statistics readiness.
+
+Freshness diagnostics distinguish an unrefreshed pipeline from a quiet market. `PIPELINE_STALE` means the required tip was not scanned; `ANCHOR_TIP_INCOMPLETE` and `REQUIRED_POOL_TIP_INCOMPLETE` identify incomplete required sources; `MARKET_QUIET` means the required tip range was scanned successfully and no recent trade was found. Status reports tip freshness, tip completeness, current signal-window completeness, seven-day completeness, latest stored trade age, latest source trade age, pipeline lag, required-pool completeness, and analysis mode separately.
 
 Pool liquidity is consolidated from human-unit reserves and independently derived token prices:
 

@@ -672,8 +672,28 @@ export type RotationHistorySyncCode =
   | "COMPLETE"
   | "PARTIAL_PROGRESS"
   | "HISTORY_SYNC_BUSY"
+  | "CHECKPOINT_WINDOW_MISMATCH"
+  | "CHECKPOINT_STALLED"
   | "SOURCE_ERROR"
   | RotationHistoryStoreReviewCode;
+
+export type RotationHistorySyncPurpose =
+  | "RECENT_SIGNAL_WINDOW"
+  | "HISTORICAL_BACKFILL";
+
+export type RotationRecentRefreshPhase =
+  | "TIP_REFRESH"
+  | "SIGNAL_WINDOW_BACKFILL"
+  | "SIGNAL_WINDOW_COMPLETE";
+
+export type RotationTipFreshnessStatus =
+  | "TIP_NOT_SCANNED"
+  | "TIP_SCANNED_NO_RECENT_TRADES"
+  | "TIP_SCANNED_RECENT_TRADES_FOUND"
+  | "ANCHOR_TIP_INCOMPLETE"
+  | "REQUIRED_POOL_TIP_INCOMPLETE"
+  | "PIPELINE_STALE"
+  | "MARKET_QUIET";
 
 export interface RotationHistorySourcePoolRef {
   pair: SubgraphPair;
@@ -721,10 +741,21 @@ export interface RotationHistoryPoolSyncStatus {
   exactRemainingTruncationCause?: string;
   retrievalCompletenessPercent?: number;
   signalWindowCompletenessPercent?: number;
+  tipFreshnessStatus?: RotationTipFreshnessStatus;
+  tipCompletenessPercent?: number;
+  tipLagBlocks?: number;
+  tipLagMinutes?: number;
+  latestSourceTradeTimestamp?: string | null;
+  lastScannedBlockTimestamp?: string | null;
   timestampResolutionMaxErrorSeconds?: number;
   rpcRecordsRetrieved?: number;
   anchorRecordsUsed?: number;
   unsupportedLogs?: number;
+  blocksScanned?: number;
+  logsRetrieved?: number;
+  validRecordsProduced?: number;
+  recordsAdded?: number;
+  duplicateRecordsIgnored?: number;
   errors?: string[];
   nextResumeBlock?: string | null;
   elapsedMs?: number;
@@ -747,6 +778,7 @@ export interface RotationHistoryPoolSyncStatus {
     | "RPC_LOG_RANGE_LIMITATION"
     | "PARTIAL_PROGRESS"
     | "SOURCE_ERROR";
+  completedRangeScanned?: boolean;
   sourceRepeatsOrCapsRecords: boolean;
   historicalPaginationReliable: boolean;
   fallbackUsed?: "NONE" | "RPC_ETH_GETLOGS";
@@ -756,6 +788,7 @@ export interface RotationHistoryPoolSyncStatus {
 
 export interface RotationHistoryCandidateSyncStatus {
   candidateId: RotationCandidateId;
+  syncPurpose?: RotationHistorySyncPurpose;
   recordsAdded: number;
   recordsUpdated: number;
   duplicateRecordsIgnored: number;
@@ -766,6 +799,12 @@ export interface RotationHistoryCandidateSyncStatus {
   retrievalCompletenessPercent?: number;
   signalWindowCompletenessPercent?: number;
   sevenDayCompletenessPercent?: number;
+  tipFreshnessStatus?: RotationTipFreshnessStatus;
+  tipCompletenessPercent?: number;
+  latestSourceTradeAgeMinutes?: number | null;
+  pipelineLagMinutes?: number | null;
+  requiredPoolsComplete?: boolean;
+  anchorTipComplete?: boolean;
   unresolvedGaps: string[];
   pools: RotationHistoryPoolSyncStatus[];
 }
@@ -807,11 +846,23 @@ export interface RotationHistoryPathDiagnostics {
 export interface RotationHistorySyncCheckpoint {
   schemaVersion: 1;
   resumeToken: string;
+  syncPurpose?: RotationHistorySyncPurpose;
   requestedWindow: {
     startTime: string;
     endTime: string;
     lookbackMinutes: number;
   };
+  resolvedStartBlock?: string;
+  resolvedEndBlock?: string;
+  candidateIds?: RotationCandidateId[];
+  requiredPoolSet?: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    sourceVersion: RotationHistorySourceVersion;
+  }>;
+  storePath?: string;
+  chainId?: number;
+  phase?: RotationRecentRefreshPhase;
   candidateId?: RotationCandidateId;
   poolAddress?: `0x${string}`;
   nextBlock?: string;
@@ -821,6 +872,13 @@ export interface RotationHistorySyncCheckpoint {
     sourceVersion: RotationHistorySourceVersion;
     fromBlock: string;
     toBlock: string;
+    resultCount?: number;
+    validRecordCount?: number;
+    duplicateCount?: number;
+    completedAt?: string;
+    source?: string;
+    adapter?: RotationHistoryEventAdapter;
+    success?: boolean;
   }>;
   completedPools: Array<{
     candidateId: RotationCandidateId;
@@ -830,6 +888,27 @@ export interface RotationHistorySyncCheckpoint {
   sourceCursor?: {
     candidateIndex: number;
     poolIndex: number;
+    taskIndex?: number;
+  };
+  lastAttemptedRange?: {
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
+  };
+  lastSuccessfullyScannedRange?: {
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
+  };
+  progressFingerprint?: `0x${string}`;
+  previousProgressFingerprint?: `0x${string}`;
+  repeatedRange?: {
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
   };
   storeFingerprintBeforeRun: `0x${string}`;
   updatedAt: string;
@@ -842,6 +921,7 @@ export interface RotationHistoryFile {
   retentionDays: number;
   records: RotationHistoryRecord[];
   lastSync?: {
+    syncPurpose?: RotationHistorySyncPurpose;
     requestedStartTime: string;
     requestedEndTime: string;
     historyStoreFingerprint: `0x${string}`;
@@ -858,6 +938,29 @@ export interface RotationHistorySyncInput {
   candidateIds?: RotationCandidateId[];
   resumeToken?: string;
   maximumPoolsPerRun?: number;
+  syncPurpose?: RotationHistorySyncPurpose;
+}
+
+export interface RotationRecentRefreshInput {
+  lookbackMinutes?: number;
+  candidateIds?: RotationCandidateId[];
+  tipRefreshMinutes?: number;
+  maximumRuntimeMs?: number;
+  maximumBlocksPerChunk?: number;
+  maximumPoolsPerRun?: number;
+  resumeToken?: string;
+  forceRecentBlockRecheck?: boolean;
+}
+
+export interface RotationRecentRefreshResult extends RotationHistorySyncResult {
+  syncPurpose: "RECENT_SIGNAL_WINDOW";
+  tipRefreshMinutes: number;
+  phase: RotationRecentRefreshPhase;
+  anchorTipComplete: boolean;
+  anchorLatestBlock: string | null;
+  anchorLatestTimestamp: string | null;
+  anchorLagBlocks: number | null;
+  anchorLagMinutes: number | null;
 }
 
 export interface RotationHistorySyncResult {
@@ -878,6 +981,24 @@ export interface RotationHistorySyncResult {
   latestTimestamp: string | null;
   sourceCompleteness: RotationHistoryCandidateSyncStatus[];
   unresolvedGaps: string[];
+  syncPurpose?: RotationHistorySyncPurpose;
+  blocksScanned?: number;
+  rangesCompleted?: number;
+  rangesWithZeroLogs?: number;
+  recordsRetrieved?: number;
+  checkpointAdvanced?: boolean;
+  tipLagBlocksBefore?: number | null;
+  tipLagBlocksAfter?: number | null;
+  tipLagMinutesBefore?: number | null;
+  tipLagMinutesAfter?: number | null;
+  progressFingerprintBefore?: `0x${string}` | null;
+  progressFingerprintAfter?: `0x${string}` | null;
+  repeatedRange?: {
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
+  };
   repositoryRoot: string;
   currentWorkingDirectory: string;
   historyStoreDirectory: string;
@@ -908,6 +1029,13 @@ export interface RotationHistoryCandidateStatus {
   analysisMode: RotationAnalysisMode;
   latestTradeAgeMinutes: number | null;
   unresolvedGaps: string[];
+  tipFreshnessStatus?: RotationTipFreshnessStatus;
+  tipCompletenessPercent?: number;
+  currentSignalWindowCompletenessPercent?: number;
+  sevenDayCompletenessPercent?: number;
+  latestSourceTradeAgeMinutes?: number | null;
+  pipelineLagMinutes?: number | null;
+  requiredPoolsComplete?: boolean;
   readinessForLiveScanning: boolean;
 }
 
@@ -2623,7 +2751,8 @@ function sourceCompletenessForRecords(input: {
     pool.truncationReason === "SPARSE_ACTUAL_TRADING" ||
     pool.truncationReason === "STALE_POOL"
   );
-  const percent = input.syncStatus?.boundaryCrossed || requiredRangeComplete
+  const recentSignalOnly = input.syncStatus?.syncPurpose === "RECENT_SIGNAL_WINDOW";
+  const percent = input.syncStatus?.boundaryCrossed || (requiredRangeComplete && !recentSignalOnly)
     ? 100
     : round(Math.max(spanPercent, statusPercent ?? 0), 4);
   const truncated = completenessPools.length > 0
@@ -3696,6 +3825,317 @@ function selectedSourcePools(
   return [...required, ...optional].slice(0, 6);
 }
 
+function recentPoolPriority(candidate: RotationCandidateRegistryEntry, ref: RotationHistorySourcePoolRef): number {
+  const candidateToken = candidate.executionTokenAddress.toLowerCase();
+  if (pairMatches(ref.pair, WPLS_ADDRESS, EUSDC_ADDRESS)) return 0;
+  if (pairMatches(ref.pair, candidateToken, EUSDC_ADDRESS)) return 1;
+  if (pairMatches(ref.pair, candidateToken, WPLS_ADDRESS)) return 2;
+  if (ref.classification === "REQUIRED_PRICE_POOL") return 3;
+  if (ref.classification === "OPTIONAL_DIAGNOSTIC_POOL") return 4;
+  return 5;
+}
+
+export function prioritizeRecentSignalPools(
+  candidate: RotationCandidateRegistryEntry,
+  refs: RotationHistorySourcePoolRef[],
+): RotationHistorySourcePoolRef[] {
+  return selectedSourcePools(candidate, refs)
+    .sort((a, b) => {
+      const priority = recentPoolPriority(candidate, a) - recentPoolPriority(candidate, b);
+      if (priority !== 0) return priority;
+      const required = Number(b.classification === "REQUIRED_PRICE_POOL") -
+        Number(a.classification === "REQUIRED_PRICE_POOL");
+      if (required !== 0) return required;
+      return b.liquidityEusdc - a.liquidityEusdc;
+    });
+}
+
+export type RotationRecentPoolRole =
+  | "WPLS_EUSDC_ANCHOR"
+  | "DIRECT_CANDIDATE_EUSDC"
+  | "CANDIDATE_WPLS"
+  | "OPTIONAL_DIAGNOSTIC";
+
+export interface RotationRecentPoolTask {
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  sourceVersion: RotationHistorySourceVersion;
+  role: RotationRecentPoolRole;
+  sourcePool: RotationHistorySourcePoolRef;
+}
+
+function recentPoolRole(
+  candidate: RotationCandidateRegistryEntry,
+  ref: RotationHistorySourcePoolRef,
+): RotationRecentPoolRole {
+  const candidateToken = candidate.executionTokenAddress.toLowerCase();
+  if (pairMatches(ref.pair, WPLS_ADDRESS, EUSDC_ADDRESS)) return "WPLS_EUSDC_ANCHOR";
+  if (pairMatches(ref.pair, candidateToken, EUSDC_ADDRESS)) return "DIRECT_CANDIDATE_EUSDC";
+  if (pairMatches(ref.pair, candidateToken, WPLS_ADDRESS)) return "CANDIDATE_WPLS";
+  return "OPTIONAL_DIAGNOSTIC";
+}
+
+function recentPoolRolePriority(role: RotationRecentPoolRole): number {
+  switch (role) {
+    case "WPLS_EUSDC_ANCHOR":
+      return 0;
+    case "DIRECT_CANDIDATE_EUSDC":
+      return 1;
+    case "CANDIDATE_WPLS":
+      return 2;
+    case "OPTIONAL_DIAGNOSTIC":
+      return 3;
+  }
+}
+
+export function buildRecentSignalPoolTasks(input: {
+  candidates: RotationCandidateRegistryEntry[];
+  poolsByCandidate: Map<RotationCandidateId, RotationHistorySourcePoolRef[]>;
+}): RotationRecentPoolTask[] {
+  const candidateOrder = new Map(input.candidates.map((candidate, index) => [candidate.candidateId, index]));
+  const tasks: RotationRecentPoolTask[] = [];
+  for (const candidate of input.candidates) {
+    for (const sourcePool of prioritizeRecentSignalPools(
+      candidate,
+      input.poolsByCandidate.get(candidate.candidateId) ?? [],
+    )) {
+      tasks.push({
+        candidateId: candidate.candidateId,
+        poolAddress: sourcePool.pair.id.toLowerCase() as `0x${string}`,
+        sourceVersion: sourcePool.sourceVersion,
+        role: recentPoolRole(candidate, sourcePool),
+        sourcePool,
+      });
+    }
+  }
+  return tasks.sort((a, b) => {
+    const role = recentPoolRolePriority(a.role) - recentPoolRolePriority(b.role);
+    if (role !== 0) return role;
+    const required = Number(b.sourcePool.classification === "REQUIRED_PRICE_POOL") -
+      Number(a.sourcePool.classification === "REQUIRED_PRICE_POOL");
+    if (required !== 0) return required;
+    const candidate = (candidateOrder.get(a.candidateId) ?? 0) - (candidateOrder.get(b.candidateId) ?? 0);
+    if (candidate !== 0) return candidate;
+    return b.sourcePool.liquidityEusdc - a.sourcePool.liquidityEusdc;
+  });
+}
+
+export function rotationCheckpointProgressFingerprint(input: {
+  syncPurpose: RotationHistorySyncPurpose;
+  phase: RotationRecentRefreshPhase;
+  candidateId?: RotationCandidateId;
+  poolAddress?: `0x${string}`;
+  nextBlock?: string | null;
+  completedBlockRanges: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    fromBlock: string;
+    toBlock: string;
+  }>;
+  anchorTipComplete?: boolean;
+}): `0x${string}` {
+  return fingerprint({
+    syncPurpose: input.syncPurpose,
+    phase: input.phase,
+    candidateId: input.candidateId ?? null,
+    poolAddress: input.poolAddress?.toLowerCase() ?? null,
+    nextBlock: input.nextBlock ?? null,
+    anchorTipComplete: input.anchorTipComplete ?? false,
+    completedBlockRanges: input.completedBlockRanges.map((range) => ({
+      c: range.candidateId,
+      p: range.poolAddress.toLowerCase(),
+      f: range.fromBlock,
+      t: range.toBlock,
+    })),
+  });
+}
+
+export function completedRangeFromReport(input: {
+  candidateId: RotationCandidateId;
+  report: Pick<
+    RotationHistoryPoolSyncStatus,
+    | "poolAddress"
+    | "sourceVersion"
+    | "eventAdapter"
+    | "scannedFromBlock"
+    | "scannedToBlock"
+    | "totalRecordsRetrieved"
+    | "deduplicatedRecords"
+    | "sourceEndpoint"
+    | "completedRangeScanned"
+  > & { duplicateRecordsIgnored?: number };
+  completedAt: string;
+}): RotationHistorySyncCheckpoint["completedBlockRanges"][number] | null {
+  if (!input.report.scannedFromBlock || !input.report.scannedToBlock || input.report.completedRangeScanned === false) {
+    return null;
+  }
+  return {
+    candidateId: input.candidateId,
+    poolAddress: input.report.poolAddress,
+    sourceVersion: input.report.sourceVersion ?? "UNKNOWN",
+    fromBlock: input.report.scannedFromBlock,
+    toBlock: input.report.scannedToBlock,
+    resultCount: input.report.totalRecordsRetrieved,
+    validRecordCount: input.report.deduplicatedRecords,
+    duplicateCount: input.report.duplicateRecordsIgnored ?? 0,
+    completedAt: input.completedAt,
+    source: input.report.sourceEndpoint,
+    adapter: input.report.eventAdapter,
+    success: true,
+  };
+}
+
+export function completedBlockCoveragePercent(input: {
+  completedRanges: Array<{
+    candidateId: RotationCandidateId;
+    poolAddress: `0x${string}`;
+    sourceVersion: RotationHistorySourceVersion;
+    fromBlock: string;
+    toBlock: string;
+    success?: boolean;
+  }>;
+  candidateId: RotationCandidateId;
+  poolAddress: `0x${string}`;
+  sourceVersion: RotationHistorySourceVersion;
+  fromBlock: bigint;
+  toBlock: bigint;
+}): number {
+  if (input.toBlock < input.fromBlock) return 100;
+  const ranges = input.completedRanges
+    .filter((range) =>
+      range.success !== false &&
+      range.candidateId === input.candidateId &&
+      sameAddress(range.poolAddress, input.poolAddress) &&
+      range.sourceVersion === input.sourceVersion,
+    )
+    .map((range) => ({
+      from: BigInt(range.fromBlock) < input.fromBlock ? input.fromBlock : BigInt(range.fromBlock),
+      to: BigInt(range.toBlock) > input.toBlock ? input.toBlock : BigInt(range.toBlock),
+    }))
+    .filter((range) => range.from <= range.to)
+    .sort((a, b) => a.from < b.from ? -1 : a.from > b.from ? 1 : 0);
+  let covered = 0n;
+  let active: { from: bigint; to: bigint } | null = null;
+  for (const range of ranges) {
+    if (!active) {
+      active = { ...range };
+      continue;
+    }
+    if (range.from <= active.to + 1n) {
+      if (range.to > active.to) active.to = range.to;
+      continue;
+    }
+    covered += active.to - active.from + 1n;
+    active = { ...range };
+  }
+  if (active) covered += active.to - active.from + 1n;
+  const total = input.toBlock - input.fromBlock + 1n;
+  return round(Number(covered) / Number(total) * 100, 4);
+}
+
+export function appendCompletedRecentRange(input: {
+  checkpoint: RotationHistorySyncCheckpoint;
+  completedRange: RotationHistorySyncCheckpoint["completedBlockRanges"][number];
+  phase: RotationRecentRefreshPhase;
+  nextBlock?: string | null;
+  taskIndex: number;
+  anchorTipComplete: boolean;
+  updatedAt: string;
+}): { checkpoint: RotationHistorySyncCheckpoint; progressFingerprint: `0x${string}`; advanced: boolean } {
+  const rangeKey = (range: RotationHistorySyncCheckpoint["completedBlockRanges"][number]) =>
+    `${range.candidateId}:${range.poolAddress.toLowerCase()}:${range.sourceVersion}:${range.fromBlock}:${range.toBlock}`;
+  const before = new Set(input.checkpoint.completedBlockRanges.map(rangeKey));
+  const completedBlockRanges = before.has(rangeKey(input.completedRange))
+    ? input.checkpoint.completedBlockRanges
+    : [...input.checkpoint.completedBlockRanges, input.completedRange];
+  const progressFingerprint = rotationCheckpointProgressFingerprint({
+    syncPurpose: input.checkpoint.syncPurpose ?? "HISTORICAL_BACKFILL",
+    phase: input.phase,
+    candidateId: input.completedRange.candidateId,
+    poolAddress: input.completedRange.poolAddress,
+    nextBlock: input.nextBlock ?? null,
+    completedBlockRanges,
+    anchorTipComplete: input.anchorTipComplete,
+  });
+  return {
+    checkpoint: {
+      ...input.checkpoint,
+      phase: input.phase,
+      candidateId: input.completedRange.candidateId,
+      poolAddress: input.completedRange.poolAddress,
+      nextBlock: input.nextBlock ?? undefined,
+      completedBlockRanges,
+      sourceCursor: {
+        candidateIndex: input.taskIndex,
+        poolIndex: 0,
+        taskIndex: input.taskIndex,
+      },
+      lastSuccessfullyScannedRange: {
+        candidateId: input.completedRange.candidateId,
+        poolAddress: input.completedRange.poolAddress,
+        fromBlock: input.completedRange.fromBlock,
+        toBlock: input.completedRange.toBlock,
+      },
+      previousProgressFingerprint: input.checkpoint.progressFingerprint,
+      progressFingerprint,
+      updatedAt: input.updatedAt,
+    },
+    progressFingerprint,
+    advanced: progressFingerprint !== input.checkpoint.progressFingerprint,
+  };
+}
+
+export function checkpointWouldStall(input: {
+  previousProgressFingerprint?: `0x${string}` | null;
+  nextProgressFingerprint?: `0x${string}` | null;
+  code: RotationHistorySyncCode;
+}): boolean {
+  return input.code === "PARTIAL_PROGRESS" &&
+    input.previousProgressFingerprint !== undefined &&
+    input.previousProgressFingerprint !== null &&
+    input.nextProgressFingerprint !== undefined &&
+    input.nextProgressFingerprint !== null &&
+    input.previousProgressFingerprint === input.nextProgressFingerprint;
+}
+
+export function checkpointWindowMatches(input: {
+  checkpoint: RotationHistorySyncCheckpoint;
+  syncPurpose: RotationHistorySyncPurpose;
+  requestedStartTime: string;
+  requestedEndTime: string;
+  lookbackMinutes: number;
+  candidateIds?: RotationCandidateId[];
+  storePath: string;
+  chainId: number;
+}): boolean {
+  if ((input.checkpoint.syncPurpose ?? "HISTORICAL_BACKFILL") !== input.syncPurpose) return false;
+  if (input.checkpoint.requestedWindow.startTime !== input.requestedStartTime) return false;
+  if (input.checkpoint.requestedWindow.endTime !== input.requestedEndTime) return false;
+  if (input.checkpoint.requestedWindow.lookbackMinutes !== input.lookbackMinutes) return false;
+  if (input.checkpoint.storePath && !pathEquals(input.checkpoint.storePath, input.storePath)) return false;
+  if (input.checkpoint.chainId !== undefined && input.checkpoint.chainId !== input.chainId) return false;
+  if (input.candidateIds && input.checkpoint.candidateIds) {
+    const expected = [...input.candidateIds].sort().join(",");
+    const actual = [...input.checkpoint.candidateIds].sort().join(",");
+    if (expected !== actual) return false;
+  }
+  return true;
+}
+
+export function classifyTipFreshness(input: {
+  tipScanned: boolean;
+  recentTradesFound: boolean;
+  sourceError?: boolean;
+  anchorComplete?: boolean;
+  requiredPoolComplete?: boolean;
+}): RotationTipFreshnessStatus {
+  if (!input.tipScanned) return "PIPELINE_STALE";
+  if (input.anchorComplete === false) return "ANCHOR_TIP_INCOMPLETE";
+  if (input.requiredPoolComplete === false) return "REQUIRED_POOL_TIP_INCOMPLETE";
+  if (input.sourceError) return "REQUIRED_POOL_TIP_INCOMPLETE";
+  return input.recentTradesFound ? "TIP_SCANNED_RECENT_TRADES_FOUND" : "MARKET_QUIET";
+}
+
 async function verifyPoolBytecode(
   config: AppConfig,
   pairIds: string[],
@@ -4351,6 +4791,317 @@ async function fetchV2SwapLogsFallback(input: {
   };
 }
 
+async function scanV2SwapLogBlockRange(input: {
+  config: AppConfig;
+  chainId: number;
+  candidate: RotationCandidateRegistryEntry;
+  sourcePool: RotationHistorySourcePoolRef;
+  fromBlock: bigint;
+  toBlock: bigint;
+  requestedStartTimestamp: number;
+  requestedEndTimestamp: number;
+  resolvedStartBlock: bigint;
+  resolvedEndBlock: bigint;
+  tipStartBlock: bigint;
+  tipEndBlock: bigint;
+  phase: RotationRecentRefreshPhase;
+  fetchedAt: string;
+  anchorObservations: RotationPriceObservation[];
+  anchorTipComplete: boolean;
+  blockTimestampCache: Map<bigint, { timestamp: number; hash: `0x${string}` | null }>;
+  existingKeys: Set<string>;
+  deadlineMs?: number;
+}): Promise<{
+  records: RotationHistoryRecord[];
+  report: RotationHistoryPoolSyncStatus;
+  errors: string[];
+}> {
+  const started = Date.now();
+  const pair = input.sourcePool.pair;
+  const poolAddress = pair.id.toLowerCase() as `0x${string}`;
+  const token0 = pairTokenAddress(pair, 0);
+  const token1 = pairTokenAddress(pair, 1);
+  const baseReport = (): Omit<
+    RotationHistoryPoolSyncStatus,
+    | "oldestReturnedRecord"
+    | "newestReturnedRecord"
+    | "totalRecordsRetrieved"
+    | "deduplicatedRecords"
+    | "boundaryCrossed"
+    | "truncationReason"
+    | "sourceRepeatsOrCapsRecords"
+    | "historicalPaginationReliable"
+  > => ({
+    candidateId: input.candidate.candidateId,
+    poolAddress,
+    token0,
+    token1,
+    token0Decimals: pairTokenDecimals(pair, pair.token0.id, 18),
+    token1Decimals: pairTokenDecimals(pair, pair.token1.id, 18),
+    factoryAddress: input.sourcePool.factoryAddress,
+    protocol: input.sourcePool.protocol,
+    sourceVersion: input.sourcePool.sourceVersion,
+    eventAdapter: input.sourcePool.eventAdapter,
+    sourceEndpoint: input.sourcePool.subgraphEndpoint,
+    queryType: `${input.sourcePool.protocol} eth_getLogs(Swap) recent range`,
+    pageSize: 0,
+    maximumPageCount: 0,
+    cursorMechanism: "block-range",
+    requestedStartTime: isoFromSeconds(input.requestedStartTimestamp) ?? input.fetchedAt,
+    requestedEndTime: isoFromSeconds(input.requestedEndTimestamp) ?? input.fetchedAt,
+    resolvedStartBlock: input.resolvedStartBlock.toString(),
+    resolvedEndBlock: input.resolvedEndBlock.toString(),
+    contributesToConsolidatedPrice: input.sourcePool.contributesToConsolidatedPrice,
+    classification: input.sourcePool.classification,
+    liquidityEusdc: input.sourcePool.liquidityEusdc,
+    recentVolumeEusdc: input.sourcePool.recentVolumeEusdc,
+    exclusionReason: input.sourcePool.exclusionReason,
+    fallbackUsed: "RPC_ETH_GETLOGS",
+  });
+
+  if (input.sourcePool.eventAdapter !== "PULSEX_V2_STYLE_SWAP") {
+    return {
+      records: [],
+      errors: ["unsupported event adapter"],
+      report: {
+        ...baseReport(),
+        oldestReturnedRecord: null,
+        newestReturnedRecord: null,
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        boundaryCrossed: false,
+        truncationReason: "UNSUPPORTED_EVENT_ABI",
+        sourceRepeatsOrCapsRecords: false,
+        historicalPaginationReliable: false,
+        unsupportedLogs: 0,
+        errors: ["unsupported event adapter"],
+        exactRemainingTruncationCause: "UNSUPPORTED_EVENT_ABI",
+        elapsedMs: Date.now() - started,
+      },
+    };
+  }
+
+  const client = getPublicClient(boundedHistoryRequestConfig(input.config, input.deadlineMs)) as unknown as HistoryPublicClient;
+  if (historyRuntimeDeadlineReached(input.deadlineMs)) {
+    return {
+      records: [],
+      errors: ["HISTORY_RUNTIME_DEADLINE_REACHED"],
+      report: {
+        ...baseReport(),
+        oldestReturnedRecord: null,
+        newestReturnedRecord: null,
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        boundaryCrossed: false,
+        truncationReason: "PARTIAL_PROGRESS",
+        sourceRepeatsOrCapsRecords: false,
+        historicalPaginationReliable: false,
+        nextResumeBlock: input.fromBlock.toString(),
+        exactRemainingTruncationCause: "PARTIAL_PROGRESS",
+        error: "HISTORY_RUNTIME_DEADLINE_REACHED",
+        errors: ["HISTORY_RUNTIME_DEADLINE_REACHED"],
+        elapsedMs: Date.now() - started,
+      },
+    };
+  }
+
+  let logs: Awaited<ReturnType<HistoryPublicClient["getLogs"]>>;
+  try {
+    logs = await client.getLogs({
+      address: poolAddress,
+      event: v2SwapEventAbi,
+      fromBlock: input.fromBlock,
+      toBlock: input.toBlock,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      records: [],
+      errors: [message],
+      report: {
+        ...baseReport(),
+        scannedFromBlock: input.fromBlock.toString(),
+        scannedToBlock: input.toBlock.toString(),
+        oldestReturnedRecord: null,
+        newestReturnedRecord: null,
+        totalRecordsRetrieved: 0,
+        deduplicatedRecords: 0,
+        boundaryCrossed: false,
+        truncationReason: "SOURCE_ERROR",
+        sourceRepeatsOrCapsRecords: false,
+        historicalPaginationReliable: false,
+        error: message,
+        errors: [message],
+        exactRemainingTruncationCause: "SOURCE_ERROR",
+        elapsedMs: Date.now() - started,
+      },
+    };
+  }
+
+  const recordsByKey = new Map<string, RotationHistoryRecord>();
+  const sourceTradeTimestamps: number[] = [];
+  let unsupportedLogs = 0;
+  let anchorRecordsUsed = 0;
+  for (const log of logs) {
+    if (log.blockNumber === undefined || log.transactionHash === undefined) {
+      unsupportedLogs += 1;
+      continue;
+    }
+    let info: { timestamp: number; hash: `0x${string}` | null };
+    try {
+      info = await cachedBlockInfo(client, log.blockNumber, input.blockTimestampCache);
+    } catch (err) {
+      unsupportedLogs += 1;
+      continue;
+    }
+    if (info.timestamp < input.requestedStartTimestamp || info.timestamp > input.requestedEndTimestamp) continue;
+    let decoded: {
+      args: {
+        amount0In: bigint;
+        amount1In: bigint;
+        amount0Out: bigint;
+        amount1Out: bigint;
+      };
+    };
+    try {
+      decoded = decodeEventLog({
+        abi: [v2SwapEventAbi],
+        data: log.data,
+        topics: [...log.topics] as [`0x${string}`, ...`0x${string}`[]],
+      }) as {
+        args: {
+          amount0In: bigint;
+          amount1In: bigint;
+          amount0Out: bigint;
+          amount1Out: bigint;
+        };
+      };
+    } catch {
+      unsupportedLogs += 1;
+      continue;
+    }
+    const amount0Raw = (decoded.args.amount0In + decoded.args.amount0Out).toString();
+    const amount1Raw = (decoded.args.amount1In + decoded.args.amount1Out).toString();
+    if (BigInt(amount0Raw) > 0n || BigInt(amount1Raw) > 0n) sourceTradeTimestamps.push(info.timestamp);
+    const amount0Human = Number(formatUnits(BigInt(amount0Raw), pairTokenDecimals(pair, pair.token0.id, 18)));
+    const amount1Human = Number(formatUnits(BigInt(amount1Raw), pairTokenDecimals(pair, pair.token1.id, 18)));
+    const candidateToken = input.candidate.executionTokenAddress.toLowerCase();
+    const candidateAmount =
+      sameAddress(token0, candidateToken) ? amount0Human :
+        sameAddress(token1, candidateToken) ? amount1Human :
+          input.candidate.candidateId === "PLS" && sameAddress(token0, WPLS_ADDRESS) ? amount0Human :
+            input.candidate.candidateId === "PLS" && sameAddress(token1, WPLS_ADDRESS) ? amount1Human : 0;
+    const eusdcAmount =
+      sameAddress(token0, EUSDC_ADDRESS) ? amount0Human :
+        sameAddress(token1, EUSDC_ADDRESS) ? amount1Human : 0;
+    const wplsAmount =
+      sameAddress(token0, WPLS_ADDRESS) ? amount0Human :
+        sameAddress(token1, WPLS_ADDRESS) ? amount1Human : 0;
+    let price: number | null = null;
+    let volumeEusdc = eusdcAmount;
+    let source = `${input.sourcePool.sourceVersion.toLowerCase()}-recent-rpc-v2-style-swap`;
+    let anchor: { price: number; age: number; poolAddress?: `0x${string}` } | null = null;
+    if (candidateAmount > 0 && eusdcAmount > 0) {
+      price = eusdcAmount / candidateAmount;
+    } else if (candidateAmount > 0 && wplsAmount > 0) {
+      anchor = nearestAnchorPrice(
+        input.anchorObservations,
+        info.timestamp,
+        ANCHOR_MAX_AGE_SECONDS,
+        log.blockNumber.toString(),
+      );
+      if (!anchor) continue;
+      price = (wplsAmount / candidateAmount) * anchor.price;
+      volumeEusdc = wplsAmount * anchor.price;
+      source = `${input.sourcePool.sourceVersion.toLowerCase()}-recent-rpc-v2-style-swap-anchored-wpls-eusdc`;
+      anchorRecordsUsed += 1;
+    }
+    if (price === null || price <= 0 || !Number.isFinite(price) || volumeEusdc <= 0) continue;
+    const record: RotationHistoryRecord = {
+      chainId: input.chainId,
+      candidateId: input.candidate.candidateId,
+      poolAddress,
+      factoryAddress: input.sourcePool.factoryAddress,
+      protocol: input.sourcePool.protocol,
+      sourceVersion: input.sourcePool.sourceVersion,
+      eventAdapter: input.sourcePool.eventAdapter,
+      anchorPoolAddress: anchor?.poolAddress,
+      anchorAgeSeconds: anchor?.age,
+      blockNumber: log.blockNumber.toString(),
+      blockHash: (log.blockHash as `0x${string}` | null) ?? info.hash,
+      transactionHash: log.transactionHash as `0x${string}`,
+      logIndex: Number(log.logIndex ?? 0n),
+      timestamp: info.timestamp,
+      token0,
+      token1,
+      amount0Raw,
+      amount1Raw,
+      candidatePriceEusdc: round(price, 18),
+      eusdcNotionalRaw: decimalHumanToRaw(String(volumeEusdc), 6),
+      source,
+      fetchedAt: input.fetchedAt,
+    };
+    recordsByKey.set(historyRecordKey(record), record);
+  }
+
+  const records = [...recordsByKey.values()];
+  const recordTimestamps = records.map((record) => record.timestamp);
+  const sourceTimestamps = sourceTradeTimestamps.length > 0 ? sourceTradeTimestamps : recordTimestamps;
+  const oldest = sourceTimestamps.length > 0 ? Math.min(...sourceTimestamps) : null;
+  const newest = sourceTimestamps.length > 0 ? Math.max(...sourceTimestamps) : null;
+  const duplicateRecordsIgnored = records.filter((record) => input.existingKeys.has(historyRecordKey(record))).length;
+  const blocksScanned = Number(input.toBlock - input.fromBlock + 1n);
+  const tipRangeTouched = input.toBlock >= input.tipStartBlock && input.fromBlock <= input.tipEndBlock;
+  const tipRangeComplete = tipRangeTouched && input.fromBlock <= input.tipStartBlock && input.toBlock >= input.tipEndBlock;
+  const recentTradesFound = newest !== null && newest >= input.requestedEndTimestamp - 30 * 60;
+  const toInfo = await cachedBlockInfo(client, input.toBlock, input.blockTimestampCache);
+  return {
+    records,
+    errors: [],
+    report: {
+      ...baseReport(),
+      scannedFromBlock: input.fromBlock.toString(),
+      scannedToBlock: input.toBlock.toString(),
+      completedRangeScanned: true,
+      rangeFullyScanned: false,
+      firstObservedTradeTimestamp: oldest !== null ? isoFromSeconds(oldest) : null,
+      lastObservedTradeTimestamp: newest !== null ? isoFromSeconds(newest) : null,
+      oldestReturnedRecord: oldest !== null ? isoFromSeconds(oldest) : null,
+      newestReturnedRecord: newest !== null ? isoFromSeconds(newest) : null,
+      latestSourceTradeTimestamp: newest !== null ? isoFromSeconds(newest) : null,
+      lastScannedBlockTimestamp: isoFromSeconds(toInfo.timestamp),
+      totalRecordsRetrieved: logs.length,
+      deduplicatedRecords: records.length,
+      rpcRecordsRetrieved: logs.length,
+      fallbackRecords: records.length,
+      anchorRecordsUsed,
+      unsupportedLogs,
+      blocksScanned,
+      logsRetrieved: logs.length,
+      validRecordsProduced: records.length,
+      recordsAdded: Math.max(0, records.length - duplicateRecordsIgnored),
+      duplicateRecordsIgnored,
+      boundaryCrossed: false,
+      truncationReason: "PARTIAL_PROGRESS",
+      sourceRepeatsOrCapsRecords: false,
+      historicalPaginationReliable: true,
+      retrievalCompletenessPercent: 0,
+      signalWindowCompletenessPercent: 0,
+      tipCompletenessPercent: tipRangeComplete ? 100 : 0,
+      tipFreshnessStatus: classifyTipFreshness({
+        tipScanned: tipRangeComplete,
+        recentTradesFound,
+        anchorComplete: input.sourcePool.classification === "REQUIRED_PRICE_POOL" ? input.anchorTipComplete : true,
+        requiredPoolComplete: true,
+      }),
+      tipLagBlocks: input.tipEndBlock > input.toBlock ? Number(input.tipEndBlock - input.toBlock) : 0,
+      ...(input.tipEndBlock > input.toBlock ? {} : { tipLagMinutes: 0 }),
+      exactRemainingTruncationCause: "PARTIAL_PROGRESS",
+      elapsedMs: Date.now() - started,
+    },
+  };
+}
+
 type NormalizedHistorySyncInput = {
   lookbackMinutes: number;
   maximumBlocksPerChunk: number;
@@ -4360,6 +5111,18 @@ type NormalizedHistorySyncInput = {
   candidateIds?: RotationCandidateId[];
   resumeToken?: string;
   maximumPoolsPerRun?: number;
+  syncPurpose: RotationHistorySyncPurpose;
+};
+
+type NormalizedRecentRefreshInput = {
+  lookbackMinutes: number;
+  candidateIds?: RotationCandidateId[];
+  tipRefreshMinutes: number;
+  maximumRuntimeMs: number;
+  maximumBlocksPerChunk: number;
+  maximumPoolsPerRun: number;
+  resumeToken?: string;
+  forceRecentBlockRecheck: boolean;
 };
 
 function normalizeHistorySyncInput(input: RotationHistorySyncInput): NormalizedHistorySyncInput {
@@ -4376,7 +5139,73 @@ function normalizeHistorySyncInput(input: RotationHistorySyncInput): NormalizedH
     ...(input.candidateIds ? { candidateIds: [...new Set(input.candidateIds)] } : {}),
     ...(input.resumeToken ? { resumeToken: input.resumeToken } : {}),
     ...(input.maximumPoolsPerRun !== undefined ? { maximumPoolsPerRun: input.maximumPoolsPerRun } : {}),
+    syncPurpose: input.syncPurpose ?? "HISTORICAL_BACKFILL",
   };
+}
+
+function normalizeRecentRefreshInput(input: RotationRecentRefreshInput): NormalizedRecentRefreshInput {
+  const maximumRuntimeMs = Math.min(
+    Math.max(1_000, input.maximumRuntimeMs ?? 120_000),
+    Math.min(MAX_HISTORY_MAX_RUNTIME_MS, 180_000),
+  );
+  return {
+    lookbackMinutes: input.lookbackMinutes ?? DEFAULT_LOOKBACK_MINUTES,
+    ...(input.candidateIds ? { candidateIds: [...new Set(input.candidateIds)] } : {}),
+    tipRefreshMinutes: input.tipRefreshMinutes ?? 120,
+    maximumRuntimeMs,
+    maximumBlocksPerChunk: input.maximumBlocksPerChunk ?? 10_000,
+    maximumPoolsPerRun: input.maximumPoolsPerRun ?? 6,
+    ...(input.resumeToken ? { resumeToken: input.resumeToken } : {}),
+    forceRecentBlockRecheck: input.forceRecentBlockRecheck ?? true,
+  };
+}
+
+function pairTokensMatch(
+  token0: `0x${string}`,
+  token1: `0x${string}`,
+  a: `0x${string}`,
+  b: `0x${string}`,
+): boolean {
+  return (sameAddress(token0, a) && sameAddress(token1, b)) ||
+    (sameAddress(token0, b) && sameAddress(token1, a));
+}
+
+function summarizeTipFreshness(reports: RotationHistoryPoolSyncStatus[]): RotationTipFreshnessStatus | undefined {
+  if (reports.length === 0) return undefined;
+  if (reports.some((report) => report.tipFreshnessStatus === "ANCHOR_TIP_INCOMPLETE")) return "ANCHOR_TIP_INCOMPLETE";
+  if (reports.some((report) => report.tipFreshnessStatus === "REQUIRED_POOL_TIP_INCOMPLETE")) return "REQUIRED_POOL_TIP_INCOMPLETE";
+  if (reports.some((report) => report.tipFreshnessStatus === "PIPELINE_STALE" || report.tipFreshnessStatus === "TIP_NOT_SCANNED")) {
+    return "PIPELINE_STALE";
+  }
+  if (reports.some((report) => report.tipFreshnessStatus === "TIP_SCANNED_RECENT_TRADES_FOUND")) {
+    return "TIP_SCANNED_RECENT_TRADES_FOUND";
+  }
+  if (reports.every((report) =>
+    report.tipFreshnessStatus === "MARKET_QUIET" ||
+    report.tipFreshnessStatus === "TIP_SCANNED_NO_RECENT_TRADES"
+  )) {
+    return "MARKET_QUIET";
+  }
+  return reports[0]?.tipFreshnessStatus;
+}
+
+function latestSourceTradeAgeMinutes(reports: RotationHistoryPoolSyncStatus[]): number | null | undefined {
+  const latest = reports
+    .map((report) => report.latestSourceTradeTimestamp ?? report.newestReturnedRecord)
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => b - a)[0];
+  if (latest === undefined) return undefined;
+  return round((Date.now() - latest) / 60_000, 4);
+}
+
+function pipelineLagMinutes(reports: RotationHistoryPoolSyncStatus[]): number | null | undefined {
+  const lags = reports
+    .map((report) => report.tipLagMinutes)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (lags.length === 0) return undefined;
+  return round(Math.max(...lags), 4);
 }
 
 function summarizeCandidateSync(input: {
@@ -4388,6 +5217,7 @@ function summarizeCandidateSync(input: {
   requestedEndTime: string;
   forceRecentBlockRecheck: boolean;
   latestBlockNumber?: bigint;
+  syncPurpose?: RotationHistorySyncPurpose;
 }): RotationHistoryCandidateSyncStatus {
   const existing = new Map(input.existingRecords.map((record) => [historyRecordKey(record), record]));
   const incoming = new Map(input.records.map((record) => [historyRecordKey(record), record]));
@@ -4436,6 +5266,7 @@ function summarizeCandidateSync(input: {
     .map((report) => `${report.poolAddress}: ${report.truncationReason}`);
   return {
     candidateId: input.candidate.candidateId,
+    syncPurpose: input.syncPurpose,
     recordsAdded: added,
     recordsUpdated: updated,
     duplicateRecordsIgnored: duplicates,
@@ -4461,6 +5292,22 @@ function summarizeCandidateSync(input: {
     sevenDayCompletenessPercent: input.reports.length > 0
       ? round(completeReports.length / input.reports.length * 100, 4)
       : 0,
+    tipFreshnessStatus: summarizeTipFreshness(input.reports),
+    tipCompletenessPercent: requiredReports.length > 0
+      ? round(requiredReports.filter((report) => (report.tipCompletenessPercent ?? 0) >= 95).length / requiredReports.length * 100, 4)
+      : undefined,
+    latestSourceTradeAgeMinutes: latestSourceTradeAgeMinutes(input.reports),
+    pipelineLagMinutes: pipelineLagMinutes(input.reports),
+    requiredPoolsComplete: completenessReports.length > 0 && completenessReports.every((report) =>
+      report.rangeFullyScanned ||
+      report.boundaryCrossed ||
+      report.truncationReason === "SPARSE_ACTUAL_TRADING" ||
+      report.truncationReason === "STALE_POOL" ||
+      (report.tipCompletenessPercent ?? 0) >= 95
+    ),
+    anchorTipComplete: requiredReports
+      .filter((report) => report.poolAddress && report.token0 && report.token1 && pairTokensMatch(report.token0, report.token1, WPLS_ADDRESS, EUSDC_ADDRESS))
+      .every((report) => (report.tipCompletenessPercent ?? 0) >= 95),
     unresolvedGaps: unresolved,
     pools: input.reports,
   };
@@ -4732,6 +5579,17 @@ export async function runEusdcRotationHistorySync(
   input: RotationHistorySyncInput = {},
 ): Promise<RotationHistorySyncResult> {
   const normalized = normalizeHistorySyncInput(input);
+  if (normalized.syncPurpose === "RECENT_SIGNAL_WINDOW") {
+    return runEusdcRotationRecentRefresh(config, {
+      lookbackMinutes: normalized.lookbackMinutes,
+      candidateIds: normalized.candidateIds,
+      maximumRuntimeMs: normalized.maximumRuntimeMs,
+      maximumBlocksPerChunk: normalized.maximumBlocksPerChunk,
+      maximumPoolsPerRun: normalized.maximumPoolsPerRun,
+      resumeToken: normalized.resumeToken,
+      forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+    });
+  }
   const nowMs = Date.now();
   const deadlineMs = nowMs + normalized.maximumRuntimeMs;
   const endTimestamp = Math.floor(nowMs / 1000);
@@ -4763,6 +5621,12 @@ export async function runEusdcRotationHistorySync(
       latestTimestamp: null,
       sourceCompleteness: [],
       unresolvedGaps: [],
+      syncPurpose: normalized.syncPurpose,
+      blocksScanned: 0,
+      rangesCompleted: 0,
+      rangesWithZeroLogs: 0,
+      recordsRetrieved: 0,
+      checkpointAdvanced: false,
       repositoryRoot: diagnostics.repositoryRoot,
       currentWorkingDirectory: diagnostics.currentWorkingDirectory,
       historyStoreDirectory: diagnostics.historyStoreDirectory,
@@ -4803,11 +5667,14 @@ export async function runEusdcRotationHistorySync(
         writeHistorySyncCheckpoint(config, {
           schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
           resumeToken,
+          syncPurpose: normalized.syncPurpose,
           requestedWindow: {
             startTime: requestedStartTime,
             endTime: requestedEndTime,
             lookbackMinutes: normalized.lookbackMinutes,
           },
+          storePath: resolved.path,
+          chainId: existing.chainId,
           candidateId: EUSDC_ROTATION_CANDIDATES[0]?.candidateId,
           sourceCursor: {
             candidateIndex: 0,
@@ -4840,6 +5707,12 @@ export async function runEusdcRotationHistorySync(
           latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
           sourceCompleteness: [],
           unresolvedGaps: [],
+          syncPurpose: normalized.syncPurpose,
+          blocksScanned: 0,
+          rangesCompleted: 0,
+          rangesWithZeroLogs: 0,
+          recordsRetrieved: 0,
+          checkpointAdvanced: false,
           repositoryRoot: diagnostics.repositoryRoot,
           currentWorkingDirectory: diagnostics.currentWorkingDirectory,
           historyStoreDirectory: diagnostics.historyStoreDirectory,
@@ -4868,10 +5741,25 @@ export async function runEusdcRotationHistorySync(
       }
       const existing = readRotationHistoryStore(config);
       const checkpointBefore = readHistorySyncCheckpoint(config);
-      const resumeCheckpoint =
-        normalized.resumeToken && checkpointBefore?.resumeToken === normalized.resumeToken
-          ? checkpointBefore
-          : null;
+      let resumeCheckpoint: RotationHistorySyncCheckpoint | null = null;
+      if (normalized.resumeToken) {
+        if (!checkpointBefore || checkpointBefore.resumeToken !== normalized.resumeToken) {
+          return blockedResult(true, "CHECKPOINT_WINDOW_MISMATCH", "resume token does not match the active public-history checkpoint");
+        }
+        if (!checkpointWindowMatches({
+          checkpoint: checkpointBefore,
+          syncPurpose: normalized.syncPurpose,
+          requestedStartTime,
+          requestedEndTime,
+          lookbackMinutes: normalized.lookbackMinutes,
+          candidateIds: normalized.candidateIds,
+          storePath: resolved.path,
+          chainId,
+        })) {
+          return blockedResult(true, "CHECKPOINT_WINDOW_MISMATCH", "resume token belongs to a different sync purpose, window, candidate set, store path, or chain");
+        }
+        resumeCheckpoint = checkpointBefore;
+      }
       const candidateSet = normalized.candidateIds
         ? new Set(normalized.candidateIds)
         : null;
@@ -4917,6 +5805,7 @@ export async function runEusdcRotationHistorySync(
           requestedEndTime,
           forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
           latestBlockNumber,
+          syncPurpose: normalized.syncPurpose,
         });
         sourceCompleteness.push(summary);
         unresolvedGaps.push(...summary.unresolvedGaps.map((gap) => `${candidate.candidateId}: ${gap}`));
@@ -4946,6 +5835,7 @@ export async function runEusdcRotationHistorySync(
         retentionDays: existing.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
         records: merged.records,
         lastSync: {
+          syncPurpose: normalized.syncPurpose,
           requestedStartTime,
           requestedEndTime,
           historyStoreFingerprint: "0x0",
@@ -4977,11 +5867,15 @@ export async function runEusdcRotationHistorySync(
         writeHistorySyncCheckpoint(config, {
           schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
           resumeToken,
+          syncPurpose: normalized.syncPurpose,
           requestedWindow: {
             startTime: requestedStartTime,
             endTime: requestedEndTime,
             lookbackMinutes: normalized.lookbackMinutes,
           },
+          storePath: resolved.path,
+          chainId,
+          candidateIds: candidates.map((row) => row.candidate.candidateId),
           candidateId: EUSDC_ROTATION_CANDIDATES[nextCandidateIndex]?.candidateId,
           ...(pendingPool ? { poolAddress: pendingPool.poolAddress } : {}),
           ...(pendingPool?.nextResumeBlock ? { nextBlock: pendingPool.nextResumeBlock } : {}),
@@ -5043,6 +5937,617 @@ export async function runEusdcRotationHistorySync(
         latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
         sourceCompleteness,
         unresolvedGaps: [...new Set(unresolvedGaps)],
+        syncPurpose: normalized.syncPurpose,
+        repositoryRoot: diagnostics.repositoryRoot,
+        currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+        historyStoreDirectory: diagnostics.historyStoreDirectory,
+        historyStorePath: diagnostics.historyStorePath,
+        historyStorePathSource: diagnostics.historyStorePathSource,
+        pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+        legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+        legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+        legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+        activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+        crossProcessLockStatus: diagnostics.crossProcessLockStatus,
+        historyStoreFingerprint,
+        quoteCallCount: 0,
+        noPiteasQuoteUsed: true,
+        noWalletWrite: true,
+        noLiveTransaction: true,
+      };
+    } catch (err) {
+      if (err instanceof HistorySyncBusyError) {
+        return blockedResult(false, "HISTORY_SYNC_BUSY", err.message, err.status);
+      }
+      throw err;
+    } finally {
+      if (release) release();
+    }
+  });
+}
+
+export async function runEusdcRotationRecentRefresh(
+  config: AppConfig,
+  input: RotationRecentRefreshInput = {},
+): Promise<RotationRecentRefreshResult> {
+  const normalized = normalizeRecentRefreshInput(input);
+  const nowMs = Date.now();
+  const deadlineMs = nowMs + normalized.maximumRuntimeMs;
+  const checkpointBeforeWindow = normalized.resumeToken ? readHistorySyncCheckpoint(config) : null;
+  const resumeWindow = checkpointBeforeWindow &&
+    checkpointBeforeWindow.resumeToken === normalized.resumeToken &&
+    (checkpointBeforeWindow.syncPurpose ?? "HISTORICAL_BACKFILL") === "RECENT_SIGNAL_WINDOW"
+      ? checkpointBeforeWindow.requestedWindow
+      : null;
+  const endTimestamp = resumeWindow
+    ? Math.floor(Date.parse(resumeWindow.endTime) / 1000)
+    : Math.floor(nowMs / 1000);
+  const startTimestamp = resumeWindow
+    ? Math.floor(Date.parse(resumeWindow.startTime) / 1000)
+    : endTimestamp - normalized.lookbackMinutes * 60;
+  const requestedStartTime = new Date(startTimestamp * 1000).toISOString();
+  const requestedEndTime = new Date(endTimestamp * 1000).toISOString();
+  const fetchedAt = new Date(nowMs).toISOString();
+  const resolvedStore = resolveEusdcRotationHistoryStorePath(config);
+  const reviewCode = historyStoreReviewCode(config);
+  const blockedResult = (
+    okValue: boolean,
+    code: RotationHistorySyncResult["code"],
+    reason: string,
+    lockStatus: RotationHistoryCrossProcessLockStatus = "not_checked",
+    extras: Partial<RotationRecentRefreshResult> = {},
+  ): RotationRecentRefreshResult => {
+    const diagnostics = historyPathDiagnostics(config, lockStatus);
+    const store = readRotationHistoryStore(config);
+    return {
+      ok: okValue,
+      code,
+      reason,
+      maximumRuntimeMs: normalized.maximumRuntimeMs,
+      lookbackMinutes: normalized.lookbackMinutes,
+      requestedStartTime,
+      requestedEndTime,
+      recordsAdded: 0,
+      recordsUpdated: 0,
+      duplicateRecordsIgnored: 0,
+      earliestTimestamp: null,
+      latestTimestamp: null,
+      sourceCompleteness: [],
+      unresolvedGaps: [],
+      syncPurpose: "RECENT_SIGNAL_WINDOW",
+      tipRefreshMinutes: normalized.tipRefreshMinutes,
+      phase: "TIP_REFRESH",
+      anchorTipComplete: false,
+      anchorLatestBlock: null,
+      anchorLatestTimestamp: null,
+      anchorLagBlocks: null,
+      anchorLagMinutes: null,
+      blocksScanned: 0,
+      rangesCompleted: 0,
+      rangesWithZeroLogs: 0,
+      recordsRetrieved: 0,
+      checkpointAdvanced: false,
+      repositoryRoot: diagnostics.repositoryRoot,
+      currentWorkingDirectory: diagnostics.currentWorkingDirectory,
+      historyStoreDirectory: diagnostics.historyStoreDirectory,
+      historyStorePath: diagnostics.historyStorePath,
+      historyStorePathSource: diagnostics.historyStorePathSource,
+      pathMatchesExpectedRepositoryLocalDefault: diagnostics.pathMatchesExpectedRepositoryLocalDefault,
+      legacyCwdDerivedStorePath: diagnostics.legacyCwdDerivedStorePath,
+      legacyCwdDerivedStoreExists: diagnostics.legacyCwdDerivedStoreExists,
+      legacyStoreRecordCount: diagnostics.legacyStoreRecordCount,
+      activeStoreRecordCount: diagnostics.activeStoreRecordCount,
+      crossProcessLockStatus: diagnostics.crossProcessLockStatus,
+      historyStoreFingerprint: rotationHistoryFingerprint(store),
+      quoteCallCount: 0,
+      noPiteasQuoteUsed: true,
+      noWalletWrite: true,
+      noLiveTransaction: true,
+      ...extras,
+    };
+  };
+  if (reviewCode !== "OK") {
+    return blockedResult(false, reviewCode, "public history store path review is required before recent refresh");
+  }
+
+  return withHistoryLock(resolvedStore.path, async () => {
+    let release: (() => RotationHistoryCrossProcessLockStatus) | null = null;
+    try {
+      const lock = acquireHistoryWriteLock(config);
+      release = lock.release;
+      const runtimeConfig = boundedHistoryRequestConfig(config, deadlineMs);
+      const existingAtStart = readRotationHistoryStore(config);
+      const chainId = await getChainId(runtimeConfig);
+      const checkpointBefore = readHistorySyncCheckpoint(config);
+      let resumeCheckpoint: RotationHistorySyncCheckpoint | null = null;
+      if (normalized.resumeToken) {
+        if (!checkpointBefore || checkpointBefore.resumeToken !== normalized.resumeToken) {
+          return blockedResult(
+            true,
+            "CHECKPOINT_WINDOW_MISMATCH",
+            "resume token does not match the active public-history checkpoint",
+            lock.acquiredStatus,
+          );
+        }
+        if (!checkpointWindowMatches({
+          checkpoint: checkpointBefore,
+          syncPurpose: "RECENT_SIGNAL_WINDOW",
+          requestedStartTime,
+          requestedEndTime,
+          lookbackMinutes: normalized.lookbackMinutes,
+          candidateIds: normalized.candidateIds,
+          storePath: resolvedStore.path,
+          chainId,
+        })) {
+          return blockedResult(
+            true,
+            "CHECKPOINT_WINDOW_MISMATCH",
+            "resume token belongs to a different recent-refresh purpose, window, candidate set, store path, or chain",
+            lock.acquiredStatus,
+          );
+        }
+        resumeCheckpoint = checkpointBefore;
+      }
+
+      const client = getPublicClient(runtimeConfig) as unknown as HistoryPublicClient;
+      const latestBlockNumber = await client.getBlockNumber();
+      const fullRange = resumeCheckpoint?.resolvedStartBlock && resumeCheckpoint.resolvedEndBlock
+        ? {
+            requestedStartTimestamp: startTimestamp,
+            requestedEndTimestamp: endTimestamp,
+            resolvedStartBlock: BigInt(resumeCheckpoint.resolvedStartBlock),
+            resolvedEndBlock: BigInt(resumeCheckpoint.resolvedEndBlock),
+            resolvedStartBlockTimestamp: startTimestamp,
+            resolvedEndBlockTimestamp: endTimestamp,
+            maximumTimestampResolutionErrorSeconds: 0,
+            blockTimestampCache: new Map<bigint, { timestamp: number; hash: `0x${string}` | null }>(),
+            searchCalls: 0,
+          } satisfies TimestampBlockRangeResolution
+        : await resolveTimestampBlockRange({
+            client,
+            startTimestamp,
+            endTimestamp,
+            latestBlock: latestBlockNumber,
+            deadlineMs,
+          });
+      const tipStartTimestamp = Math.max(startTimestamp, endTimestamp - normalized.tipRefreshMinutes * 60);
+      const tipRange = await resolveTimestampBlockRange({
+        client,
+        startTimestamp: tipStartTimestamp,
+        endTimestamp,
+        latestBlock: latestBlockNumber,
+        deadlineMs,
+      });
+      const latestBlockInfo = await cachedBlockInfo(client, latestBlockNumber, fullRange.blockTimestampCache);
+      const candidateSet = normalized.candidateIds ? new Set(normalized.candidateIds) : null;
+      const candidates = EUSDC_ROTATION_CANDIDATES.filter((candidate) =>
+        candidateSet === null || candidateSet.has(candidate.candidateId)
+      );
+      const poolsByCandidate = new Map<RotationCandidateId, RotationHistorySourcePoolRef[]>();
+      const discoveryErrors: string[] = [];
+      for (const candidate of candidates) {
+        if (historyRuntimeDeadlineReached(deadlineMs)) break;
+        const discovered = await fetchSourcePoolsForCandidate(config, candidate, deadlineMs);
+        poolsByCandidate.set(candidate.candidateId, discovered.pools);
+        discoveryErrors.push(...discovered.errors.map((error) => `${candidate.candidateId}: ${error}`));
+      }
+      const tasks = buildRecentSignalPoolTasks({ candidates, poolsByCandidate });
+      if (tasks.length === 0) {
+        return blockedResult(
+          false,
+          "SOURCE_ERROR",
+          "no source pools were available for recent refresh",
+          lock.acquiredStatus,
+          { unresolvedGaps: discoveryErrors },
+        );
+      }
+
+      let workingStore = existingAtStart;
+      const reportsByCandidate = new Map<RotationCandidateId, RotationHistoryPoolSyncStatus[]>();
+      if (
+        workingStore.lastSync?.syncPurpose === "RECENT_SIGNAL_WINDOW" &&
+        workingStore.lastSync.requestedStartTime === requestedStartTime &&
+        workingStore.lastSync.requestedEndTime === requestedEndTime
+      ) {
+        for (const row of workingStore.lastSync.candidates) {
+          reportsByCandidate.set(row.candidateId, [...row.pools]);
+        }
+      }
+      let checkpoint: RotationHistorySyncCheckpoint = resumeCheckpoint ?? {
+        schemaVersion: HISTORY_CHECKPOINT_SCHEMA_VERSION,
+        resumeToken: fingerprint({
+          syncPurpose: "RECENT_SIGNAL_WINDOW",
+          requestedStartTime,
+          requestedEndTime,
+          candidateIds: candidates.map((candidate) => candidate.candidateId),
+          storePath: resolvedStore.path,
+          chainId,
+          createdAt: fetchedAt,
+        }),
+        syncPurpose: "RECENT_SIGNAL_WINDOW",
+        requestedWindow: {
+          startTime: requestedStartTime,
+          endTime: requestedEndTime,
+          lookbackMinutes: normalized.lookbackMinutes,
+        },
+        resolvedStartBlock: fullRange.resolvedStartBlock.toString(),
+        resolvedEndBlock: fullRange.resolvedEndBlock.toString(),
+        candidateIds: candidates.map((candidate) => candidate.candidateId),
+        requiredPoolSet: tasks
+          .filter((task) => task.sourcePool.classification === "REQUIRED_PRICE_POOL")
+          .map((task) => ({
+            candidateId: task.candidateId,
+            poolAddress: task.poolAddress,
+            sourceVersion: task.sourceVersion,
+          })),
+        storePath: resolvedStore.path,
+        chainId,
+        phase: "TIP_REFRESH",
+        completedBlockRanges: [],
+        completedPools: [],
+        sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
+        storeFingerprintBeforeRun: rotationHistoryFingerprint(existingAtStart),
+        updatedAt: fetchedAt,
+      };
+      const progressFingerprintBefore = checkpoint.progressFingerprint ?? null;
+      let phase: RotationRecentRefreshPhase = checkpoint.phase ?? "TIP_REFRESH";
+      let taskIndex = checkpoint.sourceCursor?.taskIndex ?? checkpoint.sourceCursor?.candidateIndex ?? 0;
+      let blocksScanned = 0;
+      let rangesCompleted = 0;
+      let rangesWithZeroLogs = 0;
+      let recordsRetrieved = 0;
+      let checkpointAdvanced = false;
+      let recordsAdded = 0;
+      let recordsUpdated = 0;
+      let duplicateRecordsIgnored = 0;
+      const unresolvedGaps = [...discoveryErrors];
+      const anchorPoolAddress = tasks.find((task) => task.role === "WPLS_EUSDC_ANCHOR")?.poolAddress ?? null;
+      const coverageForTask = (task: RotationRecentPoolTask, fromBlock: bigint, toBlock: bigint) =>
+        completedBlockCoveragePercent({
+          completedRanges: checkpoint.completedBlockRanges,
+          candidateId: task.candidateId,
+          poolAddress: task.poolAddress,
+          sourceVersion: task.sourceVersion,
+          fromBlock,
+          toBlock,
+        });
+      const anchorTipComplete = () =>
+        anchorPoolAddress !== null &&
+        tasks
+          .filter((task) => sameAddress(task.poolAddress, anchorPoolAddress))
+          .some((task) => coverageForTask(task, tipRange.resolvedStartBlock, tipRange.resolvedEndBlock) >= 99.999);
+      const updateReportCoverage = (task: RotationRecentPoolTask, report: RotationHistoryPoolSyncStatus) => {
+        const signalCoverage = coverageForTask(task, fullRange.resolvedStartBlock, fullRange.resolvedEndBlock);
+        const tipCoverage = coverageForTask(task, tipRange.resolvedStartBlock, tipRange.resolvedEndBlock);
+        const fullComplete = signalCoverage >= 99.999;
+        const tipComplete = tipCoverage >= 99.999;
+        const anchorComplete = task.role === "CANDIDATE_WPLS" ? anchorTipComplete() : true;
+        const latestSource = report.latestSourceTradeTimestamp ?? report.newestReturnedRecord;
+        const recentTradesFound =
+          latestSource !== null &&
+          latestSource !== undefined &&
+          Date.parse(latestSource) / 1000 >= endTimestamp - 30 * 60;
+        return {
+          ...report,
+          rangeFullyScanned: fullComplete,
+          boundaryCrossed: fullComplete,
+          retrievalCompletenessPercent: signalCoverage,
+          signalWindowCompletenessPercent: signalCoverage,
+          tipCompletenessPercent: tipCoverage,
+          truncationReason: fullComplete ? "NONE" as const : "PARTIAL_PROGRESS" as const,
+          exactRemainingTruncationCause: fullComplete ? undefined : "PARTIAL_PROGRESS",
+          tipFreshnessStatus: classifyTipFreshness({
+            tipScanned: tipComplete,
+            recentTradesFound,
+            anchorComplete,
+            requiredPoolComplete: task.sourcePool.classification === "REQUIRED_PRICE_POOL" ? tipComplete : true,
+          }),
+          nextResumeBlock: fullComplete ? null : report.nextResumeBlock,
+        };
+      };
+      const writeCheckpoint = (nextCheckpoint: RotationHistorySyncCheckpoint) => {
+        checkpoint = nextCheckpoint;
+        writeHistorySyncCheckpoint(config, checkpoint);
+      };
+      const summarizeAll = (): RotationHistoryCandidateSyncStatus[] =>
+        candidates.map((candidate) => summarizeCandidateSync({
+          candidate,
+          reports: reportsByCandidate.get(candidate.candidateId) ?? [],
+          records: recordsForCandidate(workingStore, candidate, startTimestamp, endTimestamp),
+          existingRecords: existingAtStart.records.filter((record) => record.candidateId === candidate.candidateId),
+          requestedStartTime,
+          requestedEndTime,
+          forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+          latestBlockNumber,
+          syncPurpose: "RECENT_SIGNAL_WINDOW",
+        }));
+      const persistStore = () => {
+        const sourceCompleteness = summarizeAll();
+        const next: RotationHistoryFile = {
+          schemaVersion: HISTORY_STORE_SCHEMA_VERSION,
+          chainId,
+          updatedAt: fetchedAt,
+          retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+          records: workingStore.records,
+          lastSync: {
+            syncPurpose: "RECENT_SIGNAL_WINDOW",
+            requestedStartTime,
+            requestedEndTime,
+            historyStoreFingerprint: "0x0",
+            candidates: sourceCompleteness,
+          },
+        };
+        const historyStoreFingerprint = rotationHistoryFingerprint(next);
+        next.lastSync = { ...next.lastSync!, historyStoreFingerprint };
+        writeRotationHistoryStore(config, next);
+        workingStore = readRotationHistoryStore(config);
+        return sourceCompleteness;
+      };
+
+      let attemptedRanges = 0;
+      while (phase !== "SIGNAL_WINDOW_COMPLETE" && attemptedRanges < normalized.maximumPoolsPerRun) {
+        if (historyRuntimeDeadlineReached(deadlineMs)) break;
+        if (taskIndex >= tasks.length) {
+          if (phase === "TIP_REFRESH") {
+            phase = "SIGNAL_WINDOW_BACKFILL";
+            taskIndex = 0;
+            checkpoint = {
+              ...checkpoint,
+              phase,
+              nextBlock: tipRange.resolvedStartBlock > fullRange.resolvedStartBlock
+                ? (tipRange.resolvedStartBlock - 1n).toString()
+                : undefined,
+              sourceCursor: { candidateIndex: 0, poolIndex: 0, taskIndex: 0 },
+              updatedAt: new Date().toISOString(),
+            };
+            continue;
+          }
+          phase = "SIGNAL_WINDOW_COMPLETE";
+          break;
+        }
+        const task = tasks[taskIndex]!;
+        let rangeFrom: bigint;
+        let rangeTo: bigint;
+        let nextBlockAfterSuccess: string | undefined;
+        let nextTaskIndex = taskIndex + 1;
+        if (phase === "TIP_REFRESH") {
+          rangeFrom = tipRange.resolvedStartBlock;
+          rangeTo = tipRange.resolvedEndBlock;
+          const alreadyComplete = coverageForTask(task, rangeFrom, rangeTo) >= 99.999;
+          if (alreadyComplete) {
+            taskIndex += 1;
+            continue;
+          }
+        } else {
+          const high = checkpoint.nextBlock && checkpoint.sourceCursor?.taskIndex === taskIndex
+            ? BigInt(checkpoint.nextBlock)
+            : tipRange.resolvedStartBlock - 1n;
+          if (high < fullRange.resolvedStartBlock) {
+            taskIndex += 1;
+            checkpoint = { ...checkpoint, nextBlock: undefined, sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex } };
+            continue;
+          }
+          rangeTo = high;
+          const chunkFrom = high - BigInt(Math.max(1, normalized.maximumBlocksPerChunk) - 1);
+          rangeFrom = chunkFrom < fullRange.resolvedStartBlock ? fullRange.resolvedStartBlock : chunkFrom;
+          if (rangeFrom > fullRange.resolvedStartBlock) {
+            nextBlockAfterSuccess = (rangeFrom - 1n).toString();
+            nextTaskIndex = taskIndex;
+          }
+        }
+        checkpoint = {
+          ...checkpoint,
+          phase,
+          candidateId: task.candidateId,
+          poolAddress: task.poolAddress,
+          lastAttemptedRange: {
+            candidateId: task.candidateId,
+            poolAddress: task.poolAddress,
+            fromBlock: rangeFrom.toString(),
+            toBlock: rangeTo.toString(),
+          },
+          sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex },
+          nextBlock: phase === "SIGNAL_WINDOW_BACKFILL" ? rangeTo.toString() : undefined,
+          updatedAt: new Date().toISOString(),
+        };
+        writeHistorySyncCheckpoint(config, checkpoint);
+        const existingKeys = new Set(workingStore.records.map((record) => historyRecordKey(record)));
+        const anchorObservations = observationsFromHistory(
+          recordsForCandidate(workingStore, getRotationCandidate("PLS"), startTimestamp, endTimestamp),
+        ).filter((obs) => obs.priceEusdc > 0);
+        const scan = await scanV2SwapLogBlockRange({
+          config,
+          chainId,
+          candidate: getRotationCandidate(task.candidateId),
+          sourcePool: task.sourcePool,
+          fromBlock: rangeFrom,
+          toBlock: rangeTo,
+          requestedStartTimestamp: startTimestamp,
+          requestedEndTimestamp: endTimestamp,
+          resolvedStartBlock: fullRange.resolvedStartBlock,
+          resolvedEndBlock: fullRange.resolvedEndBlock,
+          tipStartBlock: tipRange.resolvedStartBlock,
+          tipEndBlock: tipRange.resolvedEndBlock,
+          phase,
+          fetchedAt,
+          anchorObservations,
+          anchorTipComplete: task.role === "CANDIDATE_WPLS" ? anchorTipComplete() : true,
+          blockTimestampCache: fullRange.blockTimestampCache,
+          existingKeys,
+          deadlineMs,
+        });
+        unresolvedGaps.push(...scan.errors.map((error) => `${task.candidateId}: ${task.poolAddress}: ${error}`));
+        if (scan.report.completedRangeScanned) {
+          attemptedRanges += 1;
+          blocksScanned += scan.report.blocksScanned ?? 0;
+          rangesCompleted += 1;
+          recordsRetrieved += scan.report.totalRecordsRetrieved;
+          if (scan.report.totalRecordsRetrieved === 0) rangesWithZeroLogs += 1;
+          const completedRange = completedRangeFromReport({
+            candidateId: task.candidateId,
+            report: scan.report,
+            completedAt: new Date().toISOString(),
+          });
+          if (completedRange) {
+            const appended = appendCompletedRecentRange({
+              checkpoint,
+              completedRange,
+              phase,
+              nextBlock: nextBlockAfterSuccess,
+              taskIndex: nextTaskIndex,
+              anchorTipComplete: anchorTipComplete(),
+              updatedAt: new Date().toISOString(),
+            });
+            checkpointAdvanced = checkpointAdvanced || appended.advanced;
+            writeCheckpoint(appended.checkpoint);
+          }
+          const updatedReport = updateReportCoverage(task, scan.report);
+          const rows = reportsByCandidate.get(task.candidateId) ?? [];
+          reportsByCandidate.set(task.candidateId, [
+            ...rows.filter((row) =>
+              !(
+                sameAddress(row.poolAddress, updatedReport.poolAddress) &&
+                row.sourceVersion === updatedReport.sourceVersion &&
+                row.scannedFromBlock === updatedReport.scannedFromBlock &&
+                row.scannedToBlock === updatedReport.scannedToBlock
+              )
+            ),
+            updatedReport,
+          ]);
+          const merged = mergeRotationHistoryRecords({
+            existing: workingStore.records,
+            incoming: scan.records,
+            nowMs,
+            retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+            protectedStartTimestamp: startTimestamp,
+            forceRecentBlockRecheck: normalized.forceRecentBlockRecheck,
+            latestBlockNumber,
+          });
+          recordsAdded += merged.added;
+          recordsUpdated += merged.updated;
+          duplicateRecordsIgnored += merged.duplicates;
+          workingStore = {
+            ...workingStore,
+            chainId,
+            updatedAt: fetchedAt,
+            retentionDays: workingStore.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS,
+            records: merged.records,
+          };
+          persistStore();
+          taskIndex = nextTaskIndex;
+        } else {
+          const rows = reportsByCandidate.get(task.candidateId) ?? [];
+          reportsByCandidate.set(task.candidateId, [...rows, scan.report]);
+          break;
+        }
+      }
+
+      const sourceCompleteness = persistStore();
+      const allTasksComplete = phase === "SIGNAL_WINDOW_COMPLETE" ||
+        (phase === "SIGNAL_WINDOW_BACKFILL" && taskIndex >= tasks.length);
+      const progressFingerprintAfter = rotationCheckpointProgressFingerprint({
+        syncPurpose: "RECENT_SIGNAL_WINDOW",
+        phase: allTasksComplete ? "SIGNAL_WINDOW_COMPLETE" : phase,
+        candidateId: tasks[taskIndex]?.candidateId,
+        poolAddress: tasks[taskIndex]?.poolAddress,
+        nextBlock: checkpoint.nextBlock ?? null,
+        completedBlockRanges: checkpoint.completedBlockRanges,
+        anchorTipComplete: anchorTipComplete(),
+      });
+      const stalled = checkpointWouldStall({
+        code: "PARTIAL_PROGRESS",
+        previousProgressFingerprint: progressFingerprintBefore,
+        nextProgressFingerprint: progressFingerprintAfter,
+      });
+      let code: RotationHistorySyncCode = allTasksComplete ? "COMPLETE" : stalled ? "CHECKPOINT_STALLED" : "PARTIAL_PROGRESS";
+      let resumeToken: string | undefined;
+      let checkpointUpdatedAt: string | undefined;
+      if (code === "COMPLETE") {
+        clearHistorySyncCheckpoint(config);
+      } else {
+        resumeToken = stalled && resumeCheckpoint ? resumeCheckpoint.resumeToken : fingerprint({
+          syncPurpose: "RECENT_SIGNAL_WINDOW",
+          requestedStartTime,
+          requestedEndTime,
+          phase,
+          taskIndex,
+          nextBlock: checkpoint.nextBlock ?? null,
+          progressFingerprintAfter,
+        });
+        checkpointUpdatedAt = new Date().toISOString();
+        writeCheckpoint({
+          ...checkpoint,
+          resumeToken,
+          phase,
+          sourceCursor: { candidateIndex: taskIndex, poolIndex: 0, taskIndex },
+          progressFingerprint: progressFingerprintAfter,
+          previousProgressFingerprint: progressFingerprintBefore ?? undefined,
+          repeatedRange: stalled ? checkpoint.lastAttemptedRange : undefined,
+          updatedAt: checkpointUpdatedAt,
+        });
+      }
+
+      const released = release();
+      release = null;
+      const diagnostics = historyPathDiagnostics(config, released);
+      const finalStore = readRotationHistoryStore(config);
+      const historyStoreFingerprint = rotationHistoryFingerprint(finalStore);
+      const timestamps = finalStore.records.map((record) => record.timestamp);
+      const anchorRecords = anchorPoolAddress
+        ? finalStore.records.filter((record) => sameAddress(record.poolAddress, anchorPoolAddress))
+        : [];
+      const latestAnchor = anchorRecords
+        .filter((record) => record.blockNumber !== null)
+        .sort((a, b) => BigInt(b.blockNumber!) > BigInt(a.blockNumber!) ? 1 : -1)[0];
+      const anchorLatestBlock = latestAnchor?.blockNumber ?? null;
+      const anchorLatestTimestamp = latestAnchor ? isoFromSeconds(latestAnchor.timestamp) : null;
+      const anchorLagBlocks = anchorLatestBlock ? Number(latestBlockNumber - BigInt(anchorLatestBlock)) : null;
+      const anchorLagMinutes = anchorLatestTimestamp
+        ? round((latestBlockInfo.timestamp - Math.floor(Date.parse(anchorLatestTimestamp) / 1000)) / 60, 4)
+        : null;
+      return {
+        ok: true,
+        code,
+        ...(code === "PARTIAL_PROGRESS" ? { reason: "recent signal-window refresh made bounded progress and returned before timeout" } : {}),
+        ...(code === "CHECKPOINT_STALLED"
+          ? {
+              reason: "recent refresh checkpoint did not make effective block-range progress",
+              repeatedRange: checkpoint.lastAttemptedRange,
+            }
+          : {}),
+        ...(resumeToken ? { resumeToken } : {}),
+        checkpointPath: historySyncCheckpointPath(config),
+        ...(checkpointUpdatedAt ? { checkpointUpdatedAt } : {}),
+        maximumRuntimeMs: normalized.maximumRuntimeMs,
+        lookbackMinutes: normalized.lookbackMinutes,
+        requestedStartTime,
+        requestedEndTime,
+        recordsAdded,
+        recordsUpdated,
+        duplicateRecordsIgnored,
+        earliestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.min(...timestamps)) : null,
+        latestTimestamp: timestamps.length > 0 ? isoFromSeconds(Math.max(...timestamps)) : null,
+        sourceCompleteness,
+        unresolvedGaps: [...new Set(unresolvedGaps)],
+        syncPurpose: "RECENT_SIGNAL_WINDOW",
+        tipRefreshMinutes: normalized.tipRefreshMinutes,
+        phase: code === "COMPLETE" ? "SIGNAL_WINDOW_COMPLETE" : phase,
+        anchorTipComplete: anchorTipComplete(),
+        anchorLatestBlock,
+        anchorLatestTimestamp,
+        anchorLagBlocks,
+        anchorLagMinutes,
+        blocksScanned,
+        rangesCompleted,
+        rangesWithZeroLogs,
+        recordsRetrieved,
+        checkpointAdvanced,
+        tipLagBlocksBefore: null,
+        tipLagBlocksAfter: anchorLagBlocks,
+        tipLagMinutesBefore: null,
+        tipLagMinutesAfter: anchorLagMinutes,
+        progressFingerprintBefore,
+        progressFingerprintAfter,
         repositoryRoot: diagnostics.repositoryRoot,
         currentWorkingDirectory: diagnostics.currentWorkingDirectory,
         historyStoreDirectory: diagnostics.historyStoreDirectory,
@@ -5127,6 +6632,14 @@ function statusForCandidateFromStore(input: {
     analysisMode: historyQuality.analysisMode,
     latestTradeAgeMinutes: historyQuality.latestTradeAgeMinutes,
     unresolvedGaps: historyQuality.unresolvedGaps,
+    tipFreshnessStatus: syncStatus?.tipFreshnessStatus ?? "TIP_NOT_SCANNED",
+    tipCompletenessPercent: syncStatus?.tipCompletenessPercent ?? 0,
+    currentSignalWindowCompletenessPercent:
+      syncStatus?.signalWindowCompletenessPercent ?? historyQuality.sourceCompletenessPercent,
+    sevenDayCompletenessPercent: syncStatus?.sevenDayCompletenessPercent ?? 0,
+    latestSourceTradeAgeMinutes: syncStatus?.latestSourceTradeAgeMinutes,
+    pipelineLagMinutes: syncStatus?.pipelineLagMinutes,
+    requiredPoolsComplete: syncStatus?.requiredPoolsComplete ?? false,
     readinessForLiveScanning: historyQuality.readinessForLiveScanning,
   };
 }
@@ -6853,6 +8366,7 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
       candidateIds: z.array(candidateIdSchema).optional(),
       resumeToken: z.string().optional(),
       maximumPoolsPerRun: z.number().int().positive().optional(),
+      syncPurpose: z.enum(["RECENT_SIGNAL_WINDOW", "HISTORICAL_BACKFILL"]).optional().default("HISTORICAL_BACKFILL"),
     },
     handler: async (args, cfg) =>
       ok(
@@ -6866,6 +8380,39 @@ export function registerEusdcRotationTools(server: McpServer, config: AppConfig)
             candidateIds: args.candidateIds as RotationCandidateId[] | undefined,
             resumeToken: args.resumeToken as string | undefined,
             maximumPoolsPerRun: args.maximumPoolsPerRun as number | undefined,
+            syncPurpose: args.syncPurpose as RotationHistorySyncPurpose | undefined,
+          }),
+        ),
+      ),
+  });
+
+  registerTool(server, config, {
+    name: "eusdc_rotation_recent_refresh",
+    description:
+      "Freshness-first public market-history refresh for the current eUSDC rotation signal window. Scans newest blocks first, refreshes WPLS/eUSDC anchors before anchored pools, writes only public history/checkpoint data, and never calls Piteas or creates wallet actions.",
+    category: "wallet",
+    inputSchema: {
+      lookbackMinutes: z.number().int().positive().optional().default(DEFAULT_LOOKBACK_MINUTES),
+      candidateIds: z.array(candidateIdSchema).optional(),
+      tipRefreshMinutes: z.number().int().positive().optional().default(120),
+      maximumRuntimeMs: z.number().int().positive().max(180_000).optional().default(120_000),
+      maximumBlocksPerChunk: z.number().int().positive().optional().default(10_000),
+      maximumPoolsPerRun: z.number().int().positive().optional().default(6),
+      resumeToken: z.string().optional(),
+      forceRecentBlockRecheck: z.boolean().optional().default(true),
+    },
+    handler: async (args, cfg) =>
+      ok(
+        neverReturnPrivateKey(
+          await runEusdcRotationRecentRefresh(cfg, {
+            lookbackMinutes: args.lookbackMinutes as number | undefined,
+            candidateIds: args.candidateIds as RotationCandidateId[] | undefined,
+            tipRefreshMinutes: args.tipRefreshMinutes as number | undefined,
+            maximumRuntimeMs: args.maximumRuntimeMs as number | undefined,
+            maximumBlocksPerChunk: args.maximumBlocksPerChunk as number | undefined,
+            maximumPoolsPerRun: args.maximumPoolsPerRun as number | undefined,
+            resumeToken: args.resumeToken as string | undefined,
+            forceRecentBlockRecheck: args.forceRecentBlockRecheck as boolean | undefined,
           }),
         ),
       ),
