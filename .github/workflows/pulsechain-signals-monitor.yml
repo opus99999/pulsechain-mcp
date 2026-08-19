@@ -1,6 +1,11 @@
 name: PulseChain Signals Monitor
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/pulsechain-signals-monitor.yml
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
