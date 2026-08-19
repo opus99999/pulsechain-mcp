@@ -1,0 +1,62 @@
+name: PulseChain Signals Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pulsechain-signals-monitor
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Refresh verified feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger watcher and drain backlog
+        shell: bash
+        env:
+          SIGNALS_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/signals?limit=1&scheduler=github-actions
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 6); do
+            body="$(
+              curl                 --fail-with-body                 --silent                 --show-error                 --retry 2                 --retry-all-errors                 --connect-timeout 10                 --max-time 25                 --header "Cache-Control: no-cache"                 --header "User-Agent: pulsechain-signals-scheduler/1.0"                 "${SIGNALS_URL}&attempt=${attempt}"
+            )"
+
+            error="$(jq -r '.watcher.last_error // empty' <<<"${body}")"
+            if [[ -n "${error}" ]]; then
+              printf 'Watcher error: %s\n' "${error}" >&2
+              exit 1
+            fi
+
+            status="$(jq -r '.watcher.status // "unknown"' <<<"${body}")"
+            block="$(jq -r '.watcher.last_scanned_block // 0' <<<"${body}")"
+            behind="$(jq -r '.watcher.blocks_behind // 0' <<<"${body}")"
+            refresh="$(jq -r '.refresh.state // "unknown"' <<<"${body}")"
+            printf 'attempt=%s status=%s refresh=%s block=%s behind=%s\n'               "${attempt}" "${status}" "${refresh}" "${block}" "${behind}"
+
+            if [[ "${behind}" =~ ^[0-9]+$ ]] && (( behind == 0 )); then
+              exit 0
+            fi
+
+            sleep 20
+          done
+
+          final="$(
+            curl               --fail-with-body               --silent               --show-error               --retry 2               --retry-all-errors               --connect-timeout 10               --max-time 20               --header "Cache-Control: no-cache"               --header "User-Agent: pulsechain-signals-scheduler/1.0"               "https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/watcher?scheduler=github-actions"
+          )"
+
+          error="$(jq -r '.last_error // empty' <<<"${final}")"
+          if [[ -n "${error}" ]]; then
+            printf 'Watcher error: %s\n' "${error}" >&2
+            exit 1
+          fi
+
+          jq '{status, last_scanned_block, safe_head_block, blocks_behind, rpc_quorum, last_completed_at}' <<<"${final}"
