@@ -112,9 +112,9 @@ jobs:
                 --silent \
                 --show-error \
                 --connect-timeout 10 \
-                --max-time 35 \
+                --max-time 55 \
                 --header "Cache-Control: no-cache" \
-                --header "User-Agent: pulsechain-signals-quote-observer/1.2" \
+                --header "User-Agent: pulsechain-signals-quote-observer/1.3" \
                 "${QUOTES_URL}&sample=${attempt}"
             )"
 
