@@ -90,3 +90,53 @@ jobs:
           fi
 
           jq '{status, last_scanned_block, safe_head_block, blocks_behind, rpc_quorum, last_completed_at}' <<<"${final}"
+
+  quotes:
+    name: Record passive Piteas quotes
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Advance one staged quote set
+        shell: bash
+        env:
+          QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe?scheduler=github-actions
+        run: |
+          set -euo pipefail
+
+          samples=4
+          for attempt in $(seq 1 "${samples}"); do
+            sample_started="$(date +%s)"
+            body="$(
+              curl \
+                --fail-with-body \
+                --silent \
+                --show-error \
+                --connect-timeout 10 \
+                --max-time 35 \
+                --header "Cache-Control: no-cache" \
+                --header "User-Agent: pulsechain-signals-quote-observer/1.0" \
+                "${QUOTES_URL}&sample=${attempt}"
+            )"
+
+            status="$(jq -r '.run.status // "missing"' <<<"${body}")"
+            observer="$(jq -r '.observer.status // "missing"' <<<"${body}")"
+            symbol="$(jq -r '.run.symbol // "-"' <<<"${body}")"
+            notional="$(jq -r '.run.notional_usd // 0' <<<"${body}")"
+            stage="$(jq -r 'if .run.direction then (.run.direction + "_" + (.run.attempt_number | tostring)) else "-" end' <<<"${body}")"
+
+            if [[ "${status}" == "missing" || "${observer}" == "missing" ]]; then
+              printf 'Malformed quote observer response\n' >&2
+              exit 1
+            fi
+
+            printf 'sample=%s run=%s observer=%s symbol=%s notional_usd=%s stage=%s\n' \
+              "${attempt}" "${status}" "${observer}" "${symbol}" "${notional}" "${stage}"
+
+            if (( attempt < samples )); then
+              elapsed=$(( $(date +%s) - sample_started ))
+              wait_seconds=$(( 75 - elapsed ))
+              if (( wait_seconds > 0 )); then
+                sleep "${wait_seconds}"
+              fi
+            fi
+          done
