@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - name: Advance one staged quote set
+      - name: Advance staged quote observations
         shell: bash
         env:
           QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe?scheduler=github-actions
