@@ -85,10 +85,11 @@ jobs:
         shell: bash
         env:
           QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe
+          SCANNER_REFRESH_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/signals?limit=1&scheduler=github-actions&phase=quote-preflight
           OIDC_AUDIENCE: pulsechain-signals-scheduler-v0.4.2
           SCHEDULER_PROTOCOL: piteas-scheduler-delivery-v0.4.2
-          SCHEDULER_CONFIG_SHA256: sha256:a63612d3655f6b52381fbf31a701a87afb4f249554198ab452d3c26f50007194
-          RUNTIME_FINGERPRINT_SHA256: sha256:9dd44204ff04291fb9657ef807be13e53263f43240b75760b3fe833b8083d535
+          SCHEDULER_CONFIG_SHA256: sha256:a227cf33ff623e2ad40610df0ecd399052856bff92a16faacae9734a2cb807db
+          RUNTIME_FINGERPRINT_SHA256: sha256:d7c4fe18093e7c9b3afc17b09e1f2d277c06072589df841909bb0a0c0fced082
           BUILD_ID: pulsechain-signals-v0.4.2
           COLLECTOR_VERSION: piteas-readonly-observer-v0.3.3
           GITHUB_TOKEN: ${{ github.token }}
@@ -122,6 +123,40 @@ jobs:
           trap 'rm -f "${response_file}"' EXIT
 
           for attempt in $(seq 1 "${samples}"); do
+            sample_started="$(date +%s)"
+            scanner_body="$(
+              curl \
+                --fail-with-body \
+                --silent \
+                --show-error \
+                --retry 2 \
+                --retry-all-errors \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --header "Cache-Control: no-cache" \
+                --header "User-Agent: pulsechain-signals-scheduler/2.1" \
+                "${SCANNER_REFRESH_URL}&sample=${attempt}"
+            )"
+
+            scanner_error="$(jq -r '.watcher.last_error // empty' <<<"${scanner_body}")"
+            scanner_status="$(jq -er '.watcher.status | select(type == "string")' <<<"${scanner_body}")"
+            scanner_lag="$(jq -er '.watcher.blocks_behind | select(type == "number")' <<<"${scanner_body}")"
+            scanner_quorum="$(jq -er '.watcher.rpc_quorum | select(type == "number")' <<<"${scanner_body}")"
+            scanner_block="$(jq -er '.watcher.safe_head_block | select(type == "number" and . > 0)' <<<"${scanner_body}")"
+            refresh_state="$(jq -er '.refresh.state | select(type == "string")' <<<"${scanner_body}")"
+
+            if [[ -n "${scanner_error}" ||
+                  "${scanner_lag}" != "0" ||
+                  "${scanner_quorum}" != "4" ||
+                  ("${refresh_state}" != "completed" && "${refresh_state}" != "not_due") ]]; then
+              printf 'Quote preflight scanner authority failed: status=%s refresh=%s block=%s lag=%s quorum=%s error=%s\n' \
+                "${scanner_status}" "${refresh_state}" "${scanner_block}" "${scanner_lag}" "${scanner_quorum}" "${scanner_error:-none}" >&2
+              exit 1
+            fi
+
+            printf 'quote_sample=%s scanner_status=%s refresh=%s block=%s lag=%s quorum=%s\n' \
+              "${attempt}" "${scanner_status}" "${refresh_state}" "${scanner_block}" "${scanner_lag}" "${scanner_quorum}"
+
             oidc_response="$(
               curl                 --fail-with-body                 --silent                 --show-error                 --connect-timeout 10                 --max-time 20                 --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"                 "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}"
             )"
@@ -180,7 +215,11 @@ jobs:
             fi
 
             if (( attempt < samples )); then
-              sleep 75
+              elapsed=$(( $(date +%s) - sample_started ))
+              wait_seconds=$(( 75 - elapsed ))
+              if (( wait_seconds > 0 )); then
+                sleep "${wait_seconds}"
+              fi
             fi
           done
 
