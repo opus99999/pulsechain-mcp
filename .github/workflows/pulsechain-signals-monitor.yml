@@ -7,7 +7,7 @@ on:
     paths:
       - .github/workflows/pulsechain-signals-monitor.yml
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/20 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -34,17 +34,7 @@ jobs:
           for attempt in $(seq 1 "${samples}"); do
             sample_started="$(date +%s)"
             body="$(
-              curl \
-                --fail-with-body \
-                --silent \
-                --show-error \
-                --retry 2 \
-                --retry-all-errors \
-                --connect-timeout 10 \
-                --max-time 30 \
-                --header "Cache-Control: no-cache" \
-                --header "User-Agent: pulsechain-signals-scheduler/2.0" \
-                "${SIGNALS_URL}&sample=${attempt}"
+              curl                 --fail-with-body                 --silent                 --show-error                 --retry 2                 --retry-all-errors                 --connect-timeout 10                 --max-time 30                 --header "Cache-Control: no-cache"                 --header "User-Agent: pulsechain-signals-scheduler/2.0"                 "${SIGNALS_URL}&sample=${attempt}"
             )"
 
             error="$(jq -r '.watcher.last_error // empty' <<<"${body}")"
@@ -57,8 +47,7 @@ jobs:
             block="$(jq -r '.watcher.last_scanned_block // 0' <<<"${body}")"
             behind="$(jq -r '.watcher.blocks_behind // 0' <<<"${body}")"
             refresh="$(jq -r '.refresh.state // "unknown"' <<<"${body}")"
-            printf 'sample=%s status=%s refresh=%s block=%s behind=%s\n' \
-              "${attempt}" "${status}" "${refresh}" "${block}" "${behind}"
+            printf 'sample=%s status=%s refresh=%s block=%s behind=%s\n'               "${attempt}" "${status}" "${refresh}" "${block}" "${behind}"
 
             if (( attempt < samples )); then
               elapsed=$(( $(date +%s) - sample_started ))
@@ -70,17 +59,7 @@ jobs:
           done
 
           final="$(
-            curl \
-              --fail-with-body \
-              --silent \
-              --show-error \
-              --retry 2 \
-              --retry-all-errors \
-              --connect-timeout 10 \
-              --max-time 20 \
-              --header "Cache-Control: no-cache" \
-              --header "User-Agent: pulsechain-signals-scheduler/2.0" \
-              "https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/watcher?scheduler=github-actions"
+            curl               --fail-with-body               --silent               --show-error               --retry 2               --retry-all-errors               --connect-timeout 10               --max-time 20               --header "Cache-Control: no-cache"               --header "User-Agent: pulsechain-signals-scheduler/2.0"               "https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/watcher?scheduler=github-actions"
           )"
 
           error="$(jq -r '.last_error // empty' <<<"${final}")"
@@ -92,51 +71,120 @@ jobs:
           jq '{status, last_scanned_block, safe_head_block, blocks_behind, rpc_quorum, last_completed_at}' <<<"${final}"
 
   quotes:
-    name: Record passive Piteas quotes
+    name: Record authenticated passive Piteas quotes
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs: scan
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 9
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     steps:
-      - name: Advance staged quote observations
+      - name: Advance trusted staged quote observations
         shell: bash
         env:
-          QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe?scheduler=github-actions
+          QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe
+          OIDC_AUDIENCE: pulsechain-signals-scheduler-v0.4.2
+          SCHEDULER_PROTOCOL: piteas-scheduler-delivery-v0.4.2
+          SCHEDULER_CONFIG_SHA256: sha256:fb1339823157cf40cd049be7f196f34428a35e1d33431e0ce247b8955ea57033
+          RUNTIME_FINGERPRINT_SHA256: sha256:21bfd9ef6c7ade1b95e4a16484a67a9172fd0d246433b11025ecd82f408e00bb
+          BUILD_ID: pulsechain-signals-v0.4.2
+          COLLECTOR_VERSION: piteas-readonly-observer-v0.3.3
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
+          run_metadata="$(
+            curl               --fail-with-body               --silent               --show-error               --connect-timeout 10               --max-time 20               --header "Accept: application/vnd.github+json"               --header "Authorization: Bearer ${GITHUB_TOKEN}"               --header "X-GitHub-Api-Version: 2022-11-28"               "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          )"
+
+          metadata_run_id="$(jq -er '.id | tostring' <<<"${run_metadata}")"
+          metadata_event="$(jq -er '.event | select(type == "string")' <<<"${run_metadata}")"
+          scheduled_at="$(jq -er '.created_at | select(type == "string" and length > 0)' <<<"${run_metadata}")"
+
+          if [[ "${metadata_run_id}" != "${GITHUB_RUN_ID}" || "${metadata_event}" != "schedule" ]]; then
+            printf 'GitHub run metadata did not match the natural scheduler run\n' >&2
+            exit 1
+          fi
+
+          scheduled_at="$(date -u -d "${scheduled_at}" '+%Y-%m-%dT%H:%M:%SZ')"
+          deployment_digest="$(
+            printf '%s|%s' "${RUNTIME_FINGERPRINT_SHA256}" "${GITHUB_SHA}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          deployment_fingerprint="sha256:${deployment_digest}"
+
           samples=4
+          failure_count=0
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+
           for attempt in $(seq 1 "${samples}"); do
-            sample_started="$(date +%s)"
-            body="$(
-              curl \
-                --fail-with-body \
-                --silent \
-                --show-error \
-                --connect-timeout 10 \
-                --max-time 55 \
-                --header "Cache-Control: no-cache" \
-                --header "User-Agent: pulsechain-signals-quote-observer/1.3" \
-                "${QUOTES_URL}&sample=${attempt}"
+            oidc_response="$(
+              curl                 --fail-with-body                 --silent                 --show-error                 --connect-timeout 10                 --max-time 20                 --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"                 "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}"
             )"
+            oidc_token="$(jq -er '.value | select(type == "string" and length > 0)' <<<"${oidc_response}")"
+            printf '::add-mask::%s\n' "${oidc_token}"
 
-            status="$(jq -r '.run.status // "missing"' <<<"${body}")"
-            observer="$(jq -r '.observer.status // "missing"' <<<"${body}")"
-            symbol="$(jq -r '.run.symbol // "-"' <<<"${body}")"
-            notional="$(jq -r '.run.notional_usd // 0' <<<"${body}")"
-            stage="$(jq -r 'if .run.direction then (.run.direction + "_" + (.run.attempt_number | tostring)) else "-" end' <<<"${body}")"
+            requested_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            invocation_id="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:quotes:${attempt}"
+            : > "${response_file}"
 
-            if [[ "${status}" == "missing" || "${observer}" == "missing" ]]; then
-              printf 'Malformed quote observer response\n' >&2
-              exit 1
+            transport_ok=true
+            if http_status="$(
+              curl                 --request POST                 --silent                 --show-error                 --connect-timeout 10                 --max-time 55                 --output "${response_file}"                 --write-out "%{http_code}"                 --header "Accept: application/json"                 --header "Authorization: Bearer ${oidc_token}"                 --header "Cache-Control: no-cache"                 --header "User-Agent: pulsechain-signals-quote-observer/1.4"                 --header "X-Pulse-Scheduler-Protocol: ${SCHEDULER_PROTOCOL}"                 --header "X-Pulse-Scheduler-Config: ${SCHEDULER_CONFIG_SHA256}"                 --header "X-Pulse-Runtime-Fingerprint: ${RUNTIME_FINGERPRINT_SHA256}"                 --header "X-Pulse-Deployment-Fingerprint: ${deployment_fingerprint}"                 --header "X-Pulse-Build-Id: ${BUILD_ID}"                 --header "X-Pulse-Collector-Version: ${COLLECTOR_VERSION}"                 --header "X-Pulse-Scheduler-Invocation: ${invocation_id}"                 --header "X-Pulse-Scheduler-Sample: ${attempt}"                 --header "X-Pulse-Scheduler-Scheduled-At: ${scheduled_at}"                 --header "X-Pulse-Scheduler-Requested-At: ${requested_at}"                 "${QUOTES_URL}"
+            )"; then
+              http_status="${http_status:-000}"
+            else
+              transport_ok=false
+              http_status="${http_status:-000}"
+              failure_count=$((failure_count + 1))
             fi
 
-            printf 'sample=%s run=%s observer=%s symbol=%s notional_usd=%s stage=%s\n' \
-              "${attempt}" "${status}" "${observer}" "${symbol}" "${notional}" "${stage}"
+            response_valid=false
+            if [[ "${transport_ok}" == "true" ]] &&
+              jq -e '
+                type == "object" and
+                (.classification | type == "string") and
+                (.accepted | type == "boolean") and
+                (.authenticated | type == "boolean")
+              ' "${response_file}" >/dev/null 2>&1; then
+              response_valid=true
+              classification="$(jq -r '.classification' "${response_file}")"
+              accepted="$(jq -r 'if .accepted == true then "true" else "false" end' "${response_file}")"
+              authenticated="$(jq -r 'if .authenticated == true then "true" else "false" end' "${response_file}")"
+              trusted="$(jq -r 'if .trusted == true then "true" else "false" end' "${response_file}")"
+              receipt_id="$(jq -r '.receipt_id // "-"' "${response_file}")"
+              wake_fingerprint="$(jq -r '.wake_fingerprint // "-"' "${response_file}")"
+              piteas_status="$(jq -r '.piteas.http_status // "-"' "${response_file}")"
+              veto_reason="$(jq -r '.veto_reason // .error_code // "-"' "${response_file}")"
 
-            if (( attempt < samples )); then
-              elapsed=$(( $(date +%s) - sample_started ))
-              wait_seconds=$(( 75 - elapsed ))
-              if (( wait_seconds > 0 )); then
-                sleep "${wait_seconds}"
+              printf 'sample=%s http=%s accepted=%s authenticated=%s trusted=%s classification=%s receipt=%s piteas_http=%s veto=%s\n'                 "${attempt}" "${http_status}" "${accepted}" "${authenticated}" "${trusted}"                 "${classification}" "${receipt_id}" "${piteas_status}" "${veto_reason}"
+
+              if [[ "${accepted}" != "true" ||
+                    "${authenticated}" != "true" ||
+                    "${receipt_id}" == "-" ||
+                    "${wake_fingerprint}" == "-" ||
+                    "${classification}" == "UNTRUSTED_WAKE" ]]; then
+                failure_count=$((failure_count + 1))
               fi
             fi
+
+            if [[ "${transport_ok}" != "true" || "${response_valid}" != "true" ]]; then
+              printf 'sample=%s http=%s transport=%s response=malformed\n'                 "${attempt}" "${http_status}" "${transport_ok}" >&2
+              if [[ "${transport_ok}" == "true" ]]; then
+                failure_count=$((failure_count + 1))
+              fi
+            fi
+
+            if (( attempt < samples )); then
+              sleep 75
+            fi
           done
+
+          if (( failure_count > 0 )); then
+            printf '%s scheduler delivery cycle(s) failed\n' "${failure_count}" >&2
+            exit 1
+          fi
