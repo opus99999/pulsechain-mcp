@@ -87,8 +87,8 @@ jobs:
           QUOTES_URL: https://pulsechain-signals.brohexphiat.chatgpt.site/api/v1/quotes/observe
           OIDC_AUDIENCE: pulsechain-signals-scheduler-v0.4.2
           SCHEDULER_PROTOCOL: piteas-scheduler-delivery-v0.4.2
-          SCHEDULER_CONFIG_SHA256: sha256:fb1339823157cf40cd049be7f196f34428a35e1d33431e0ce247b8955ea57033
-          RUNTIME_FINGERPRINT_SHA256: sha256:21bfd9ef6c7ade1b95e4a16484a67a9172fd0d246433b11025ecd82f408e00bb
+          SCHEDULER_CONFIG_SHA256: sha256:a63612d3655f6b52381fbf31a701a87afb4f249554198ab452d3c26f50007194
+          RUNTIME_FINGERPRINT_SHA256: sha256:9dd44204ff04291fb9657ef807be13e53263f43240b75760b3fe833b8083d535
           BUILD_ID: pulsechain-signals-v0.4.2
           COLLECTOR_VERSION: piteas-readonly-observer-v0.3.3
           GITHUB_TOKEN: ${{ github.token }}
