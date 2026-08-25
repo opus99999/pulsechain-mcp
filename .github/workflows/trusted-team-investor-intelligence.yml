@@ -1,0 +1,37 @@
+name: Trusted Team · Investor Intelligence
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: trusted-team-investor-intelligence-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      github.repository == 'opus99999/pulsechain-mcp' &&
+      github.repository_id == '1320639709' &&
+      github.actor == 'opus99999' &&
+      github.actor_id == '212180323' &&
+      startsWith(github.event.issue.title, '[TRUSTED_TEAM investor-intelligence] PUBLISH ')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+          submodules: false
+      - name: Validate and publish immutable update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          GITHUB_REPOSITORY_OWNER_ID: ${{ github.repository_owner_id }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: node scripts/trusted-team-publish.mjs investor-intelligence
