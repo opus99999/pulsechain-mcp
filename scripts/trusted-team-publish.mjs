@@ -134,6 +134,17 @@ function isoTime(value, label) {
   return text;
 }
 
+const GITHUB_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
+export function normalizeGitHubEventTime(value, label) {
+  const text = safeIdentifier(value, label, 80);
+  if (!GITHUB_EVENT_TIME.test(text)) fail("INVALID_TIME", label);
+  const parsed = new Date(text);
+  const expected = text.includes(".") ? text : `${text.slice(0, -1)}.000Z`;
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== expected) fail("INVALID_TIME", label);
+  return parsed.toISOString();
+}
+
 function safeFilename(value, label) {
   const text = safeIdentifier(value, label, 180);
   if (
@@ -357,7 +368,7 @@ export function validateGitHubContext(event, env, fixedWorkstream) {
     fail("WORKFLOW_COMMIT_MISMATCH", "GITHUB_WORKFLOW_SHA");
   }
   if (!Number.isSafeInteger(event.issue.number) || event.issue.number < 1) fail("INVALID_ISSUE_NUMBER", "issue.number");
-  const createdAt = isoTime(event.issue.created_at, "issue.created_at");
+  const createdAt = normalizeGitHubEventTime(event.issue.created_at, "issue.created_at");
   const expectedIssueUrl = `https://github.com/${REPOSITORY}/issues/${event.issue.number}`;
   if (event.issue.html_url !== expectedIssueUrl) fail("ISSUE_URL_MISMATCH", "issue.html_url");
   const body = safeText(event.issue.body, "issue.body", 65_000);
