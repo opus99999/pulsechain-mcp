@@ -23,7 +23,10 @@ import {
   emptyIndex,
   emptyLatest,
   jsonBytes,
+  normalizeGitHubEventTime,
   publishToLedger,
+  renderUpdate,
+  validateGitHubContext,
   validatePublicationRequest,
 } from "../scripts/trusted-team-publish.mjs";
 
@@ -132,6 +135,85 @@ function contextFor(request, position, workflowSha) {
   };
 }
 
+function githubIssueFixture(request, createdAt, workflowSha) {
+  const issueNumber = 901;
+  return {
+    event: {
+      action: "opened",
+      repository: {
+        full_name: REPOSITORY,
+        id: 1320639709,
+        owner: { id: 212180323 },
+      },
+      sender: { id: Number(AUTHORIZED_ACTOR_ID), login: AUTHORIZED_ACTOR },
+      issue: {
+        number: issueNumber,
+        created_at: createdAt,
+        html_url: `https://github.com/${REPOSITORY}/issues/${issueNumber}`,
+        title: `[TRUSTED_TEAM ${request.workstream_id}] PUBLISH ${request.update_id}`,
+        body: JSON.stringify(request),
+        user: { id: Number(AUTHORIZED_ACTOR_ID), login: AUTHORIZED_ACTOR },
+      },
+    },
+    env: {
+      GITHUB_REPOSITORY: REPOSITORY,
+      GITHUB_REPOSITORY_ID: "1320639709",
+      GITHUB_REPOSITORY_OWNER_ID: "212180323",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_EVENT_NAME: "issues",
+      GITHUB_EVENT_ACTION: "opened",
+      GITHUB_ACTOR_ID: AUTHORIZED_ACTOR_ID,
+      GITHUB_ACTOR: AUTHORIZED_ACTOR,
+      GITHUB_WORKFLOW_REF: `${REPOSITORY}/.github/workflows/trusted-team-${request.workstream_id}.yml@refs/heads/main`,
+      GITHUB_SHA: workflowSha,
+      GITHUB_WORKFLOW_SHA: workflowSha,
+    },
+  };
+}
+
+function assertInvalidTime(operation, label) {
+  assert.throws(operation, (error) => {
+    assert.equal(error.code, "INVALID_TIME");
+    assert.equal(error.message, `INVALID_TIME: ${label}`);
+    return true;
+  });
+}
+
+function verifyGitHubEventTimestampNormalization(request, workflowSha) {
+  const nativeTime = "2026-08-25T23:57:35Z";
+  const canonicalTime = "2026-08-25T23:57:35.000Z";
+  assert.equal(normalizeGitHubEventTime(nativeTime, "issue.created_at"), canonicalTime);
+  assert.equal(normalizeGitHubEventTime(canonicalTime, "issue.created_at"), canonicalTime);
+
+  const fixture = githubIssueFixture(request, nativeTime, workflowSha);
+  const context = validateGitHubContext(fixture.event, fixture.env, request.workstream_id);
+  assert.equal(context.published_at, canonicalTime);
+
+  const rendered = renderUpdate(context.request, context);
+  assert.equal(rendered.manifest.published_at, canonicalTime);
+  assert.equal(rendered.latest.published_at, canonicalTime);
+  assert.equal(rendered.indexEntry.published_at, canonicalTime);
+
+  for (const invalid of [
+    "2026-08-25T23:57:35+00:00",
+    "2026-08-25 23:57:35Z",
+    "2026-08-25T23:57:35",
+    "2026-08-25",
+    "2026-02-30T23:57:35Z",
+    "2026-08-25T23:57:35.0000Z",
+    "arbitrary text",
+  ]) {
+    assertInvalidTime(() => normalizeGitHubEventTime(invalid, "issue.created_at"), "issue.created_at");
+  }
+
+  const noncanonicalArtifactTime = structuredClone(request);
+  noncanonicalArtifactTime.artifact.generated_at = nativeTime;
+  assertInvalidTime(
+    () => validatePublicationRequest(noncanonicalArtifactTime, request.workstream_id),
+    "artifact.generated_at",
+  );
+}
+
 async function seedRepository(root) {
   const remote = join(root, "remote.git");
   const seed = join(root, "seed");
@@ -190,6 +272,7 @@ async function main() {
   const root = await mkdtemp(join(tmpdir(), "trusted-team-ledger-"));
   const { remote, head } = await seedRepository(root);
   const requests = WORKSTREAMS.map((workstream, position) => requestFor(workstream, position, head));
+  verifyGitHubEventTimestampNormalization(requests[0], head);
   const clones = await Promise.all(WORKSTREAMS.map((workstream) => cloneWorker(root, remote, workstream)));
   const barrier = new ExactBarrier(requests.map((request) => request.update_id));
 
