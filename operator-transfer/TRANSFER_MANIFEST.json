@@ -1,0 +1,33 @@
+{
+  "schema_version": "pulsechain-external-observer-operator-transfer-r12b@1.0.0",
+  "filename": "PulseChain_External_Grok_Observer_Gateway_Operator_Bundle_R12A_20260827T222654Z.zip",
+  "repository": "opus99999/pulsechain-mcp",
+  "branch": "external-observer-grok-mcp-r12a-operator-transfer-20260827",
+  "repository_parent_commit": "f7c5427d505757fe101ea20ef1c402946152f3aa",
+  "transfer_commit": "SELF",
+  "transfer_tree": "SELF^{tree}",
+  "self_reference_control": "Exact commit and tree hashes are verified from the containing Git object and remote read-back; embedding either literal hash in this same commit would be cryptographically self-referential.",
+  "git_blob_sha": "2eceae3cf5a6e002dc7bb45fff93f25b93a7eb7e",
+  "byte_size": 62224,
+  "sha256": "799faa31dbcb922370c5cd374d68ef59cc749d3d967a077912034ea0298c5ea7",
+  "zip_member_count": 28,
+  "zip_integrity": "PASS",
+  "inventory_validation": "PASS",
+  "path_safety": "PASS",
+  "source_commit": "e1a3ffae1e735ec3e7c310b147b2ee7d793e51c0",
+  "source_tree": "3c2de63d326bcd4ca62dfcf43a5bd8a5496d8db5",
+  "publication_mode": "DISABLED",
+  "transfer_purpose": "TEMPORARY_NON_DEFAULT_BRANCH_BINARY_TRANSFER_TO_REMOTE_WINDOWS_CODEX",
+  "generated_at_utc": "2026-08-27T23:30:59Z",
+  "no_secret_present": true,
+  "prohibited_material_present": false,
+  "binary_safe_treatment": {
+    "git_attributes": {
+      "text": "unspecified",
+      "diff": "unspecified",
+      "filter": "unspecified",
+      "working_tree_encoding": "unspecified"
+    },
+    "direct_git_blob": true
+  }
+}
