@@ -1,0 +1,6 @@
+{
+  "schema_version": "pulsechain-external-observer-index@1.0.0",
+  "project_id": "pulsechain-investor-intelligence",
+  "observer_id": "grok-market-liquidity",
+  "observations": []
+}

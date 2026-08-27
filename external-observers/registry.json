@@ -1,0 +1,132 @@
+{
+  "schema_version": "pulsechain-external-observer-registry@1.0.0",
+  "project_id": "pulsechain-investor-intelligence",
+  "classification": "PROVISIONAL_EXTERNAL_OBSERVER_INPUT",
+  "observers": [
+    {
+      "observer_id": "grok-x-protocol",
+      "title": "PulseChain X Protocol and Public-Statement Observer",
+      "purpose": "Monitor authenticated or materially relevant public statements.",
+      "permitted_source_classes": [
+        "X_POST",
+        "X_THREAD",
+        "OFFICIAL_WEB",
+        "SIGNED_MESSAGE",
+        "PUBLIC_SECONDARY_SOURCE",
+        "MULTI_SOURCE"
+      ],
+      "permitted_target_workstreams": [
+        "signals-platform",
+        "validator-flows",
+        "identity-attribution",
+        "investor-intelligence"
+      ],
+      "publication_state": "PENDING_SPECIALIST_REVIEW",
+      "last_accepted_observation_id": null,
+      "index": "external-observers/observers/grok-x-protocol/index.json",
+      "permanent_page": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol",
+      "bootstrap_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/api/v1/external-observers/bootstrap/grok-x-protocol",
+      "contract_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/contracts/pulsechain-external-observation-1.0.0.json"
+    },
+    {
+      "observer_id": "grok-infrastructure-incidents",
+      "title": "PulseChain Infrastructure, Repository, Bridge, and Incident Observer",
+      "purpose": "Monitor official infrastructure, repository, bridge, and incident sources.",
+      "permitted_source_classes": [
+        "OFFICIAL_WEB",
+        "STATUS_PAGE",
+        "GITHUB",
+        "X_POST",
+        "PUBLIC_SECONDARY_SOURCE",
+        "MULTI_SOURCE"
+      ],
+      "permitted_target_workstreams": [
+        "signals-platform",
+        "investor-intelligence"
+      ],
+      "publication_state": "PENDING_SPECIALIST_REVIEW",
+      "last_accepted_observation_id": null,
+      "index": "external-observers/observers/grok-infrastructure-incidents/index.json",
+      "permanent_page": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-infrastructure-incidents",
+      "bootstrap_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/api/v1/external-observers/bootstrap/grok-infrastructure-incidents",
+      "contract_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/contracts/pulsechain-external-observation-1.0.0.json"
+    },
+    {
+      "observer_id": "grok-market-liquidity",
+      "title": "PulseChain Market Structure, Liquidity, Stablecoin, and Capital-Flow Observer",
+      "purpose": "Monitor source-backed venue, bridge, liquidity, stablecoin, and deterministic chain alerts.",
+      "permitted_source_classes": [
+        "OFFICIAL_WEB",
+        "STATUS_PAGE",
+        "X_POST",
+        "GITHUB",
+        "DETERMINISTIC_CHAIN_ALERT",
+        "PUBLIC_SECONDARY_SOURCE",
+        "MULTI_SOURCE"
+      ],
+      "permitted_target_workstreams": [
+        "signals-platform",
+        "validator-flows",
+        "investor-intelligence"
+      ],
+      "publication_state": "PENDING_SPECIALIST_REVIEW",
+      "last_accepted_observation_id": null,
+      "index": "external-observers/observers/grok-market-liquidity/index.json",
+      "permanent_page": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-market-liquidity",
+      "bootstrap_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/api/v1/external-observers/bootstrap/grok-market-liquidity",
+      "contract_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/contracts/pulsechain-external-observation-1.0.0.json"
+    },
+    {
+      "observer_id": "grok-identity-evidence",
+      "title": "PulseChain Authenticated Identity-Evidence and Public-Record Observer",
+      "purpose": "Monitor only public identity-bearing evidence relevant to accepted identity questions.",
+      "permitted_source_classes": [
+        "X_POST",
+        "X_THREAD",
+        "OFFICIAL_WEB",
+        "LEGAL_OR_CORPORATE_RECORD",
+        "SIGNED_MESSAGE",
+        "PUBLIC_SECONDARY_SOURCE",
+        "MULTI_SOURCE"
+      ],
+      "permitted_target_workstreams": [
+        "identity-attribution",
+        "investor-intelligence",
+        "validator-flows"
+      ],
+      "publication_state": "PENDING_SPECIALIST_REVIEW",
+      "last_accepted_observation_id": null,
+      "index": "external-observers/observers/grok-identity-evidence/index.json",
+      "permanent_page": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-identity-evidence",
+      "bootstrap_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/api/v1/external-observers/bootstrap/grok-identity-evidence",
+      "contract_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/contracts/pulsechain-external-observation-1.0.0.json"
+    },
+    {
+      "observer_id": "grok-red-team",
+      "title": "PulseChain Accepted-Record Adversarial Reviewer",
+      "purpose": "Challenge accepted specialist records without rewriting them.",
+      "permitted_source_classes": [
+        "OFFICIAL_WEB",
+        "STATUS_PAGE",
+        "GITHUB",
+        "LEGAL_OR_CORPORATE_RECORD",
+        "SIGNED_MESSAGE",
+        "DETERMINISTIC_CHAIN_ALERT",
+        "PUBLIC_SECONDARY_SOURCE",
+        "MULTI_SOURCE"
+      ],
+      "permitted_target_workstreams": [
+        "signals-platform",
+        "validator-flows",
+        "identity-attribution",
+        "investor-intelligence"
+      ],
+      "publication_state": "PENDING_SPECIALIST_REVIEW",
+      "last_accepted_observation_id": null,
+      "index": "external-observers/observers/grok-red-team/index.json",
+      "permanent_page": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-red-team",
+      "bootstrap_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/api/v1/external-observers/bootstrap/grok-red-team",
+      "contract_url": "https://pulsechain-research-control-room.brohexphiat.chatgpt.site/contracts/pulsechain-external-observation-1.0.0.json"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "pulsechain-external-observer-latest@1.0.0",
+  "project_id": "pulsechain-investor-intelligence",
+  "observer_id": "grok-red-team",
+  "observation_id": null,
+  "observation_path": null,
+  "published_at_utc": null,
+  "materiality": null,
+  "confidence": null,
+  "evidence_state": null,
+  "adjudication_state": "PENDING_SPECIALIST_REVIEW",
+  "manifest_sha256": null,
+  "content_sha256": null,
+  "target_workstreams": []
+}
