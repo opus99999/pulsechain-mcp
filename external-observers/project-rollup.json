@@ -1,0 +1,13 @@
+{
+  "schema_version": "pulsechain-external-observer-rollup@1.0.0",
+  "project_id": "pulsechain-investor-intelligence",
+  "generated_at_utc": "2026-08-27T00:38:53.938Z",
+  "classification": "PENDING_SPECIALIST_REVIEW",
+  "latest_observation_ids": {
+    "grok-x-protocol": null,
+    "grok-infrastructure-incidents": null,
+    "grok-market-liquidity": null,
+    "grok-identity-evidence": null,
+    "grok-red-team": null
+  }
+}
