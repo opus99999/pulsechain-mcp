@@ -1,0 +1,31 @@
+{
+  "schema_version": "pulsechain-external-observer-r12f1-transfer@1.0.0",
+  "generated_at_utc": "2026-08-28T18:41:54.859Z",
+  "repository": "opus99999/pulsechain-mcp",
+  "branch": "external-observer-grok-mcp-r12f1-update-transfer-20260828",
+  "repository_parent_commit": "f7c5427d505757fe101ea20ef1c402946152f3aa",
+  "repository_parent_tree": "3d5c05af92972974bfd646a1838608c3cec7c0b3",
+  "filename": "PulseChain_External_Grok_Observer_Gateway_Update_Bundle_R12F1_20260828T183733Z.zip",
+  "zip_path": "operator-transfer/PulseChain_External_Grok_Observer_Gateway_Update_Bundle_R12F1_20260828T183733Z.zip",
+  "byte_size": 125883,
+  "sha256": "1b9b03d52dd346dd63addd100c1eadebb4537293560f106a4f2018af1567088d",
+  "member_count": 36,
+  "zip_integrity": "PASS",
+  "inventory_validation": "PASS",
+  "path_safety": "PASS",
+  "security_scan": "PASS",
+  "secret_scan": "PASS",
+  "source_map_count": 0,
+  "source": {
+    "branch": "external-observer-grok-mcp-r12f1-bundle-import-repair-20260828",
+    "commit": "75e3650f8e7f17af0ec2b2f312b920e15f96eb79",
+    "tree": "1c8bccc87df5abc07b9712a6f6fb839bc0b7c21a",
+    "parent": "ebef6c42a5eca2ad30669cf856e669a19e10edf9"
+  },
+  "import_containment": "PASS",
+  "extracted_operator_tests": "55/55 PASS from three working directories",
+  "supersedes_for_windows_execution": "PulseChain_External_Grok_Observer_Gateway_Update_Bundle_R12F_20260828T145225Z.zip",
+  "publication_mode": "DISABLED",
+  "transfer_purpose": "Exact binary transfer for separately authorized remote Windows update preflight",
+  "contains_secret": false
+}
