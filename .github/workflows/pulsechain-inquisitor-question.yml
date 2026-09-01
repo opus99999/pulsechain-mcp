@@ -1,0 +1,36 @@
+name: PulseChain Inquisitor · Create Question
+on:
+  issues:
+    types: [opened, reopened]
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+concurrency:
+  group: pulsechain-inquisitor-question-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      github.repository == 'opus99999/pulsechain-mcp' &&
+      github.repository_id == '1320639709' &&
+      github.actor == 'opus99999' &&
+      github.actor_id == '212180323' &&
+      github.event.issue.user.login == 'opus99999' &&
+      github.event.issue.user.id == 212180323 &&
+      github.event.issue.title == '[pulsechain-inquisitor-question] CREATE_INQUISITOR_QUESTION' &&
+      (github.event.action == 'opened' ||
+       (github.event.action == 'reopened' && github.event.issue.number == 30))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+      - name: Validate and append Inquisitor question
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/inquisitor-question-publish.mjs
