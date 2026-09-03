@@ -5,6 +5,8 @@ on:
 permissions:
   contents: write
   issues: write
+  actions: read
+  id-token: write
 concurrency:
   group: trusted-team-investor-intelligence-publication
   cancel-in-progress: false

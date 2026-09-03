@@ -1,39 +1,36 @@
-name: Trusted Team · Identity Attribution
+name: Trusted Team · Receipt Proof Backfill
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 permissions:
-  contents: write
-  issues: write
+  contents: read
+  issues: read
   actions: read
   id-token: write
 concurrency:
-  group: trusted-team-identity-attribution-publication
+  group: trusted-team-receipt-proof-backfill
   cancel-in-progress: false
 jobs:
-  publish:
+  project:
     if: >-
       github.repository == 'opus99999/pulsechain-mcp' &&
       github.repository_id == '1320639709' &&
+      github.ref == 'refs/heads/main' &&
       github.actor == 'opus99999' &&
-      github.actor_id == '212180323' &&
-      startsWith(github.event.issue.title, '[TRUSTED_TEAM identity-attribution] PUBLISH ')
+      github.actor_id == '212180323'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: true
+          fetch-depth: 1
+          persist-credentials: false
           submodules: false
-      - name: Validate and publish immutable update
+      - name: Project fixed historical receipt proofs and verify replay
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_EVENT_ACTION: ${{ github.event.action }}
           GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
           GITHUB_REPOSITORY_OWNER_ID: ${{ github.repository_owner_id }}
-          GITHUB_ACTOR_ID: ${{ github.actor_id }}
           GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
           GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
-        run: node scripts/trusted-team-publish.mjs identity-attribution
+        run: node scripts/trusted-team-receipt-projector.mjs --historical-backfill

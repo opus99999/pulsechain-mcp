@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { projectTrustedTeamReceipt } from "./trusted-team-receipt-projector.mjs";
 
 export const PROJECT_ID = "pulsechain-investor-intelligence";
 export const REPOSITORY = "opus99999/pulsechain-mcp";
@@ -764,6 +765,9 @@ async function postReceipt(issueNumber, receipt, token = process.env.GITHUB_TOKE
     body: JSON.stringify({ body: `\`\`\`json\n${JSON.stringify(receipt, null, 2)}\n\`\`\`` }),
   });
   if (!response.ok) fail("RECEIPT_COMMENT_FAILED", `${response.status}`);
+  const comment = await response.json();
+  if (!Number.isSafeInteger(comment?.id)) fail("RECEIPT_COMMENT_FAILED", "missing comment identity");
+  return comment;
 }
 
 async function main() {
@@ -777,13 +781,38 @@ async function main() {
     context,
   });
   let receiptComment = "POSTED";
+  let receiptProjection = "NOT_ATTEMPTED";
+  let comment;
   try {
-    await postReceipt(context.issue_number, receipt);
+    comment = await postReceipt(context.issue_number, receipt);
   } catch (error) {
-    // The immutable update is already accepted. A comment transport failure must not trigger a duplicate publication.
     receiptComment = `FAILED:${String(error.code || "RECEIPT_COMMENT_FAILED")}`;
+    process.stdout.write(`${JSON.stringify({ ...receipt, result: "RECEIPT_PROJECTION_FAILED", receipt_comment: receiptComment, receipt_projection: receiptProjection, accepted_publication_preserved: true })}\n`);
+    process.exitCode = 1;
+    return;
   }
-  process.stdout.write(`${JSON.stringify({ ...receipt, receipt_comment: receiptComment })}\n`);
+  try {
+    await projectTrustedTeamReceipt({
+      issue_number: context.issue_number,
+      receipt_comment_id: comment.id,
+      workstream_id: receipt.workstream_id,
+      update_id: receipt.update_id,
+      publication_commit: receipt.commit,
+      parent_commit: receipt.parent_commit,
+      manifest_sha256: receipt.manifest_sha256,
+      artifact_filename: receipt.artifact_filename,
+      artifact_sha256: receipt.artifact_sha256,
+      publication_workflow_run_id: Number(process.env.GITHUB_RUN_ID),
+    });
+    receiptProjection = "ACCEPTED";
+  } catch (error) {
+    // The immutable update and accepted receipt are already public. Projection is a secondary, replay-safe step.
+    receiptProjection = `FAILED:${String(error.code || "RECEIPT_PROJECTION_FAILED")}`;
+    process.stdout.write(`${JSON.stringify({ ...receipt, result: "RECEIPT_PROJECTION_FAILED", receipt_comment: receiptComment, receipt_projection: receiptProjection, accepted_publication_preserved: true })}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`${JSON.stringify({ ...receipt, receipt_comment: receiptComment, receipt_projection: receiptProjection })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
