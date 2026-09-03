@@ -1,0 +1,51 @@
+name: Head Chef · Coordination Ingest
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  ingest:
+    if: >-
+      github.repository == 'opus99999/pulsechain-mcp' &&
+      github.repository_id == '1320639709' &&
+      github.repository_owner == 'opus99999' &&
+      github.repository_owner_id == '212180323' &&
+      github.actor == 'opus99999' &&
+      github.actor_id == '212180323' &&
+      github.triggering_actor == 'opus99999' &&
+      github.event.issue.user.login == 'opus99999' &&
+      github.event.issue.user.id == 212180323 &&
+      startsWith(github.event.issue.title, '[HEAD_CHEF QUESTION] ') &&
+      (github.event_name == 'issues' ||
+       (github.event_name == 'issue_comment' &&
+        github.event.comment.user.login == 'opus99999' &&
+        github.event.comment.user.id == 212180323 &&
+        !startsWith(github.event.comment.body, '<!-- pulsechain-head-chef-event-receipt@1.0.0 -->'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Validate and append Head Chef coordination event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          GITHUB_REPOSITORY_OWNER_ID: ${{ github.repository_owner_id }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: node scripts/head-chef-coordination-ingest.mjs
