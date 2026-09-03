@@ -37,11 +37,42 @@ const TRANSITION_RETRY_DELAYS_MS = Object.freeze([
   60_000,
   60_000,
 ]);
+// Projection preflight has its own smaller retry budget so the workflow still
+// has time to obtain OIDC, submit the event, and reconcile an accepted receipt
+// inside the seven-minute job timeout.
+const PROJECTION_RETRY_DELAYS_MS = Object.freeze([
+  2_000,
+  4_000,
+  8_000,
+  16_000,
+  30_000,
+  45_000,
+]);
 const REQUEST_TIMEOUT_MS = 20_000;
 const TRANSITION_RETRY_CODES = new Set([
   "CONTROL_ROOM_HEAD_CHEF_UNEXPECTED_TRANSITION",
   "CONTROL_ROOM_HEAD_CHEF_WRONG_ASSIGNMENT",
   "CONTROL_ROOM_HEAD_CHEF_CLOSURE_NOT_READY",
+  "CONTROL_ROOM_HEAD_CHEF_CONDITION4_PUBLICATION_RECEIPT_MISMATCH",
+]);
+const PROJECTION_STATES = new Set([
+  "HEAD_CHEF_REVIEW",
+  "SPECIALIST_REVIEW",
+  "OWNER_GATE_REQUIRED",
+  "READY_FOR_CLOSURE",
+  "READY_FOR_DELIVERY",
+  "DELIVERED",
+]);
+const TERMINAL_ASSIGNMENT_STATES = new Set([
+  "PUBLICATION_ACCEPTED",
+  "VALIDATED_NO_CHANGE",
+  "EVIDENCE_BLOCKED",
+]);
+const ASSIGNMENT_STATES = new Set([
+  "PENDING_ACKNOWLEDGMENT",
+  "ACKNOWLEDGED",
+  "RESULT_POSTED",
+  ...TERMINAL_ASSIGNMENT_STATES,
 ]);
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -58,9 +89,42 @@ const CONDITION4_COORDINATION_ID =
   "head-chef-condition-4-signals-investor-import-20260903";
 const CONDITION4_SOURCE_RECORD_ID =
   "signals-platform-phiat-plsx-pass-through-review-20260902t204412z";
+const CONDITION4_PRIOR_INVESTOR_UPDATE_ID =
+  "investor-intelligence-plsx-drawdown-dependency-rebase-20260901t235405z";
 const CONDITION4_DECISION_CLASS = "ACCEPTED_DEPENDENCY_IMPORT_REVIEW";
 const CONDITION4_REQUESTED_DECISION =
   "Assess exact 843,579,441.647005259136001133 PLSX pass-through from source/helper 0x60719573BEAa21421a92D86657866121c8b21892 to target 0x8f56AA97ebef8080144FB21224E46a5D85657C23 and destination 0xB00d08E09FA48c2E1D48ac3EdE2fFea354341215; full downstream PulseX swap; 7,847.337744 USDC token units; HomeOmnibridge initiation; 1.084314 USDC bounded commingling; separation from the accepted phPLSX reserve drawdown; exact double-count amount of zero; no proven lending position; no proven public-exchange deposit; no change to accepted Identity or Atropa conclusions. Return only MATERIAL_IMPORT_PUBLICATION_REQUIRED, VALIDATED_NO_CHANGE_NO_PUBLICATION_REQUIRED, or BLOCKED_MISSING_ACCEPTED_EVIDENCE.";
+const CONDITION4_TERMINAL_DECISIONS = new Set([
+  "MATERIAL_IMPORT_PUBLICATION_REQUIRED",
+  "VALIDATED_NO_CHANGE_NO_PUBLICATION_REQUIRED",
+  "BLOCKED_MISSING_ACCEPTED_EVIDENCE",
+]);
+const CONDITION4_RESEARCH_EVENT_TYPES = new Set([
+  "SPECIALIST_RESULT_POSTED",
+  "SPECIALIST_PUBLICATION_REQUESTED",
+  "SPECIALIST_NO_CHANGE_ACCEPTED",
+  "SPECIALIST_EVIDENCE_BLOCKED",
+]);
+export const CONDITION4_RATIONALE_TOKENS = Object.freeze([
+  "843,579,441.647005259136001133 PLSX pass-through",
+  "source/helper 0x60719573BEAa21421a92D86657866121c8b21892",
+  "target 0x8f56AA97ebef8080144FB21224E46a5D85657C23",
+  "destination 0xB00d08E09FA48c2E1D48ac3EdE2fFea354341215",
+  "full downstream PulseX swap",
+  "7,847.337744 USDC token units",
+  "HomeOmnibridge initiation",
+  "1.084314 USDC bounded commingling",
+  "separation from the accepted phPLSX reserve drawdown",
+  "exact double-count amount of zero",
+  "no proven lending position",
+  "no proven public-exchange deposit",
+  "no change to accepted Identity or Atropa conclusions",
+]);
+export const CONDITION4_CANONICAL_RATIONALE =
+  "The Investor specialist assessed the exact 843,579,441.647005259136001133 PLSX pass-through from source/helper 0x60719573BEAa21421a92D86657866121c8b21892 to target 0x8f56AA97ebef8080144FB21224E46a5D85657C23 and destination 0xB00d08E09FA48c2E1D48ac3EdE2fFea354341215. The full downstream PulseX swap yielded 7,847.337744 USDC token units and reached HomeOmnibridge initiation; 1.084314 USDC bounded commingling was separated from the accepted phPLSX reserve drawdown, leaving the exact double-count amount of zero. There is no proven lending position and no proven public-exchange deposit. Accepted Identity and Atropa conclusions remain unchanged. This is historical evidence analysis only and changes no portfolio, wallet, order, transaction, execution, or trading state.";
+export function condition4CanonicalBlockedRationale(missingRecordId) {
+  return `The exact accepted record ${missingRecordId} is missing, so the bounded Investor dependency assessment cannot reach a supported conclusion. No publication or replacement research task is authorized. No specialist pointer, identity conclusion, portfolio, wallet, order, transaction, execution, or trading state changes.`;
+}
 
 export const EVENT_TYPES = Object.freeze([
   "OWNER_QUESTION_ACCEPTED",
@@ -180,6 +244,19 @@ const PROTECTED_ACTION_PATTERNS = [
   /\b(?:turn\s+(?:on|off)|enable|activate)\b[^.!?\n]{0,60}\b(?:trading|execution|wallet)\b/i,
   /\b(?:send|transfer|swap|bridge|withdraw|deposit|buy|sell|stake|unstake|convert|sweep|lend|borrow|repay|mint|burn)\s+(?:\d[\d,]*(?:\.\d+)?|[A-Z][A-Z0-9]{1,11})\b/,
 ];
+const CONDITION4_IMPERATIVE_ACTION_PATTERNS = [
+  /(?:^|[\n.!?;:]\s*)(?:please\s+)?(?:execute|perform|initiate|route|move|send|transfer|swap|bridge|withdraw|deposit|buy|sell|trade|drain|dispose|pay|wire|deploy|apply|run|enable|disable)\b/i,
+  /\b(?:must|should|shall|authorize|approve|instruct|order)\b[^.!?\n]{0,80}\b(?:execute|perform|initiate|route|move|send|transfer|swap|bridge|withdraw|deposit|buy|sell|trade|drain|dispose|pay|wire|deploy|apply|run|enable|disable)\b/i,
+];
+const CONDITION4_RATIONALE_SUFFIX_ACTION_PATTERN =
+  /\b(?:execut(?:e|es|ed|ing|ion)|perform(?:s|ed|ing|ance)?|initiat(?:e|es|ed|ing|ion)|rout(?:e|es|ed|ing)|mov(?:e|es|ed|ing)|send(?:s|ing)?|sent|transfer(?:s|red|ring)?|swap(?:s|ped|ping)?|bridg(?:e|es|ed|ing)|withdraw(?:s|al|als|n|ing)?|deposit(?:s|ed|ing)?|buy(?:s|ing)?|bought|sell(?:s|ing)?|sold|trad(?:e|es|ed|ing)|drain(?:s|ed|ing)?|dispos(?:e|es|ed|ing)|pay(?:s|ing)?|paid|wir(?:e|es|ed|ing)|deploy(?:s|ed|ing|ment)?|appl(?:y|ies|ied|ying)|run(?:s|ning)?|ran|enabl(?:e|es|ed|ing)|disabl(?:e|es|ed|ing))\b/i;
+function maskCondition4FactualPhrases(event, value) {
+  const reviewed = event.decision_class === "BLOCKED_MISSING_ACCEPTED_EVIDENCE" &&
+      event.dependencies.length === 1
+    ? condition4CanonicalBlockedRationale(event.dependencies[0])
+    : CONDITION4_CANONICAL_RATIONALE;
+  return value.replace(reviewed, "[CONDITION4_REVIEWED_RATIONALE]");
+}
 
 export class HeadChefCoordinationIngestError extends Error {
   constructor(code, detail = "", { mayHaveCommitted = false } = {}) {
@@ -337,11 +414,119 @@ function validateEventSemantics(event, sourceKind) {
   ) {
     fail("NO_CHANGE_RATIONALE_INVALID");
   }
+  validateCondition4ResearchSemantics(event);
   if (sourceKind === "issue") {
     if (event.event_type !== "OWNER_QUESTION_ACCEPTED") fail("INVALID_OPENING_EVENT_TYPE", event.event_type);
   } else if (event.event_type === "OWNER_QUESTION_ACCEPTED") {
     fail("OWNER_QUESTION_REQUIRES_OPENING_ISSUE");
   }
+}
+
+function exactCondition4ResearchBase(event) {
+  return (
+    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    event.assignment_id !== null &&
+    event.priority === "HIGH" &&
+    event.target_worker_id === "chatgpt-worker-4" &&
+    event.target_workstream_id === "investor-intelligence" &&
+    event.source_record_ids.length === 1 &&
+    event.source_record_ids[0] === CONDITION4_SOURCE_RECORD_ID
+  );
+}
+
+function hasCompleteCondition4Rationale(summary) {
+  return (
+    typeof summary === "string" &&
+    summary.startsWith(CONDITION4_CANONICAL_RATIONALE)
+  );
+}
+
+function validateCondition4ResearchSemantics(event) {
+  if (
+    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    event.event_type === "SPECIALIST_PUBLICATION_ACCEPTED"
+  ) {
+    if (
+      event.assignment_id === null ||
+      event.target_worker_id !== "chatgpt-worker-4" ||
+      event.target_workstream_id !== "investor-intelligence" ||
+      event.decision_class !== "MATERIAL_IMPORT_PUBLICATION_REQUIRED" ||
+      event.source_record_ids.length !== 1 ||
+      !event.source_record_ids[0].startsWith("investor-intelligence-") ||
+      event.source_record_ids[0] === CONDITION4_SOURCE_RECORD_ID ||
+      event.source_record_ids[0] === CONDITION4_PRIOR_INVESTOR_UPDATE_ID
+    ) {
+      fail("CONDITION4_PUBLICATION_RECEIPT_INVALID");
+    }
+    return;
+  }
+  if (
+    event.coordination_id !== CONDITION4_COORDINATION_ID ||
+    !CONDITION4_RESEARCH_EVENT_TYPES.has(event.event_type)
+  ) {
+    return;
+  }
+  if (!exactCondition4ResearchBase(event)) {
+    fail("CONDITION4_RESEARCH_EVENT_INVALID", "identity or accepted source");
+  }
+  let expectedDecision = null;
+  if (event.event_type === "SPECIALIST_RESULT_POSTED") {
+    if (!CONDITION4_TERMINAL_DECISIONS.has(event.decision_class)) {
+      fail("CONDITION4_RESEARCH_EVENT_INVALID", "unsupported outcome");
+    }
+    expectedDecision = event.decision_class;
+  } else if (event.event_type === "SPECIALIST_PUBLICATION_REQUESTED") {
+    expectedDecision = "MATERIAL_IMPORT_PUBLICATION_REQUIRED";
+  } else if (event.event_type === "SPECIALIST_NO_CHANGE_ACCEPTED") {
+    expectedDecision = "VALIDATED_NO_CHANGE_NO_PUBLICATION_REQUIRED";
+  } else if (event.event_type === "SPECIALIST_EVIDENCE_BLOCKED") {
+    expectedDecision = "BLOCKED_MISSING_ACCEPTED_EVIDENCE";
+  }
+  if (event.decision_class !== expectedDecision) {
+    fail("CONDITION4_RESEARCH_EVENT_INVALID", "event type and outcome differ");
+  }
+  if (
+    expectedDecision === "MATERIAL_IMPORT_PUBLICATION_REQUIRED" ||
+    expectedDecision === "VALIDATED_NO_CHANGE_NO_PUBLICATION_REQUIRED"
+  ) {
+    if (event.dependencies.length !== 0 || !hasCompleteCondition4Rationale(event.summary)) {
+      fail("CONDITION4_RATIONALE_INCOMPLETE");
+    }
+    return;
+  }
+  if (
+    event.dependencies.length !== 1 ||
+    event.summary !== condition4CanonicalBlockedRationale(event.dependencies[0])
+  ) {
+    fail("CONDITION4_BLOCKER_EVIDENCE_INVALID");
+  }
+}
+
+function isExactCondition4ResearchEvent(event) {
+  return (
+    exactCondition4ResearchBase(event) &&
+    CONDITION4_RESEARCH_EVENT_TYPES.has(event.event_type) &&
+    (event.decision_class === "BLOCKED_MISSING_ACCEPTED_EVIDENCE" ||
+      hasCompleteCondition4Rationale(event.summary))
+  );
+}
+
+function isExactCondition4PublicationReceiptCandidate(event) {
+  return (
+    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    event.event_type === "SPECIALIST_PUBLICATION_ACCEPTED" &&
+    event.assignment_id !== null &&
+    event.priority === "HIGH" &&
+    event.target_worker_id === "chatgpt-worker-4" &&
+    event.target_workstream_id === "investor-intelligence" &&
+    event.decision_class === "MATERIAL_IMPORT_PUBLICATION_REQUIRED" &&
+    event.source_record_ids.length === 1 &&
+    event.source_record_ids[0].startsWith("investor-intelligence-") &&
+    event.source_record_ids[0] !== CONDITION4_SOURCE_RECORD_ID &&
+    event.source_record_ids[0] !== CONDITION4_PRIOR_INVESTOR_UPDATE_ID &&
+    event.dependencies.length === 0 &&
+    hasCompleteCondition4Rationale(event.summary)
+  );
 }
 
 function isExactCondition4ProtectedActionException(event) {
@@ -384,17 +569,47 @@ export function validateEventDocument(value, { sourceKind = "comment" } = {}) {
     summary,
     created_at_utc: createdAt,
   };
-  validateEventSemantics(normalized, sourceKind);
   if (SECRET_PATTERN.test(canonicalJson(normalized))) fail("SECRET_PATTERN_REJECTED", "event");
   const protectedRequestedDecision = requestedDecision !== null &&
     PROTECTED_ACTION_PATTERNS.some((pattern) => pattern.test(requestedDecision));
-  const protectedUnexceptionableSurface = [summary, ...dependencies].join("\n");
+  const protectedUnexceptionableSurface = [
+    decisionClass?.replace(/[_-]+/g, " ") ?? "",
+    summary,
+    ...dependencies,
+  ].join("\n");
+  const condition4ResearchSurface = [
+    decisionClass?.replace(/[_-]+/g, " ") ?? "",
+    requestedDecision ?? "",
+    summary,
+    ...dependencies,
+  ].join("\n");
+  const exactCondition4ResearchEvent = isExactCondition4ResearchEvent(normalized);
+  const condition4ProtectedEvent =
+    exactCondition4ResearchEvent ||
+    isExactCondition4PublicationReceiptCandidate(normalized);
+  const condition4MaskedSurface = condition4ProtectedEvent
+    ? maskCondition4FactualPhrases(normalized, condition4ResearchSurface)
+    : condition4ResearchSurface;
+  const condition4MaskedDecisionAndSummary = condition4ProtectedEvent
+    ? maskCondition4FactualPhrases(
+        normalized,
+        [decisionClass?.replace(/[_-]+/g, " ") ?? "", summary].join("\n"),
+      )
+    : protectedUnexceptionableSurface;
   if (
-    PROTECTED_ACTION_PATTERNS.some((pattern) => pattern.test(protectedUnexceptionableSurface)) ||
-    (protectedRequestedDecision && !isExactCondition4ProtectedActionException(normalized))
+    (condition4ProtectedEvent
+      ? CONDITION4_IMPERATIVE_ACTION_PATTERNS.some((pattern) =>
+          pattern.test(protectedUnexceptionableSurface)) ||
+        CONDITION4_RATIONALE_SUFFIX_ACTION_PATTERN.test(condition4MaskedDecisionAndSummary) ||
+        PROTECTED_ACTION_PATTERNS.some((pattern) =>
+          pattern.test(condition4MaskedSurface))
+      : PROTECTED_ACTION_PATTERNS.some((pattern) =>
+          pattern.test(protectedUnexceptionableSurface)) ||
+        (protectedRequestedDecision && !isExactCondition4ProtectedActionException(normalized)))
   ) {
     fail("PROTECTED_ACTION_REJECTED");
   }
+  validateEventSemantics(normalized, sourceKind);
   if (!SHA256.test(value.canonical_duplicate_key || "")) fail("INVALID_CANONICAL_DUPLICATE_KEY");
   if (value.canonical_duplicate_key !== canonicalDuplicateKeyForEvent(normalized)) {
     fail("CANONICAL_DUPLICATE_KEY_MISMATCH");
@@ -407,10 +622,14 @@ export function validateEventDocument(value, { sourceKind = "comment" } = {}) {
 }
 
 export function parseEventBody(body, { sourceKind = "comment" } = {}) {
-  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
+  if (typeof body !== "string") return null;
+  if (body.startsWith(RECEIPT_MARKER)) return null;
+  const claimsGovernedSchema =
+    /"schema_version"\s*:\s*"pulsechain-head-chef-event@1\.0\.0"/.test(body);
+  if (!claimsGovernedSchema) return null;
+  if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
     fail("BODY_MISSING_OR_TOO_LARGE");
   }
-  if (body.startsWith(RECEIPT_MARKER)) return null;
   let value;
   try {
     value = JSON.parse(body);
@@ -550,6 +769,385 @@ async function boundedJsonResponse(response, label, maximumBytes) {
     fail(`${label}_RESPONSE_NON_JSON`);
   }
   return value;
+}
+
+export function transitionProjectionUrl(coordinationId) {
+  if (!SAFE_ID.test(coordinationId || "")) fail("INVALID_COORDINATION_IDENTITY");
+  return `${CONTROL_ROOM_ORIGIN}/api/v1/head-chef/questions/${encodeURIComponent(coordinationId)}`;
+}
+
+function projectionEvents(value) {
+  if (!Array.isArray(value.events) || value.events.length > 4_096) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "events");
+  }
+  return value.events.map((record, index) => {
+    if (
+      !plainObject(record) ||
+      typeof record.event_id !== "string" ||
+      !SAFE_ID.test(record.event_id) ||
+      typeof record.event_type !== "string" ||
+      !EVENT_TYPE_SET.has(record.event_type) ||
+      typeof record.canonical_duplicate_key !== "string" ||
+      !SHA256.test(record.canonical_duplicate_key) ||
+      typeof record.content_sha256 !== "string" ||
+      !SHA256.test(record.content_sha256) ||
+      !plainObject(record.event)
+    ) {
+      fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", `events[${index}]`);
+    }
+    if (
+      record.event.event_id !== record.event_id ||
+      record.event.event_type !== record.event_type ||
+      record.event.canonical_duplicate_key !== record.canonical_duplicate_key ||
+      record.event.content_sha256 !== record.content_sha256
+    ) {
+      fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", `events[${index}].identity`);
+    }
+    return record;
+  });
+}
+
+function projectionAssignments(value) {
+  if (!Array.isArray(value.assignments) || value.assignments.length > 128) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "assignments");
+  }
+  return value.assignments.map((assignment, index) => {
+    if (
+      !plainObject(assignment) ||
+      typeof assignment.assignment_id !== "string" ||
+      !SAFE_ID.test(assignment.assignment_id) ||
+      typeof assignment.target_worker_id !== "string" ||
+      typeof assignment.target_workstream_id !== "string" ||
+      SPECIALIST_PAIRS[assignment.target_worker_id] !== assignment.target_workstream_id ||
+      !PRIORITY_SET.has(assignment.priority) ||
+      !(
+        assignment.decision_class === null ||
+        (typeof assignment.decision_class === "string" &&
+          SAFE_CLASSIFICATION.test(assignment.decision_class))
+      ) ||
+      !(
+        assignment.requested_decision === null ||
+        (typeof assignment.requested_decision === "string" &&
+          assignment.requested_decision.length <= 4_096)
+      ) ||
+      !Array.isArray(assignment.source_record_ids) ||
+      assignment.source_record_ids.some(
+        (recordId) => typeof recordId !== "string" || !RECORD_ID.test(recordId),
+      ) ||
+      !Array.isArray(assignment.dependencies) ||
+      assignment.dependencies.some(
+        (recordId) => typeof recordId !== "string" || !RECORD_ID.test(recordId),
+      ) ||
+      typeof assignment.acknowledged !== "boolean" ||
+      !Number.isSafeInteger(assignment.follow_up_count) ||
+      assignment.follow_up_count < 0 ||
+      assignment.follow_up_count > 3 ||
+      typeof assignment.publication_requested !== "boolean" ||
+      !(
+        assignment.terminal_event_id === null ||
+        (typeof assignment.terminal_event_id === "string" &&
+          SAFE_ID.test(assignment.terminal_event_id))
+      ) ||
+      typeof assignment.state !== "string" ||
+      !ASSIGNMENT_STATES.has(assignment.state)
+    ) {
+      fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", `assignments[${index}]`);
+    }
+    if (
+      (assignment.terminal_event_id === null && TERMINAL_ASSIGNMENT_STATES.has(assignment.state)) ||
+      (assignment.terminal_event_id !== null && !TERMINAL_ASSIGNMENT_STATES.has(assignment.state))
+    ) {
+      fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", `assignments[${index}].terminal`);
+    }
+    return assignment;
+  });
+}
+
+function transitionPending(detail) {
+  fail("CONTROL_ROOM_TRANSITION_PREREQUISITE_PENDING", detail);
+}
+
+function transitionInvalid(detail) {
+  fail("CONTROL_ROOM_TRANSITION_PREFLIGHT_REJECTED", detail);
+}
+
+/**
+ * Validate the event against the public Control Room projection before asking
+ * GitHub for an OIDC token. The Control Room POST remains the final authority;
+ * this preflight independently rejects obvious cross-assignment and
+ * out-of-order actions while allowing a bounded wait for a prior workflow run
+ * to finish ingesting its prerequisite event.
+ */
+export function validateTransitionProjection(
+  event,
+  projection,
+  { sourceIssueNumber } = {},
+) {
+  if (!Number.isSafeInteger(sourceIssueNumber) || sourceIssueNumber < 1) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "source issue");
+  }
+  if (projection === null) {
+    if (event.event_type === "OWNER_QUESTION_ACCEPTED") {
+      return { replayed: false, transition: "OWNER_QUESTION_ACCEPTED" };
+    }
+    transitionPending("owner question has not reached the Control Room");
+  }
+  if (
+    !plainObject(projection) ||
+    projection.schema_version !== "pulsechain-head-chef-question@1.0.0" ||
+    projection.coordination_id !== event.coordination_id ||
+    projection.owner_question_id !== event.owner_question_id ||
+    projection.source_issue_number !== sourceIssueNumber ||
+    !PROJECTION_STATES.has(projection.current_state)
+  ) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "coordination identity");
+  }
+
+  const events = projectionEvents(projection);
+  const assignments = projectionAssignments(projection);
+  if (
+    events.some(
+      (record) =>
+        record.event.coordination_id !== event.coordination_id ||
+        record.event.owner_question_id !== event.owner_question_id,
+    ) ||
+    new Set(assignments.map((assignment) => assignment.assignment_id)).size !== assignments.length
+  ) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "projection member identity");
+  }
+  const exactReplay = events.find((record) => record.event_id === event.event_id);
+  if (exactReplay) {
+    if (
+      exactReplay.canonical_duplicate_key !== event.canonical_duplicate_key ||
+      exactReplay.content_sha256 !== event.content_sha256 ||
+      canonicalJson(exactReplay.event) !== canonicalJson(event)
+    ) {
+      transitionInvalid("event_id conflicts with accepted projection");
+    }
+    return { replayed: true, transition: event.event_type };
+  }
+  if (
+    events.some(
+      (record) =>
+        record.canonical_duplicate_key === event.canonical_duplicate_key ||
+        record.content_sha256 === event.content_sha256,
+    )
+  ) {
+    transitionInvalid("event hashes conflict with accepted projection");
+  }
+
+  if (event.event_type === "OWNER_QUESTION_ACCEPTED") {
+    transitionInvalid("owner question is already accepted");
+  }
+  if (projection.current_state === "DELIVERED") {
+    transitionInvalid("delivered coordination is immutable");
+  }
+  if (
+    projection.current_state === "READY_FOR_DELIVERY" &&
+    event.event_type !== "WORKER_5_DELIVERY_ACKNOWLEDGED"
+  ) {
+    transitionInvalid("closed coordination accepts only delivery acknowledgment");
+  }
+
+  const assignment = event.assignment_id === null
+    ? null
+    : assignments.find((candidate) => candidate.assignment_id === event.assignment_id) ?? null;
+  if (event.event_type === "HEAD_CHEF_ASSIGNMENT_CREATED") {
+    if (assignment) transitionInvalid("assignment_id is already present");
+    return { replayed: false, transition: event.event_type };
+  }
+  if (event.assignment_id !== null) {
+    if (!assignment) transitionPending("assignment has not reached the Control Room");
+    if (
+      assignment.target_worker_id !== event.target_worker_id ||
+      assignment.target_workstream_id !== event.target_workstream_id
+    ) {
+      transitionInvalid("assignment worker/workstream binding differs");
+    }
+    if (assignment.terminal_event_id !== null) {
+      transitionInvalid("assignment already has a terminal result");
+    }
+    if (
+      event.coordination_id === CONDITION4_COORDINATION_ID &&
+      CONDITION4_RESEARCH_EVENT_TYPES.has(event.event_type) &&
+      (assignment.priority !== "HIGH" ||
+        assignment.decision_class !== CONDITION4_DECISION_CLASS ||
+        assignment.requested_decision !== CONDITION4_REQUESTED_DECISION ||
+        assignment.source_record_ids.length !== 1 ||
+        assignment.source_record_ids[0] !== CONDITION4_SOURCE_RECORD_ID ||
+        assignment.dependencies.length !== 0)
+    ) {
+      transitionInvalid("Condition 4 event is not bound to the exact assignment");
+    }
+  }
+
+  if (event.event_type === "HEAD_CHEF_ASSIGNMENT_ACKNOWLEDGED") {
+    if (assignment.acknowledged) transitionInvalid("assignment is already acknowledged");
+  }
+  if (
+    [
+      "SPECIALIST_RESULT_POSTED",
+      "HEAD_CHEF_FOLLOW_UP_REQUESTED",
+      "SPECIALIST_PUBLICATION_REQUESTED",
+      "SPECIALIST_NO_CHANGE_ACCEPTED",
+      "SPECIALIST_EVIDENCE_BLOCKED",
+    ].includes(event.event_type) &&
+    !assignment.acknowledged
+  ) {
+    transitionPending("assignment acknowledgment has not reached the Control Room");
+  }
+  const assignmentHistory = event.assignment_id === null
+    ? []
+    : events.filter((record) => record.event.assignment_id === event.assignment_id);
+  const lastFollowUpIndex = assignmentHistory.findLastIndex(
+    (record) => record.event_type === "HEAD_CHEF_FOLLOW_UP_REQUESTED",
+  );
+  const currentReviewResults = assignmentHistory
+    .slice(lastFollowUpIndex + 1)
+    .filter((record) => record.event_type === "SPECIALIST_RESULT_POSTED");
+  if (
+    event.event_type === "SPECIALIST_RESULT_POSTED" &&
+    currentReviewResults.length > 0
+  ) {
+    transitionInvalid("review cycle already has a specialist result");
+  }
+  if (event.event_type === "HEAD_CHEF_FOLLOW_UP_REQUESTED") {
+    if (!assignmentHistory.some((record) => record.event_type === "SPECIALIST_RESULT_POSTED")) {
+      transitionPending("follow-up requires a prior specialist result");
+    }
+  }
+  if (
+    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    [
+      "SPECIALIST_PUBLICATION_REQUESTED",
+      "SPECIALIST_NO_CHANGE_ACCEPTED",
+      "SPECIALIST_EVIDENCE_BLOCKED",
+    ].includes(event.event_type)
+  ) {
+    if (currentReviewResults.length !== 1) {
+      transitionPending("Condition 4 terminal transition requires exactly one current specialist result");
+    }
+    const result = currentReviewResults[0].event;
+    if (
+      result.decision_class !== event.decision_class ||
+      canonicalJson(result.source_record_ids) !== canonicalJson(event.source_record_ids) ||
+      canonicalJson(result.dependencies) !== canonicalJson(event.dependencies) ||
+      result.summary !== event.summary
+    ) {
+      transitionInvalid("Condition 4 terminal transition conflicts with the specialist result");
+    }
+  }
+  if (
+    event.event_type === "HEAD_CHEF_FOLLOW_UP_REQUESTED" &&
+    assignment.follow_up_count >= 3
+  ) {
+    transitionInvalid("specialist follow-up limit reached");
+  }
+  if (
+    event.event_type === "SPECIALIST_PUBLICATION_REQUESTED" &&
+    assignment.publication_requested
+  ) {
+    transitionInvalid("assignment already has a publication request");
+  }
+  if (
+    event.event_type === "SPECIALIST_PUBLICATION_ACCEPTED" &&
+    !assignment.publication_requested
+  ) {
+    transitionPending("publication request has not reached the Control Room");
+  }
+  if (
+    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    event.event_type === "SPECIALIST_PUBLICATION_ACCEPTED"
+  ) {
+    const currentPublicationRequests = assignmentHistory
+      .slice(lastFollowUpIndex + 1)
+      .filter((record) => record.event_type === "SPECIALIST_PUBLICATION_REQUESTED");
+    if (currentReviewResults.length !== 1 || currentPublicationRequests.length !== 1) {
+      transitionPending("Condition 4 publication acceptance requires one material result and request");
+    }
+    const result = currentReviewResults[0].event;
+    const request = currentPublicationRequests[0].event;
+    if (
+      result.decision_class !== "MATERIAL_IMPORT_PUBLICATION_REQUIRED" ||
+      request.decision_class !== result.decision_class ||
+      canonicalJson(request.source_record_ids) !== canonicalJson(result.source_record_ids) ||
+      canonicalJson(request.dependencies) !== canonicalJson(result.dependencies) ||
+      request.summary !== result.summary
+    ) {
+      transitionInvalid("Condition 4 publication chain conflicts with the specialist result");
+    }
+  }
+  if (event.event_type === "HEAD_CHEF_CLOSURE_CREATED") {
+    const ownerGatePresent = events.some((record) => record.event_type === "OWNER_GATE_REQUIRED");
+    if (ownerGatePresent) transitionInvalid("an unresolved owner gate prevents closure");
+    const reviewOnlyClosure =
+      assignments.length === 0 &&
+      events.some((record) => record.event_type === "HEAD_CHEF_REVIEW_REQUEST");
+    const assignmentsTerminal =
+      assignments.length > 0 &&
+      assignments.every((candidate) => candidate.terminal_event_id !== null);
+    if (!reviewOnlyClosure && !assignmentsTerminal) {
+      transitionPending("coordination is not ready for closure");
+    }
+  }
+  if (
+    event.event_type === "WORKER_5_DELIVERY_ACKNOWLEDGED" &&
+    projection.current_state !== "READY_FOR_DELIVERY"
+  ) {
+    transitionPending("Head Chef closure has not reached the Control Room");
+  }
+  return { replayed: false, transition: event.event_type };
+}
+
+async function fetchTransitionProjection(context, fetchImpl) {
+  let response;
+  try {
+    response = await fetchImpl(transitionProjectionUrl(context.document.coordination_id), {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: {
+        Accept: "application/json",
+        "Cache-Control": "no-store",
+        "User-Agent": "pulsechain-head-chef-coordination-ingest",
+      },
+    });
+  } catch {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_UNAVAILABLE");
+  }
+  if (response?.status === 404) {
+    const value = await boundedJsonResponse(response, "CONTROL_ROOM_PROJECTION", MAX_CONTROL_ROOM_RESPONSE_BYTES);
+    if (!plainObject(value) || value.error !== "HEAD_CHEF_COORDINATION_NOT_FOUND") {
+      fail("CONTROL_ROOM_TRANSITION_PROJECTION_INVALID", "unexpected not-found response");
+    }
+    return null;
+  }
+  if (!response?.ok || response.status !== 200) {
+    fail("CONTROL_ROOM_TRANSITION_PROJECTION_FAILED", `HTTP_${response?.status ?? "UNKNOWN"}`);
+  }
+  return boundedJsonResponse(response, "CONTROL_ROOM_PROJECTION", MAX_CONTROL_ROOM_RESPONSE_BYTES);
+}
+
+export async function preflightTransitionProjection(
+  context,
+  fetchImpl = globalThis.fetch,
+  waitImpl = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const projection = await fetchTransitionProjection(context, fetchImpl);
+      return validateTransitionProjection(context.document, projection, {
+        sourceIssueNumber: context.issue.number,
+      });
+    } catch (error) {
+      const prerequisitePending =
+        error instanceof HeadChefCoordinationIngestError &&
+        error.code === "CONTROL_ROOM_TRANSITION_PREREQUISITE_PENDING" &&
+        error.mayHaveCommitted === false;
+      if (!prerequisitePending || attempt >= PROJECTION_RETRY_DELAYS_MS.length) throw error;
+      await waitImpl(PROJECTION_RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 async function fetchGitHubObject(path, githubToken, fetchImpl) {
@@ -822,6 +1420,7 @@ export async function processGitHubEvent({
   if (!context) return { ignored: true, reason: "MACHINE_RECEIPT" };
   await refetchAndValidateGitHubSource(context, githubToken, fetchImpl);
   const transport = buildTransportEnvelope(context);
+  await preflightTransitionProjection(context, fetchImpl, waitImpl);
   const oidcToken = await requestOidcToken(env, fetchImpl);
   let receipt;
   for (let attempt = 0; ; attempt += 1) {
