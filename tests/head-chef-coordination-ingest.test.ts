@@ -320,6 +320,18 @@ describe("Head Chef coordination workflow", () => {
     expect(workflow).not.toMatch(/\b(?:git push|trusted-team-publish|publication)\b/i);
     expect(workflow).toContain(RECEIPT_MARKER);
   });
+
+  it("keeps the job-level expression complete", async () => {
+    const workflow = await readFile(resolve(".github/workflows/head-chef-coordination-ingest.yml"), "utf8");
+    const expression = workflow.match(/    if: >-\n([\s\S]*?)\n    runs-on:/)?.[1];
+    expect(expression).toBeDefined();
+    expect(expression).toContain("(github.event_name == 'issues' ||");
+    expect(expression).toContain("(github.event_name == 'issue_comment' &&");
+    expect(expression).toContain(
+      "!startsWith(github.event.comment.body, '<!-- pulsechain-head-chef-event-receipt@1.0.0 -->')))",
+    );
+    expect(expression?.match(/\(/g)?.length).toBe(expression?.match(/\)/g)?.length);
+  });
 });
 
 describe("canonical event schema and bounds", () => {
