@@ -1,8 +1,8 @@
 {
   "schema_version": "pulsechain-continuity-pointer@1.0.0",
-  "checkpoint_id": "continuity-v1-20260905-grok-role-r01",
-  "checkpoint_path": "checkpoints/continuity-v1-20260905-grok-role-r01.json",
-  "content_sha256": "sha256:17c51e1cf3bf5ac717a03904e6c8542f6c2e6ef9bbde603ab0fd5d952ddad566",
-  "previous_checkpoint_id": "continuity-v1-20260905-grok-bridge-release",
-  "last_content_change_at": "2026-09-05T17:24:12.229Z"
+  "checkpoint_id": "continuity-v1-20260905-grok-canary-opening",
+  "checkpoint_path": "checkpoints/continuity-v1-20260905-grok-canary-opening.json",
+  "content_sha256": "sha256:e3529c2ac98b3bd87d158b224848ff551cc66d9a0fca359fb71db2bdeb69cdd6",
+  "previous_checkpoint_id": "continuity-v1-20260905-grok-role-r01",
+  "last_content_change_at": "2026-09-05T18:25:20.190Z"
 }
