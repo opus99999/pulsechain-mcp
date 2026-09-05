@@ -1,0 +1,134 @@
+name: ChatGPT Head Chef · PR Commit Wake Pilot
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/chatgpt-head-chef-pr-commit-wake-pilot.yml
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: chatgpt-head-chef-pr-commit-wake-pilot-v1
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    if: >-
+      github.repository == 'opus99999/pulsechain-mcp' &&
+      github.repository_id == '1320639709' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PILOT_PR: '42'
+      PILOT_BRANCH: chatgpt-head-chef-pr-commit-wake-pilot-20260904
+      PILOT_INITIAL_SHA: eaa591cfaa7af61cab83928af59216654cb20985
+      PILOT_BASE_SHA: de88f553092d5704257d8d54f1cc55c7130783f6
+      PILOT_TITLE: '[WAKE BUS PILOT] Existing ChatGPT Head Chef — GitHub Actions Commit Update'
+      PILOT_FILE: control-room-wake-bus-pilot/head-chef/wake.json
+      SOURCE_MAIN_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Verify exact open pilot pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          assert.equal(process.env.GITHUB_RUN_ATTEMPT, '1');
+          assert.equal(process.env.GITHUB_REPOSITORY, 'opus99999/pulsechain-mcp');
+          const response = await fetch(`https://api.github.com/repos/opus99999/pulsechain-mcp/pulls/${process.env.PILOT_PR}`, {
+            headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+            signal: AbortSignal.timeout(20000),
+          });
+          assert.equal(response.status, 200, 'PILOT_PR_READ_FAILED');
+          const pr = await response.json();
+          assert.equal(pr.number, Number(process.env.PILOT_PR));
+          assert.equal(pr.state, 'open');
+          assert.equal(pr.draft, false);
+          assert.equal(pr.merged, false);
+          assert.equal(pr.auto_merge, null);
+          assert.equal(pr.title, process.env.PILOT_TITLE);
+          assert.equal(pr.head.repo.full_name, 'opus99999/pulsechain-mcp');
+          assert.equal(pr.base.repo.full_name, 'opus99999/pulsechain-mcp');
+          assert.equal(pr.head.ref, process.env.PILOT_BRANCH);
+          assert.equal(pr.head.sha, process.env.PILOT_INITIAL_SHA);
+          assert.equal(pr.base.ref, 'main');
+          assert.equal(pr.comments, 0);
+          console.log(JSON.stringify({ classification: 'EXACT_OPEN_PILOT_PR_VERIFIED', pull_request: pr.number, initial_sha: pr.head.sha }));
+          NODE
+
+      - name: Check out exact pilot branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: chatgpt-head-chef-pr-commit-wake-pilot-20260904
+          fetch-depth: 2
+          persist-credentials: true
+          submodules: false
+          lfs: false
+
+      - name: Validate inert file and push exactly one bot wake commit
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { createHash, randomBytes } from 'node:crypto';
+          import { lstatSync, readFileSync, writeFileSync } from 'node:fs';
+          const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+          const canonical = value => JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])));
+          const file = process.env.PILOT_FILE;
+          assert.equal(process.env.GITHUB_RUN_ATTEMPT, '1');
+          assert.match(process.env.SOURCE_MAIN_COMMIT, /^[0-9a-f]{40}$/);
+          assert.equal(git('rev-parse', 'HEAD'), process.env.PILOT_INITIAL_SHA, 'INITIAL_HEAD_MISMATCH');
+          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_BASE_SHA, 'INITIAL_PARENT_MISMATCH');
+          assert.equal(git('status', '--porcelain'), '', 'WORKTREE_NOT_CLEAN');
+          assert.equal(git('ls-tree', '-r', '--name-only', 'HEAD', '--', 'control-room-wake-bus-pilot/'), file, 'PILOT_FILE_SET_MISMATCH');
+          assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), file, 'INITIAL_CHANGED_PATHS_MISMATCH');
+          assert.equal(lstatSync(file).isFile(), true, 'PILOT_FILE_NOT_REGULAR');
+          const initial = {
+            schema_version: 'pulsechain-chatgpt-pr-commit-wake-pilot@1.0.0',
+            pilot_id: 'pro-plan-head-chef-pr-commit-wake-pilot-v1',
+            state: 'ARMED_WAITING_FOR_GITHUB_ACTIONS_WAKE_COMMIT',
+            target_worker_id: 'chatgpt-head-chef',
+            target_workstream_id: 'head-chef-coordination',
+            target_conversation_id: '6a9a3c3f-fc44-83e9-909b-23e0e88e41f1',
+            synthetic: true,
+            purpose: 'VERIFY_BOT_AUTHORED_PR_COMMIT_EVENT_TRIGGER_TO_EXISTING_HEAD_CHEF_CONVERSATION',
+          };
+          const original = readFileSync(file, 'utf8');
+          assert.deepEqual(JSON.parse(original), initial, 'INITIAL_PAYLOAD_MISMATCH');
+          assert.equal(original, canonical(initial) + '\n', 'INITIAL_CANONICAL_JSON_MISMATCH');
+          const now = Date.now();
+          const wake = {
+            ...initial,
+            state: 'WAKE_COMMIT_POSTED',
+            wake_request_id: 'head-chef-pr-commit-wake-' + randomBytes(16).toString('hex'),
+            created_at_utc: new Date(now).toISOString(),
+            expires_at_utc: new Date(now + 45 * 60 * 1000).toISOString(),
+            source_workflow: 'chatgpt-head-chef-pr-commit-wake-pilot.yml',
+            source_main_commit: process.env.SOURCE_MAIN_COMMIT,
+          };
+          wake.content_sha256 = 'sha256:' + createHash('sha256').update(canonical(wake), 'utf8').digest('hex');
+          writeFileSync(file, canonical(wake) + '\n', { encoding: 'utf8' });
+          assert.equal(git('diff', '--name-only'), file, 'WAKE_CHANGED_PATHS_MISMATCH');
+          assert.equal(git('diff', '--cached', '--name-only'), '', 'UNEXPECTED_STAGED_FILE');
+          assert.equal(git('status', '--porcelain', '--untracked-files=all'), 'M ' + file, 'UNEXPECTED_WORKTREE_CHANGE');
+          git('config', '--local', 'user.name', 'github-actions[bot]');
+          git('config', '--local', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com');
+          git('add', '--', file);
+          assert.equal(git('diff', '--cached', '--name-only'), file);
+          git('commit', '-m', '[WAKE PILOT] ChatGPT Head Chef ' + wake.wake_request_id);
+          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_INITIAL_SHA);
+          assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), file);
+          assert.equal(git('status', '--porcelain'), '');
+          const head = git('rev-parse', 'HEAD');
+          git('push', 'origin', 'HEAD:refs/heads/' + process.env.PILOT_BRANCH);
+          console.log(JSON.stringify({ classification: 'ONE_GITHUB_ACTIONS_WAKE_COMMIT_PUSHED', wake_request_id: wake.wake_request_id, commit_sha: head, parent_sha: process.env.PILOT_INITIAL_SHA, created_at_utc: wake.created_at_utc, expires_at_utc: wake.expires_at_utc, content_sha256: wake.content_sha256 }));
+          NODE
