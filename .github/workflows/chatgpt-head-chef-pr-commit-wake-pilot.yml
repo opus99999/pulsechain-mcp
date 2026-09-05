@@ -28,8 +28,10 @@ jobs:
     env:
       PILOT_PR: '42'
       PILOT_BRANCH: chatgpt-head-chef-pr-commit-wake-pilot-20260904
-      PILOT_INITIAL_SHA: eaa591cfaa7af61cab83928af59216654cb20985
-      PILOT_BASE_SHA: de88f553092d5704257d8d54f1cc55c7130783f6
+      PILOT_PREVIOUS_SHA: 84ad25f0e4477b62deb94bf8b0f8075b3f78311f
+      PILOT_BASE_SHA: eaa591cfaa7af61cab83928af59216654cb20985
+      FRESH_WAKE_REQUEST_ID: head-chef-pr-commit-wake-c8f4a8f4308b47048037dbfea053f3ba
+      REPLACEMENT_TASK_ID: 6a9c04b80b9c8191a6e91f1d731ffee1
       PILOT_TITLE: '[WAKE BUS PILOT] Existing ChatGPT Head Chef — GitHub Actions Commit Update'
       PILOT_FILE: control-room-wake-bus-pilot/head-chef/wake.json
       SOURCE_MAIN_COMMIT: ${{ github.sha }}
@@ -58,10 +60,10 @@ jobs:
           assert.equal(pr.head.repo.full_name, 'opus99999/pulsechain-mcp');
           assert.equal(pr.base.repo.full_name, 'opus99999/pulsechain-mcp');
           assert.equal(pr.head.ref, process.env.PILOT_BRANCH);
-          assert.equal(pr.head.sha, process.env.PILOT_INITIAL_SHA);
+          assert.equal(pr.head.sha, process.env.PILOT_PREVIOUS_SHA);
           assert.equal(pr.base.ref, 'main');
           assert.equal(pr.comments, 0);
-          console.log(JSON.stringify({ classification: 'EXACT_OPEN_PILOT_PR_VERIFIED', pull_request: pr.number, initial_sha: pr.head.sha }));
+          console.log(JSON.stringify({ classification: 'EXACT_OPEN_PILOT_PR_VERIFIED', pull_request: pr.number, previous_sha: pr.head.sha }));
           NODE
 
       - name: Check out exact pilot branch
@@ -73,24 +75,24 @@ jobs:
           submodules: false
           lfs: false
 
-      - name: Validate inert file and push exactly one bot wake commit
+      - name: Validate exact previous wake and push one fresh bot wake commit
         shell: bash
         run: |
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import { execFileSync } from 'node:child_process';
-          import { createHash, randomBytes } from 'node:crypto';
+          import { createHash } from 'node:crypto';
           import { lstatSync, readFileSync, writeFileSync } from 'node:fs';
           const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
           const canonical = value => JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])));
           const file = process.env.PILOT_FILE;
           assert.equal(process.env.GITHUB_RUN_ATTEMPT, '1');
           assert.match(process.env.SOURCE_MAIN_COMMIT, /^[0-9a-f]{40}$/);
-          assert.equal(git('rev-parse', 'HEAD'), process.env.PILOT_INITIAL_SHA, 'INITIAL_HEAD_MISMATCH');
-          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_BASE_SHA, 'INITIAL_PARENT_MISMATCH');
+          assert.equal(git('rev-parse', 'HEAD'), process.env.PILOT_PREVIOUS_SHA, 'PREVIOUS_HEAD_MISMATCH');
+          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_BASE_SHA, 'PREVIOUS_PARENT_MISMATCH');
           assert.equal(git('status', '--porcelain'), '', 'WORKTREE_NOT_CLEAN');
           assert.equal(git('ls-tree', '-r', '--name-only', 'HEAD', '--', 'control-room-wake-bus-pilot/'), file, 'PILOT_FILE_SET_MISMATCH');
-          assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), file, 'INITIAL_CHANGED_PATHS_MISMATCH');
+          assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), file, 'PREVIOUS_CHANGED_PATHS_MISMATCH');
           assert.equal(lstatSync(file).isFile(), true, 'PILOT_FILE_NOT_REGULAR');
           const initial = {
             schema_version: 'pulsechain-chatgpt-pr-commit-wake-pilot@1.0.0',
@@ -103,13 +105,28 @@ jobs:
             purpose: 'VERIFY_BOT_AUTHORED_PR_COMMIT_EVENT_TRIGGER_TO_EXISTING_HEAD_CHEF_CONVERSATION',
           };
           const original = readFileSync(file, 'utf8');
-          assert.deepEqual(JSON.parse(original), initial, 'INITIAL_PAYLOAD_MISMATCH');
-          assert.equal(original, canonical(initial) + '\n', 'INITIAL_CANONICAL_JSON_MISMATCH');
+          const previous = {
+            ...initial,
+            state: 'WAKE_COMMIT_POSTED',
+            wake_request_id: 'head-chef-pr-commit-wake-62ce7271d5756db211eac1fa8b413347',
+            created_at_utc: '2026-09-05T02:57:40.750Z',
+            expires_at_utc: '2026-09-05T03:42:40.750Z',
+            source_workflow: 'chatgpt-head-chef-pr-commit-wake-pilot.yml',
+            source_main_commit: '892460991ae009694ebaea28211f96cd55196419',
+            content_sha256: 'sha256:dc589992328c7325918145652e905b7d5aaf6a9e0bd8b9ee22b48b92e3539e02',
+          };
+          assert.deepEqual(JSON.parse(original), previous, 'PREVIOUS_PAYLOAD_MISMATCH');
+          assert.equal(original, canonical(previous) + '\n', 'PREVIOUS_CANONICAL_JSON_MISMATCH');
+          const { content_sha256: previousHash, ...previousUnsigned } = previous;
+          assert.equal(previousHash, 'sha256:' + createHash('sha256').update(canonical(previousUnsigned), 'utf8').digest('hex'));
+          assert.match(process.env.FRESH_WAKE_REQUEST_ID, /^head-chef-pr-commit-wake-[0-9a-f]{32}$/);
+          assert.notEqual(process.env.FRESH_WAKE_REQUEST_ID, previous.wake_request_id);
           const now = Date.now();
+          assert.ok(now > Date.parse(previous.expires_at_utc), 'PREVIOUS_WAKE_NOT_EXPIRED');
           const wake = {
             ...initial,
             state: 'WAKE_COMMIT_POSTED',
-            wake_request_id: 'head-chef-pr-commit-wake-' + randomBytes(16).toString('hex'),
+            wake_request_id: process.env.FRESH_WAKE_REQUEST_ID,
             created_at_utc: new Date(now).toISOString(),
             expires_at_utc: new Date(now + 45 * 60 * 1000).toISOString(),
             source_workflow: 'chatgpt-head-chef-pr-commit-wake-pilot.yml',
@@ -125,10 +142,12 @@ jobs:
           git('add', '--', file);
           assert.equal(git('diff', '--cached', '--name-only'), file);
           git('commit', '-m', '[WAKE PILOT] ChatGPT Head Chef ' + wake.wake_request_id);
-          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_INITIAL_SHA);
+          assert.equal(git('rev-parse', 'HEAD^'), process.env.PILOT_PREVIOUS_SHA);
           assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), file);
           assert.equal(git('status', '--porcelain'), '');
           const head = git('rev-parse', 'HEAD');
+          assert.equal(git('ls-remote', 'origin', 'refs/heads/' + process.env.PILOT_BRANCH).split(/\s+/)[0], process.env.PILOT_PREVIOUS_SHA, 'REMOTE_HEAD_CHANGED');
           git('push', 'origin', 'HEAD:refs/heads/' + process.env.PILOT_BRANCH);
-          console.log(JSON.stringify({ classification: 'ONE_GITHUB_ACTIONS_WAKE_COMMIT_PUSHED', wake_request_id: wake.wake_request_id, commit_sha: head, parent_sha: process.env.PILOT_INITIAL_SHA, created_at_utc: wake.created_at_utc, expires_at_utc: wake.expires_at_utc, content_sha256: wake.content_sha256 }));
+          assert.equal(git('ls-remote', 'origin', 'refs/heads/' + process.env.PILOT_BRANCH).split(/\s+/)[0], head, 'PUSH_READBACK_MISMATCH');
+          console.log(JSON.stringify({ classification: 'ONE_GITHUB_ACTIONS_WAKE_COMMIT_PUSHED', wake_request_id: wake.wake_request_id, commit_sha: head, parent_sha: process.env.PILOT_PREVIOUS_SHA, created_at_utc: wake.created_at_utc, expires_at_utc: wake.expires_at_utc, content_sha256: wake.content_sha256, replacement_task_automation_id: process.env.REPLACEMENT_TASK_ID, source_main_commit: process.env.SOURCE_MAIN_COMMIT, workflow_run_id: process.env.GITHUB_RUN_ID, workflow_attempt: process.env.GITHUB_RUN_ATTEMPT }));
           NODE
