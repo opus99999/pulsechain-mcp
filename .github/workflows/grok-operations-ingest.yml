@@ -1,0 +1,39 @@
+name: Grok operations · ChatGPT request and feedback transport
+on:
+  issue_comment:
+    types: [created]
+permissions: {}
+concurrency:
+  group: grok-operations-${{ github.event.comment.id }}
+  cancel-in-progress: false
+jobs:
+  ingest:
+    if: >-
+      github.repository == 'opus99999/pulsechain-mcp' &&
+      github.repository_id == '1320639709' &&
+      github.repository_owner_id == '212180323' &&
+      github.actor == 'opus99999' && github.actor_id == '212180323' &&
+      github.triggering_actor == 'opus99999' &&
+      github.event.issue.number == 43 &&
+      github.event.comment.user.login == 'opus99999' &&
+      github.event.comment.user.id == 212180323 &&
+      startsWith(github.event.comment.body, '<!-- pulsechain-grok-operations-event@1.0.0 -->')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+      - name: Append exact request or specialist feedback and verify receipt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: node scripts/grok-operations-ingest.mjs
