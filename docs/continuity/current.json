@@ -1,8 +1,8 @@
 {
   "schema_version": "pulsechain-continuity-pointer@1.0.0",
-  "checkpoint_id": "continuity-v1-20260905-grok-canary-pickup",
-  "checkpoint_path": "checkpoints/continuity-v1-20260905-grok-canary-pickup.json",
-  "content_sha256": "sha256:023940eb74cdbc37ae357b3bd73e535410454427dd5cf78afa4a02baa1b896fd",
-  "previous_checkpoint_id": "continuity-v1-20260905-grok-canary-opening",
-  "last_content_change_at": "2026-09-05T19:42:51.877Z"
+  "checkpoint_id": "continuity-v1-20260905-grok-canary-assignment-stall",
+  "checkpoint_path": "checkpoints/continuity-v1-20260905-grok-canary-assignment-stall.json",
+  "content_sha256": "sha256:234b5899d2ffc9b140f42b5a98e7cd1d0b17da88367a2a4e1978fcd5d315c4d2",
+  "previous_checkpoint_id": "continuity-v1-20260905-grok-canary-pickup",
+  "last_content_change_at": "2026-09-05T21:42:11.433Z"
 }
