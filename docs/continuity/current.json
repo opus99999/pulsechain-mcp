@@ -1,0 +1,8 @@
+{
+  "schema_version": "pulsechain-continuity-pointer@1.0.0",
+  "checkpoint_id": "continuity-v1-20260905-initial",
+  "checkpoint_path": "checkpoints/continuity-v1-20260905-initial.json",
+  "content_sha256": "sha256:792e55e045cd4dd0ea61885c7c32ec32f18ab116426cbc2f7cf8a9790cf8a7af",
+  "previous_checkpoint_id": null,
+  "last_content_change_at": "2026-09-05T14:27:38.823Z"
+}
