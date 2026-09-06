@@ -237,13 +237,22 @@ const SECRET_PATTERN =
   /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[oprsu]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._~+/=-]{20,}|\b(?:password|passwd|secret|token|cookie|authorization|private[_-]?key|client[_-]?secret|access[_-]?token)\s*[:=]\s*[^\s,}]{8,})/i;
 
 const PROTECTED_ACTION_PATTERNS = [
-  /\b(?:execute|submit|place|sign|broadcast|send|transfer|withdraw|deposit|buy|sell|swap|bridge)\b[\s\S]{0,80}\b(?:order|transaction|trade|funds?|assets?|tokens?|wallet|portfolio)\b/i,
-  /\b(?:place|create|open|cancel|submit|execute|perform|commit|route|launch|make|sign|broadcast|initiate|approve|authorize)\b[^.!?\n]{0,100}\b(?:trade|order|transaction|transfer|swap|bridge|withdrawal|deposit|wallet|portfolio|position)\b/i,
-  /\b(?:send|move|route|transfer|bridge|swap|withdraw|deposit|buy|sell|trade|sweep|convert|stake|unstake|rebalance|delegate|mint|burn|wrap|unwrap|lend|borrow|repay|redeem|liquidate|allocate|commit|dispose|drain|fund|pay|wire|remit|collect|harvest|grant|revoke)\b[^.!?\n]{0,100}\b(?:funds?|assets?|tokens?|coins?|wallet|treasury|balance|portfolio|position|order|trade|transaction|address|rewards?|fees?|allowance|pls|wpls|plsx|usdc|eth|lp)\b/i,
+  /\b(?:execute|submit|place|sign|broadcast|send|transfer|withdraw|deposit|buy|sell|swap|bridge)\b[\s\S]{0,80}\b(?:orders?|transactions?|trades?|funds?|assets?|tokens?|wallet|portfolio)\b/i,
+  /\b(?:place|create|open|cancel|submit|execute|perform|commit|route|launch|make|sign|broadcast|initiate|approve|authorize)\b[^.!?\n]{0,100}\b(?:trades?|orders?|transactions?|transfer|swap|bridge|withdrawal|deposit|wallet|portfolio|position)\b/i,
+  /\b(?:send|move|route|transfer|bridge|swap|withdraw|deposit|buy|sell|trade|sweep|convert|stake|unstake|rebalance|delegate|mint|burn|wrap|unwrap|lend|borrow|repay|redeem|liquidate|allocate|commit|dispose|drain|fund|pay|wire|remit|collect|harvest|grant|revoke)\b[^.!?\n]{0,100}\b(?:funds?|assets?|tokens?|coins?|wallet|treasury|balance|portfolio|position|orders?|trades?|transactions?|address|rewards?|fees?|allowance|pls|wpls|plsx|usdc|eth|lp)\b/i,
   /\b(?:deploy|apply|patch|repair|configure|change|modify|restart|rerun|enable|disable|delete|erase|destroy|remove|drop|truncate|migrate|run|push|merge|rewrite)\b[^.!?\n]{0,100}\b(?:production|provider|schema|database|migration|credentials?|secrets?|workflow|schedule|gateway|traffic|main|trading|execution)\b/i,
   /\b(?:turn\s+(?:on|off)|enable|activate)\b[^.!?\n]{0,60}\b(?:trading|execution|wallet)\b/i,
   /\b(?:send|transfer|swap|bridge|withdraw|deposit|buy|sell|stake|unstake|convert|sweep|lend|borrow|repay|mint|burn)\s+(?:\d[\d,]*(?:\.\d+)?|[A-Z][A-Z0-9]{1,11})\b/,
 ];
+// Scan only complete, standalone prohibitions in an owner-intake summary.
+// Keep original bytes/hashes and all other fields/events unchanged. Ambiguous
+// or conditional wording stays gated; there is no research-only exemption.
+function ownerIntakeSafetySurface(eventType, summary) {
+  if (eventType !== "OWNER_QUESTION_ACCEPTED") return summary;
+  const action = "(?:move funds|execute transactions|sign transactions|broadcast transactions|transfer funds|transfer assets|trade assets|trade tokens|buy tokens|sell tokens|swap tokens)";
+  const prohibition = new RegExp("(^|[.!?\\n])([ \\t]*)(?:Do not|Never)[ \\t]+" + action + "(?:(?:, |,? and |,? or )" + action + ")*[ \\t]*(?=\\.(?:\\s|$))", "gi");
+  return summary.replace(prohibition, "$1$2[EXPLICIT_NO_FINANCIAL_ACTION]");
+}
 const CONDITION4_IMPERATIVE_ACTION_PATTERNS = [
   /(?:^|[\n.!?;:]\s*)(?:please\s+)?(?:execute|perform|initiate|route|move|send|transfer|swap|bridge|withdraw|deposit|buy|sell|trade|drain|dispose|pay|wire|deploy|apply|run|enable|disable)\b/i,
   /\b(?:must|should|shall|authorize|approve|instruct|order)\b[^.!?\n]{0,80}\b(?:execute|perform|initiate|route|move|send|transfer|swap|bridge|withdraw|deposit|buy|sell|trade|drain|dispose|pay|wire|deploy|apply|run|enable|disable)\b/i,
@@ -574,7 +583,7 @@ export function validateEventDocument(value, { sourceKind = "comment" } = {}) {
     PROTECTED_ACTION_PATTERNS.some((pattern) => pattern.test(requestedDecision));
   const protectedUnexceptionableSurface = [
     decisionClass?.replace(/[_-]+/g, " ") ?? "",
-    summary,
+    ownerIntakeSafetySurface(normalized.event_type, summary),
     ...dependencies,
   ].join("\n");
   const condition4ResearchSurface = [
