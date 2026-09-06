@@ -1,8 +1,8 @@
 {
   "schema_version": "pulsechain-continuity-pointer@1.0.0",
-  "checkpoint_id": "continuity-v1-20260906-observer-report-preparation",
-  "checkpoint_path": "checkpoints/continuity-v1-20260906-observer-report-preparation.json",
-  "content_sha256": "sha256:782f2423504efa91d010d164f2cc4f30671b4eb5fc4c89c7e3f43006a47bfd02",
-  "previous_checkpoint_id": "continuity-v1-20260906-grok-aa-opening",
-  "last_content_change_at": "2026-09-06T14:23:05.667Z"
+  "checkpoint_id": "continuity-v1-20260906-grok-aa-closed",
+  "checkpoint_path": "checkpoints/continuity-v1-20260906-grok-aa-closed.json",
+  "content_sha256": "sha256:1b335f48921c319cfcc1813f06673ab6b638ecb7bc0629129b843a0bf5e9067b",
+  "previous_checkpoint_id": "continuity-v1-20260906-observer-report-preparation",
+  "last_content_change_at": "2026-09-06T15:15:26.966Z"
 }
