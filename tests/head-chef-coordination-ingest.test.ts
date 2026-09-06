@@ -824,6 +824,90 @@ describe("GitHub provenance and source readback", () => {
 });
 
 describe("workflow-side transition projection preflight", () => {
+  // Generic publication requests must match the server's exact-result gate.
+  function publicationBindingFixture() {
+    const result = eventDocument({
+      event_id: "head-chef-result-generic-publication-20260906",
+      event_type: "SPECIALIST_RESULT_POSTED",
+      assignment_id: ASSIGNMENT_ID,
+      target_worker_id: "chatgpt-worker-4",
+      target_workstream_id: "investor-intelligence",
+      decision_class: "MATERIAL_IMPORT_PUBLICATION_REQUIRED",
+      source_record_ids: [CONDITION4_SOURCE_RECORD_ID],
+      dependencies: [],
+      requested_decision: null,
+      summary: "Verified evidence — α\r\nPreserve exact scope.",
+    });
+    const request = eventDocument({
+      ...result,
+      event_id: "head-chef-publication-generic-request-20260906",
+      event_type: "SPECIALIST_PUBLICATION_REQUESTED",
+    });
+    const projection = transitionProjection({
+      currentState: "SPECIALIST_REVIEW",
+      assignments: [projectedAssignment({ acknowledged: true, state: "RESULT_POSTED" })],
+      events: [projectedEvent(result)],
+    });
+    return { result, request, projection };
+  }
+
+  it("preserves exact generic publication text and accepts the bound request", () => {
+    const { request, projection } = publicationBindingFixture();
+    const before = canonicalJson(request);
+    validateEventDocument(request, { sourceKind: "comment" });
+    expect(validateTransitionProjection(request, projection, { sourceIssueNumber: 71 }))
+      .toEqual({ replayed: false, transition: "SPECIALIST_PUBLICATION_REQUESTED" });
+    expect(canonicalJson(request)).toBe(before);
+  });
+
+  it.each([
+    ["appended review", { summary: "Verified evidence — α\r\nPreserve exact scope.\nExtra review note." }],
+    ["line ending", { summary: "Verified evidence — α\nPreserve exact scope." }],
+    ["Unicode", { summary: "Verified evidence — a\r\nPreserve exact scope." }],
+    ["decision", { decision_class: "VALIDATED_NO_CHANGE_NO_PUBLICATION_REQUIRED" }],
+    ["source", { source_record_ids: ["signals-platform-different-accepted-source-20260906"] }],
+    ["dependency", { dependencies: ["signals-platform-missing-evidence-20260906"] }],
+  ])("rejects a generic publication %s mismatch before transport", (_label, change) => {
+    const { request, projection } = publicationBindingFixture();
+    const changed = eventDocument({ ...request, ...change });
+    expect(() => validateTransitionProjection(changed, projection, { sourceIssueNumber: 71 }))
+      .toThrow(/CONTROL_ROOM_TRANSITION_PREFLIGHT_REJECTED/);
+  });
+
+  it("requires exactly one result in the current generic review cycle", () => {
+    const { result, request, projection } = publicationBindingFixture();
+    for (const events of [[], [projectedEvent(result), projectedEvent(eventDocument({
+      ...result, event_id: "head-chef-result-generic-competing-20260906",
+    }))]]) {
+      expect(() => validateTransitionProjection(request, { ...projection, events }, { sourceIssueNumber: 71 }))
+        .toThrow(/CONTROL_ROOM_TRANSITION_PREREQUISITE_PENDING/);
+    }
+    const followUp = eventDocument({ ...result,
+      event_id: "head-chef-followup-generic-20260906", event_type: "HEAD_CHEF_FOLLOW_UP_REQUESTED" });
+    const history = [projectedEvent(result), projectedEvent(followUp)];
+    expect(() => validateTransitionProjection(request, { ...projection, events: history }, { sourceIssueNumber: 71 }))
+      .toThrow(/CONTROL_ROOM_TRANSITION_PREREQUISITE_PENDING/);
+    const currentResult = eventDocument({ ...result, event_id: "head-chef-result-generic-next-cycle-20260906" });
+    expect(validateTransitionProjection(request,
+      { ...projection, events: [...history, projectedEvent(currentResult)] }, { sourceIssueNumber: 71 }))
+      .toEqual({ replayed: false, transition: "SPECIALIST_PUBLICATION_REQUESTED" });
+  });
+
+  it("retains generic publication actor, duplicate, replay and conflict controls", () => {
+    const { request, projection } = publicationBindingFixture();
+    const wrongActor = eventDocument({ ...request, target_worker_id: "chatgpt-worker-1", target_workstream_id: "signals-platform" });
+    expect(() => validateTransitionProjection(wrongActor, projection, { sourceIssueNumber: 71 }))
+      .toThrow(/CONTROL_ROOM_TRANSITION_PREFLIGHT_REJECTED/);
+    const committed = { ...projection, events: [...projection.events, projectedEvent(request)],
+      assignments: [projectedAssignment({ acknowledged: true, publication_requested: true, state: "RESULT_POSTED" })] };
+    expect(validateTransitionProjection(request, committed, { sourceIssueNumber: 71 }))
+      .toEqual({ replayed: true, transition: "SPECIALIST_PUBLICATION_REQUESTED" });
+    expect(() => validateTransitionProjection(eventDocument({ ...request, event_id: "head-chef-publication-duplicate-20260906" }), committed, { sourceIssueNumber: 71 }))
+      .toThrow(/CONTROL_ROOM_TRANSITION_PREFLIGHT_REJECTED/);
+    expect(() => validateTransitionProjection(eventDocument({ ...request, summary: "Conflicting same-ID evidence." }), committed, { sourceIssueNumber: 71 }))
+      .toThrow(/CONTROL_ROOM_TRANSITION_PREFLIGHT_REJECTED/);
+  });
+
   it("accepts a new owner opening, an exact replay, and a correctly bound assignment", () => {
     const opening = ownerOpening();
     expect(validateTransitionProjection(opening, null, { sourceIssueNumber: 71 })).toEqual({
