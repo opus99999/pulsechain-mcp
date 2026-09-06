@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+// Corrective coverage includes temporal descriptive nouns; existing negation tests remain.
 import {validateEventDocument, canonicalDuplicateKeyForEvent, contentSha256ForEvent, coordinationIdForQuestion} from '../scripts/head-chef-coordination-ingest.mjs';
 // Illustrative offline fixtures, not the original retained Worker #5 payload.
 const fixtures = {
@@ -49,4 +50,48 @@ test('prohibition cannot exempt requested decision, classification, other event,
     assert.throws(()=>validateEventDocument(opening(fixtures.accepted[0],overrides),{sourceKind:'issue'}));
   const doc=opening(fixtures.accepted[0]);doc.summary+=' Changed.';
   assert.throws(()=>validateEventDocument(doc,{sourceKind:'issue'}),{code:'CANONICAL_DUPLICATE_KEY_MISMATCH'});
+});
+
+// Generic historical-noun regressions; the private retained candidate is tested separately.
+const temporalBridgeFixtures = {
+  "accepted": [
+    "What new evidence establishes where the funds went after bridge\ninitiation, whether any of those funds returned?",
+    "What new evidence establishes where the funds went after bridge initiation, whether any of those funds returned?",
+    "Review disposition after the bridge initiation; identify any returned funds.",
+    "Review the historical route following bridge\r\ninitiation: explain remaining funds.",
+    "Compare evidence before bridge initiation and since bridge initiation, including returned assets.",
+    "Review historical disposition during bridge initiation. This is research only. Do not move funds or execute transactions.",
+    "Review historical receipt α after bridge initiation, noting 1.000001 tokens and 🙂 uncertainty. Do not execute transactions."
+  ],
+  "commands": [
+    "Bridge assets.",
+    "Bridge\nthese funds.",
+    "Transfer assets.",
+    "Sign transactions.",
+    "Trade tokens.",
+    "Move funds.",
+    "Swap 10 PLSX.",
+    "Initiate a bridge transaction.",
+    "Execute transactions.",
+    "Please bridge initiation assets.",
+    "After bridge initiation, transfer funds.",
+    "After bridge initiation, perform a transfer.",
+    "Approve the bridge initiation transaction."
+  ]
+};
+for (const [i,summary] of temporalBridgeFixtures.accepted.entries()) test(`temporal bridge noun ${i} preserves full canonical event`,()=>{
+ const doc=opening(summary);assert.deepEqual(validateEventDocument(doc,{sourceKind:'issue'}),doc);
+});
+for (const [i,command] of temporalBridgeFixtures.commands.entries()) for(const prefix of ['',temporalBridgeFixtures.accepted[5]+'\n']) test(`bridge/financial command ${i} remains blocked after research=${!!prefix}`,()=>{
+ assert.throws(()=>validateEventDocument(opening(prefix+command),{sourceKind:'issue'}),{code:'PROTECTED_ACTION_REJECTED'});
+});
+test('temporal noun rule remains summary-only and owner-intake-only',()=>{
+ const summary=temporalBridgeFixtures.accepted[0];
+ for(const overrides of [{event_type:'HEAD_CHEF_REVIEW_REQUEST'},{requested_decision:summary}])
+  assert.throws(()=>validateEventDocument(opening(summary,overrides),{sourceKind:'issue'}),{code:'PROTECTED_ACTION_REJECTED'});
+});
+test('descriptive masking preserves the protected predicate distance boundary',()=>{
+ const gap=' after bridge initiation';
+ const summary='Execute'+gap+' '.repeat(80-gap.length)+'funds.';
+ assert.throws(()=>validateEventDocument(opening(summary),{sourceKind:'issue'}),{code:'PROTECTED_ACTION_REJECTED'});
 });
