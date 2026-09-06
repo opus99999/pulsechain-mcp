@@ -1033,7 +1033,8 @@ export function validateTransitionProjection(
     }
   }
   if (
-    event.coordination_id === CONDITION4_COORDINATION_ID &&
+    (event.coordination_id === CONDITION4_COORDINATION_ID ||
+      event.event_type === "SPECIALIST_PUBLICATION_REQUESTED") &&
     [
       "SPECIALIST_PUBLICATION_REQUESTED",
       "SPECIALIST_NO_CHANGE_ACCEPTED",
@@ -1041,7 +1042,7 @@ export function validateTransitionProjection(
     ].includes(event.event_type)
   ) {
     if (currentReviewResults.length !== 1) {
-      transitionPending("Condition 4 terminal transition requires exactly one current specialist result");
+      transitionPending("terminal transition requires exactly one current specialist result");
     }
     const result = currentReviewResults[0].event;
     if (
@@ -1050,7 +1051,7 @@ export function validateTransitionProjection(
       canonicalJson(result.dependencies) !== canonicalJson(event.dependencies) ||
       result.summary !== event.summary
     ) {
-      transitionInvalid("Condition 4 terminal transition conflicts with the specialist result");
+      transitionInvalid("terminal transition conflicts with the specialist result");
     }
   }
   if (
