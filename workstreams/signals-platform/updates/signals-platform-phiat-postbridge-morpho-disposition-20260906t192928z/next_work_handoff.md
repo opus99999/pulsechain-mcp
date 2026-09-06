@@ -1,0 +1,1 @@
+Return Signals to patrol. Reopen technical review only upon a governed assignment carrying accepted evidence of a Morpho share change, USDC withdrawal or transfer, verified return or recovery, or another material post-cutoff disposition. Preserve the commingling limitation and leave ownership, common-control, and identity determinations to the responsible authority.
