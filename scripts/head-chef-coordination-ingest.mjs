@@ -251,7 +251,14 @@ function ownerIntakeSafetySurface(eventType, summary) {
   if (eventType !== "OWNER_QUESTION_ACCEPTED") return summary;
   const action = "(?:move funds|execute transactions|sign transactions|broadcast transactions|transfer funds|transfer assets|trade assets|trade tokens|buy tokens|sell tokens|swap tokens)";
   const prohibition = new RegExp("(^|[.!?\\n])([ \\t]*)(?:Do not|Never)[ \\t]+" + action + "(?:(?:, |,? and |,? or )" + action + ")*[ \\t]*(?=\\.(?:\\s|$))", "gi");
-  return summary.replace(prohibition, "$1$2[EXPLICIT_NO_FINANCIAL_ACTION]");
+  // Temporal "bridge initiation" is a noun phrase, not an instruction to
+  // bridge a later-mentioned asset. Mask only that noun in the scan; keep
+  // every surrounding directive and original stored byte unchanged.
+  // Six spaces preserve predicate offsets and the existing 80-unit window.
+  const temporalBridgeNoun = /\b((?:after|before|following|since|during)\s+(?:the\s+)?)bridge(?=\s+initiation\b)/gi;
+  return summary
+    .replace(prohibition, "$1$2[EXPLICIT_NO_FINANCIAL_ACTION]")
+    .replace(temporalBridgeNoun, "$1      ");
 }
 const CONDITION4_IMPERATIVE_ACTION_PATTERNS = [
   /(?:^|[\n.!?;:]\s*)(?:please\s+)?(?:execute|perform|initiate|route|move|send|transfer|swap|bridge|withdraw|deposit|buy|sell|trade|drain|dispose|pay|wire|deploy|apply|run|enable|disable)\b/i,
