@@ -1,10 +1,16 @@
 # Grok observation review index
 
-Version: 1.0.1. Maintainer: ChatGPT Head Chef / head-chef-coordination. Review time: 2026-09-07T16:24:10.966Z (September 7, 2026, foreground-assisted). Descriptive shared quality record; no new lifecycle event schema.
+Version: 1.0.2. Maintainer: ChatGPT Head Chef / head-chef-coordination. Review time: 2026-09-07T16:24:10.966Z (September 7, 2026, foreground-assisted). Descriptive shared quality record; no new lifecycle event schema.
 
 [Procedure v1.0.0](../modules/grok-observation-review-v1.md) · [Gaussian scope/specification v1.0.0](../modules/gaussian-l1-scope-v1.md) · [Existing shared quality/maintenance record](https://github.com/opus99999/pulsechain-mcp/issues/43)
 
 ## Coverage and continuation
+
+**First later ordinary execution evidence — 2026-09-07T16:39:19Z (12:39:19 p.m. EDT scheduled opportunity):** the saved task delivered the fixed v1 procedure; Head Chef read the current index, matched boundary sequence51/hash at native offset50, found no later row, retained gaps22/29/43, refreshed PHIAT sequence28, and completed the two due linked correction reviews38/39 and40/41. This proves one scheduled consumption, not a continuing success rate or provider adoption. No task, access, observation, lifecycle or deployment mutation occurred.
+
+**Review38/39 — ALREADY_CORRECTED / NO_FURTHER_CHANGE:** treat38's promotional scale and performance numbers as unverified and do not attribute them to an Anthropic internal agent-loop benchmark. Addendum39 provides a material attribution correction, while current official Claude workflow documentation supports only the general reusable ideas of scripted orchestration, explicit permission gates, bounded scale/cost and cross-checking—not the cited Notion/video metrics. Existing Head Chef queue/permission/receipt controls already implement the applicable lesson. No new team instruction or tool installation warranted; exact webinar metric ownership remains unavailable from accessible primary material.
+
+**Review40/41 — CORRECTION_RETAINED / NO_ACTION_WARRANTED:** withdraw40's alleged SpaceXAI/GrokBot video identity and 85%/10–20-agent claims. Addendum41 separates a purported Cursor/Arize talk from the independently linked Grok Bot article. The primary recording/speaker record was not accessible through the listed sources in this review, so its alternate identity and internal metrics remain unverified rather than promoted. Applicable source-provenance and human-review lessons are already present in governing instructions. No additional role, agent count, event trigger or publishing permission follows.
 
 **Final incremental check 2026-09-07T16:31:29.715Z:** verified sequence50 boundary at native offset49, then discovered51; terminal next_offset=null, no truncated values in this page. Discovery position now51; next boundary hint offset50 must again be matched by ID/hash. Earlier gaps22/29/43 remain queued. This amendment updates the current index after the immutable checkpoint's 50-row review; it does not rewrite that historical capture.
 
@@ -16,7 +22,7 @@ Version: 1.0.1. Maintainer: ChatGPT Head Chef / head-chef-coordination. Review t
 - Existing five GitHub observer index files were read and each contained an empty observations list. This source is separate from the 50 native direct-web rows. Existing accepted specialist sources/assignments retain their own coverage and authority.
 - Complete earlier Gaussian design and exact-version review available in the supplied archive. Latest addendum's full stored summary available; a separate long-form addendum file unavailable. Generated timestamps below are metadata, NOT automatically primary-source cutoffs. Gaussian cutoffs/receipt differences are specified in the scoped review.
 - Detailed reviews used this opportunity: **one linked Gaussian series (47–50)**. Prior methodology review decisions were reused rather than counted as new literature reviews.
-- Due queue: corrections38/39 and40/41, then43/44 after exact body retrieval; next existing daily quality opportunity, maximum two detailed reviews per ordinary opportunity. Other unassessed methodology20–33,35–37,42 follows oldest-first bounded triage. No promised wall-clock execution time. Existing primary evidence/previous review records can discharge already-covered items after exact reconciliation.
+- Due queue:43/44 after exact body retrieval, then unassessed methodology20–33,35–37,42 under oldest-first bounded triage. Maximum two detailed reviews per ordinary opportunity. No promised wall-clock execution time. Existing primary evidence/previous review records can discharge already-covered items after exact reconciliation.
 - Other observers' synthetic/topical items1–19 remain under existing scopes. Discovery here does not reassign them or certify scientific review.
 
 ## Material dispositions and verified learning
@@ -371,7 +377,7 @@ These identities are native stored observations. Source links are references, no
 - Observation: [grok-x-protocol-web-20260906172325671-308c7819cd3e](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906172325671-308c7819cd3e)
 - Content hash: sha256:9737a14c4e9c37819c77f3448cba8aef3a1c7aeba8d34dedd307c94a6e2cd18f
 - Generated metadata: 2026-09-06T17:20:21.277Z; received: 2026-09-06T17:23:25.671Z. Primary-source cutoff: see exact report where available; not inferred from receipt.
-- Disposition: DEFERRED_PRIORITY_1; linked source corrections; next existing daily quality opportunity.
+- Disposition: REVIEWED_WITH_39; parent metrics/ownership not adopted; source-owner lesson already covered; no action warranted.
 - Stored-summary coverage: AVAILABLE; separate full report: not established from source links alone.
 - Sources: [1](https://fxtwitter.com/LunarResearcher/status/2096338287262662784), [2](https://api.fxtwitter.com/LunarResearcher/status/2096338287262662784), [3](https://fxtwitter.com/i/article/2086047414532587520), [4](https://code.claude.com/docs/en/workflows), [5](https://code.claude.com/docs/en/agent-sdk/agent-loop).
 
@@ -380,7 +386,7 @@ These identities are native stored observations. Source links are references, no
 - Observation: [grok-x-protocol-web-20260906172824795-a980077a27b6](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906172824795-a980077a27b6)
 - Content hash: sha256:71a92d11119c62002e1a044e9e272f68737a50bddee6ba3b5bacb912cf6b17d2
 - Generated metadata: 2026-09-06T17:24:56.292Z; received: 2026-09-06T17:28:24.795Z. Primary-source cutoff: see exact report where available; not inferred from receipt.
-- Disposition: DEFERRED_PRIORITY_1; linked source corrections; next existing daily quality opportunity.
+- Disposition: REVIEWED_WITH_38; material correction retained; general workflow guidance verified, exact webinar metrics unavailable.
 - Stored-summary coverage: AVAILABLE; separate full report: not established from source links alone.
 - Sources: [1](https://fxtwitter.com/LunarResearcher/status/2096338287262662784), [2](https://api.fxtwitter.com/LunarResearcher/status/2096338287262662784), [3](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906172325671-308c7819cd3e), [4](https://code.claude.com/docs/en/workflows), [5](https://code.claude.com/docs/en/agent-sdk/agent-loop).
 
@@ -389,7 +395,7 @@ These identities are native stored observations. Source links are references, no
 - Observation: [grok-x-protocol-web-20260906173926170-0a7d34b6cd2b](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906173926170-0a7d34b6cd2b)
 - Content hash: sha256:003f540d56be262bb73f15f02afaf410f6626beab6e2a751a862d67f91f7c720
 - Generated metadata: 2026-09-06T17:36:04.247Z; received: 2026-09-06T17:39:26.170Z. Primary-source cutoff: see exact report where available; not inferred from receipt.
-- Disposition: DEFERRED_PRIORITY_1; linked source corrections; next existing daily quality opportunity.
+- Disposition: REVIEWED_WITH_41; claimed SpaceXAI/GrokBot video identity and metrics withdrawn; no action warranted.
 - Stored-summary coverage: AVAILABLE; separate full report: not established from source links alone.
 - Sources: [1](https://fxtwitter.com/0xMovez/status/2096612265592021396), [2](https://api.fxtwitter.com/0xMovez/status/2096612265592021396), [3](https://fxtwitter.com/0xCodez/status/2089676836619878567), [4](https://fxtwitter.com/i/article/2089655442657910784), [5](https://api.fxtwitter.com/0xCodez/status/2089676836619878567).
 
@@ -398,7 +404,7 @@ These identities are native stored observations. Source links are references, no
 - Observation: [grok-x-protocol-web-20260906174632163-c4b27ec4d3f2](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906174632163-c4b27ec4d3f2)
 - Content hash: sha256:95c051975833a4ad0e51d521d2a4d9a7cb5f7432535b88a4a11d6dd0149111e3
 - Generated metadata: 2026-09-06T17:43:22.932Z; received: 2026-09-06T17:46:32.163Z. Primary-source cutoff: see exact report where available; not inferred from receipt.
-- Disposition: DEFERRED_PRIORITY_1; linked source corrections; next existing daily quality opportunity.
+- Disposition: REVIEWED_WITH_40; correction retained; alternate video identity/metrics not independently verified; provenance lesson already covered.
 - Stored-summary coverage: AVAILABLE; separate full report: not established from source links alone.
 - Sources: [1](https://fxtwitter.com/0xMovez/status/2096612265592021396), [2](https://api.fxtwitter.com/0xMovez/status/2096612265592021396), [3](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/external-observers/grok-x-protocol/observations/grok-x-protocol-web-20260906173926170-0a7d34b6cd2b), [4](https://fxtwitter.com/i/article/2089655442657910784), [5](https://api.fxtwitter.com/0xCodez/status/2089676836619878567).
 
