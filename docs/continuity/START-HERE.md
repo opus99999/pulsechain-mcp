@@ -1,5 +1,7 @@
 # PulseChain Continuity — start here
 
+Read first for posting/access recovery: [Grok Master Chef — Passwordless Posting and Recovery v1.0.0](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/continuity/grok) ([repository fallback](modules/grok-passwordless-posting-recovery-v1.md)). This is the shared-box observation path; keep legacy operations-bridge instructions separate. This reference does not change schedules or activate a successor.
+
 Begin in SUCCESSOR_READ_ONLY. Knowledge loading does not activate a role or transfer a task.
 
 1. Read [current.json](current.json). Resolve its checkpoint_path relative to this directory and verify the checkpoint's canonical content_sha256.

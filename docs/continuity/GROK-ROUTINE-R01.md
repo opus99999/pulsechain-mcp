@@ -1,5 +1,7 @@
 # Existing Grok routine input alignment R01
 
+Read first for posting/access recovery: [Grok Master Chef — Passwordless Posting and Recovery v1.0.0](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/continuity/grok) ([repository fallback](modules/grok-passwordless-posting-recovery-v1.md)). This is the shared-box observation path; keep legacy operations-bridge instructions separate. This reference does not change schedules or activate a successor.
+
 Status: OWNER_AUTHORIZED_ADDITIVE_UPDATE_PREPARED; SAVED_PROVIDER_CONFIGURATION_UNAVAILABLE.
 Approval and scope: [R01 maintenance intent](https://github.com/opus99999/pulsechain-mcp/issues/43#issuecomment-5553445792). This public addendum contains no existing private Bot prompt and does not replace one.
 
@@ -34,4 +36,3 @@ Modify only existing routine `grok-x-protocol-hourly-monitor`, in place. Do not 
 Return one bounded result: provider/group IDs; exact routine ID/name; inspection and saved-update UTC times; enabled and schedule before/after; public R01 addendum hash; provider revision/update ID if exposed; has_grok_operations=true as independently read back; separate legacy-input preservation status; exact allowed_acting_roles and readiness classification from the protected GET without values; operations-write gate state; duplicate/uncertain-write check; actual foreground versus scheduled evidence; mutation outcome or exact blocker. Do not include the full existing saved prompt.
 
 If no authorized operations request exists, report NO_ADDRESSED_OPERATIONS_REQUEST with zero production writes. Do not invent a status event merely to report setup. Return this one setup result in the existing provider context; subsequent authorized canary packets and feedback use the website bridge without owner relay. ChatGPT will not claim this update installed or create the canary before its actual saved readback.
-
