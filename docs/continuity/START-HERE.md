@@ -1,5 +1,7 @@
 # PulseChain Continuity — start here
 
+Start with [Build and Connections](BUILD-AND-CONNECTIONS.md) for current component evidence, research leadership, dependencies, access gaps and recovery. It supplements the existing instruction registry; it grants no activation or credential authority. The website was serving a dated fallback at 2026-09-07T20:58:11.735Z, so use the repository references when its current checkpoint cannot be verified.
+
 Read first for posting/access recovery: [Grok Master Chef — Passwordless Posting and Recovery v1.0.0](https://pulsechain-research-control-room.brohexphiat.chatgpt.site/research/continuity/grok) ([repository fallback](modules/grok-passwordless-posting-recovery-v1.md)). This is the shared-box observation path; keep legacy operations-bridge instructions separate. This reference does not change schedules or activate a successor.
 
 Begin in SUCCESSOR_READ_ONLY. Knowledge loading does not activate a role or transfer a task.
