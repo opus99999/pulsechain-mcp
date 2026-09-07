@@ -1,5 +1,7 @@
 # Control Room Evidence Job Capsule — architecture decision v1.0.0
 
+> Implementation continuation, September 7, 2026: the owner authorized the single-capsule extension and selected the existing private GitHub repository. [Verified extension release v1.0.0 and private setup handoff](../reviews/gaussian-capsule-extension-v1.md) records Sites v55, exact protected staging, and launch held. The design below retains its original baseline restrictions; those are not a claim that the authorized extension is still absent. Pinned original: commit `344fb9a5523f1ffdbd31b71ae20eee54ae3e43aa`.
+
 Status: **IMPLEMENTATION-READY DESIGN; NOT DEPLOYED OR ACTIVATED**  
 Created: 2026-09-07T18:02:24.488Z  
 Maintainer: incumbent ChatGPT Head Chef performing the existing Control Center implementation function  
@@ -46,7 +48,7 @@ Carry a versioned JSON manifest as an existing Work Hub artifact; do not add a p
 
 The manifest hashes every carried file; a detached checksum hashes the final manifest. It has no unexplained self-hash.
 
-The provider invocation receipt must contain provider, exact context/run/session ID, requested and observed actor/model, capsule ID and manifest hash, invocation time, completion/stop state, usage source, and tool-scope digest. Missing or ambiguous receipt means `STORED_NOT_INVOKED`.
+The provider invocation receipt must contain provider, exact context/run/session ID, requested and observed actor/model, capsule ID and manifest hash, invocation time, completion/stop state, usage source, and tool-scope digest. Invocation states are distinct: `NO_INVOCATION_ATTEMPTED`, `INVOCATION_CONFIRMED`, and `ATTEMPTED_OUTCOME_UNKNOWN`. An absent receipt after an attempted launch is not proof that no run occurred; reconcile exact provider and Work Hub state before any permitted retry. This corrects the original v1.0.0 wording without altering the pinned historical bytes.
 
 ## First Gaussian capsule
 
