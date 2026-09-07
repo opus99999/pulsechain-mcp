@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["disposition", "findings", "coverage", "limitations"],
+  "properties": {
+    "disposition": {"enum": ["NO_CHANGE_REQUIRED", "MATERIAL_FINDINGS", "INCOMPLETE"]},
+    "findings": {"type": "array", "maxItems": 12, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["severity", "claim", "references", "why_baseline_is_insufficient", "proposed_disposition"],
+      "properties": {
+        "severity": {"enum": ["high", "medium", "low"]},
+        "claim": {"type": "string", "maxLength": 2000},
+        "references": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object", "additionalProperties": false, "required": ["member_id", "sha256", "locator"], "properties": {"member_id": {"type":"string"}, "sha256": {"type":"string", "pattern":"^[a-f0-9]{64}$"}, "locator": {"type":"string", "maxLength":500}}}},
+        "why_baseline_is_insufficient": {"type":"string", "maxLength":2000},
+        "proposed_disposition": {"type":"string", "maxLength":2000}
+      }
+    }},
+    "coverage": {"type":"array", "maxItems":100, "items":{"type":"object", "additionalProperties":false, "required":["member_id", "read_extent", "assessment"], "properties":{"member_id":{"type":"string"}, "read_extent":{"enum":["complete", "partial", "not_read"]}, "assessment":{"type":"string", "maxLength":1000}}}},
+    "limitations": {"type":"array", "maxItems":20, "items":{"type":"string", "maxLength":1000}}
+  }
+}

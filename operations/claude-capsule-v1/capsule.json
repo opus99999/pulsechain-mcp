@@ -1,0 +1,119 @@
+{
+  "capsule_schema": "pulsechain-evidence-job-capsule@1.0.0",
+  "capsule_id": "gaussian-l1-integrity-v0.1.0-20260907",
+  "preparation_version": "1.0.0",
+  "created_at_utc": "2026-09-07T18:39:05.897291Z",
+  "objective": "Gaussian L1 Knowledge-Integrity Review",
+  "source_cutoff_utc": "2026-09-07T17:20:05Z",
+  "baseline_design_cutoff_utc": "2026-09-06T23:45:18Z",
+  "producer": {
+    "worker_id": "chatgpt-head-chef",
+    "workstream_id": "head-chef-coordination"
+  },
+  "consumer": {
+    "worker_id": "chatgpt-head-chef",
+    "required_use": "Retrieve the complete private result, verify hashes, and record a substantive disposition in issue43 without evaluator answers."
+  },
+  "executor": {
+    "provider": "Anthropic Claude Code",
+    "route": "GITHUB_ACTIONS",
+    "repository": "opus99999/pulsechain-research-control-room-bridge",
+    "repository_id": "1345447956",
+    "repository_owner_id": "212180323",
+    "role": "knowledge-integrity-evaluation",
+    "existing_chat_identity_inherited": false,
+    "desired_model_id": "claude-opus-5",
+    "allowed_actual_model_ids": [
+      "claude-opus-5"
+    ],
+    "actual_model_id": null,
+    "minimum_cli_version": "2.1.259",
+    "authentication": "CLAUDE_SUBSCRIPTION_OAUTH_ONLY",
+    "allowed_operations": [
+      "read exact capsule inputs",
+      "static integrity review",
+      "return own private result"
+    ],
+    "work_hub_authority_id": null
+  },
+  "inputs": [
+    {
+      "role": "candidate",
+      "filename": "Gaussian_L1_Evaluation_v0_1_0_CANDIDATE.zip",
+      "bytes": 5931,
+      "sha256": "b07e0a124a748a8c3cd3c7e308816a2b8aacbe033968d8aa296d78d9103cdf4e",
+      "media_type": "application/zip",
+      "visibility": "RESTRICTED_CAPSULE_INPUT",
+      "source_version": "0.1.0",
+      "generation_time_utc": "2026-09-07T17:20:05Z",
+      "work_hub_artifact_id": null
+    },
+    {
+      "role": "owner_evaluator",
+      "filename": "Gaussian_L1_Evaluation_v0_1_0_OWNER_EVALUATOR.zip",
+      "bytes": 4615537,
+      "sha256": "ac71b2f9e3a2528a91b681bbf0048f5b57c5ba062583e599f9e4eba30ba8658f",
+      "media_type": "application/zip",
+      "visibility": "RESTRICTED_CAPSULE_INPUT",
+      "source_version": "0.1.0",
+      "generation_time_utc": "2026-09-07T17:20:05Z",
+      "work_hub_artifact_id": null
+    }
+  ],
+  "classification": "ORDINARY_INTEGRITY_REVIEW_NOT_CANARY",
+  "accepted_baseline": {
+    "scene_ids_selected": 3,
+    "questions_selected": 18,
+    "challenge_slots_unfilled": 14,
+    "scene_assets_available": 0,
+    "model_runs": 0
+  },
+  "limits": {
+    "capsules": 1,
+    "concurrency": 1,
+    "workflow_minutes": 20,
+    "review_seconds": 600,
+    "turns": 12,
+    "input_bytes": 8388608,
+    "expanded_bytes": 33554432,
+    "tool_read_bytes": 32768,
+    "tool_total_bytes": 524288,
+    "provider_stream_bytes": 2097152,
+    "review_output_bytes": 262144,
+    "normal_attempts": 1,
+    "conditional_transport_retries": 1,
+    "automatic_model_retries": 0,
+    "additional_financial_allowance_usd": 0
+  },
+  "invocation": {
+    "state": "NO_INVOCATION_ATTEMPTED",
+    "attempt_count": 0,
+    "github_run_id": null,
+    "provider_session_id": null,
+    "work_hub_run_id": null
+  },
+  "unavailable_evidence": [
+    "private subscription/account entitlement and allowance",
+    "included private GitHub runner capacity",
+    "installed-app and secret metadata",
+    "preinstalled pinned Claude binary on runner",
+    "ordinary capsule-scoped Work Hub authority",
+    "protected input artifact IDs",
+    "unpredictable-result finalization support",
+    "Head Chef private result access grant"
+  ],
+  "prohibited": [
+    "API billing",
+    "overage",
+    "package installation",
+    "shell or network tools for reviewer",
+    "model substitution",
+    "Gaussian inference or benchmark answering",
+    "question or scoring changes",
+    "public evaluator output",
+    "specialist impersonation",
+    "canary reuse",
+    "repository edits by reviewer",
+    "recurring invocation"
+  ]
+}

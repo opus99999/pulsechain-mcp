@@ -1,0 +1,44 @@
+{
+  "verified_at_utc": "2026-09-07T18:39:05.897291Z",
+  "software_unit_tests": {
+    "passed": 20,
+    "failed": 0,
+    "fixtures": "synthetic parser/provider messages only; no model capability evidence"
+  },
+  "real_inputs": {
+    "input_verification": [
+      {
+        "role": "candidate",
+        "bytes": 5931,
+        "sha256": "b07e0a124a748a8c3cd3c7e308816a2b8aacbe033968d8aa296d78d9103cdf4e",
+        "manifest_sha256": "3921a6c73761a7d0c758a6e79d1353746669c9a31f73d4b5bfc0fd54138ae455",
+        "outer_members": 6
+      },
+      {
+        "role": "owner_evaluator",
+        "bytes": 4615537,
+        "sha256": "ac71b2f9e3a2528a91b681bbf0048f5b57c5ba062583e599f9e4eba30ba8658f",
+        "manifest_sha256": "9d89cf4f19e57d256eaba3859a2d548065169c97909d92463250ca06a190bf41",
+        "outer_members": 20
+      }
+    ],
+    "expanded_bytes": 30181828,
+    "network_calls": 0,
+    "packaged_code_executed": false,
+    "model_runs": 0
+  },
+  "candidate_zip_has_no_evaluator_member": true,
+  "python_syntax": "PASS",
+  "workflow_yaml": "PASS",
+  "preflight_exit_code": 78,
+  "no_invocation_attempted": true,
+  "native_access_checks": "12 historical canary enrollments fully paged; all 5 authorities inactive; neither input digest in 8 secure artifacts; ordinary artifact table empty",
+  "runtime_mcp_compatibility": "NOT_PROVIDER_TESTED",
+  "os_network_isolation": "NOT_DEPLOYED_OR_PROVEN",
+  "whole_capsule_roundtrip": "NOT_EXECUTED",
+  "work_hub_receipts": [],
+  "provider_receipts": [],
+  "head_chef_consumption": "PREPARATION_REVIEWED; CLAUDE_RESULT_UNAVAILABLE",
+  "protected_state_delta": 0,
+  "financial_execution_state_delta": 0
+}

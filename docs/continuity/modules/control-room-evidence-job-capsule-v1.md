@@ -1,7 +1,8 @@
-# Control Room Evidence Job Capsule — architecture decision v1.0.0
+# Control Room Evidence Job Capsule — architecture decision v1.0.1
 
-Status: **IMPLEMENTATION-READY DESIGN; NOT DEPLOYED OR ACTIVATED**  
+Status: **BASELINE ACCEPTED; REPOSITORY ROUTE SELECTED; IMPLEMENTATION PREPARED WITH VERIFIED CONTRACT GAPS**  
 Created: 2026-09-07T18:02:24.488Z  
+Revision: 2026-09-07; preserves v1.0.0 at commit 344fb9a5523f1ffdbd31b71ae20eee54ae3e43aa.  
 Maintainer: incumbent ChatGPT Head Chef performing the existing Control Center implementation function  
 Scope: one connected increment; no new organization, account, task, schedule, database/event schema, service, provider activation, model run, deployment, purchase, API billing, or identity transfer.
 
@@ -11,7 +12,7 @@ Use the deployed Work Hub secure enrollment/run/artifact/update contracts to car
 
 A capsule is not a wake signal, chat message, new lifecycle event, or general memory. Existing feeds and queues detect work; Head Chef judges it; a provider-specific activator must separately prove invocation; Work Hub persists scoped inputs, outputs, and audit evidence; the named consumer must prove retrieval and use.
 
-The first intended capsule is **Gaussian L1 Knowledge-Integrity Review**. It reuses the existing Gaussian v0.1.0 candidate/evaluator packages and asks Claude Opus 5—only after an already-entitled execution context is verified and separately authorized—to check source linkage, manifest integrity, scoring consistency, evidence separation, contradictions, and reproducibility. It does not run a Gaussian model, answer the benchmark, alter the selection, or rewrite accepted findings. Until the Claude gate passes, state is **STORED_NOT_INVOKED**.
+The first intended capsule is **Gaussian L1 Knowledge-Integrity Review**. It reuses the existing Gaussian v0.1.0 candidate/evaluator packages and asks Claude Opus 5—only after an already-entitled execution context is verified and separately authorized—to check source linkage, manifest integrity, scoring consistency, evidence separation, contradictions, and reproducibility. It does not run a Gaussian model, answer the benchmark, alter the selection, or rewrite accepted findings. Before any attempted invocation, state is **NO_INVOCATION_ATTEMPTED**. The repository route is now owner-selected; see the [prepared connection and exact compatibility gates](../../../operations/claude-capsule-v1/README.md).
 
 ## Baseline
 
@@ -46,7 +47,7 @@ Carry a versioned JSON manifest as an existing Work Hub artifact; do not add a p
 
 The manifest hashes every carried file; a detached checksum hashes the final manifest. It has no unexplained self-hash.
 
-The provider invocation receipt must contain provider, exact context/run/session ID, requested and observed actor/model, capsule ID and manifest hash, invocation time, completion/stop state, usage source, and tool-scope digest. Missing or ambiguous receipt means `STORED_NOT_INVOKED`.
+The provider invocation receipt must contain provider, exact context/run/session ID, requested and observed actor/model, capsule ID and manifest hash, invocation time, completion/stop state, usage source, and tool-scope digest. Record invocation separately from storage: `NO_INVOCATION_ATTEMPTED` only when no launch was attempted; `INVOCATION_CONFIRMED` when the execution surface returns exact run/session evidence; `ATTEMPTED_OUTCOME_UNKNOWN` after a launch attempt without conclusive outcome. An absent receipt never proves no run occurred. Reconcile the same attempt before any permitted retry.
 
 ## First Gaussian capsule
 
@@ -95,8 +96,9 @@ V1 limits: one capsule, one executor, one consumer; 8 MiB per artifact and total
 
 ## Owner decision before execution
 
-Select and authorize one **already-entitled Claude surface**: either an owner-controlled Claude Code headless host or a repository-scoped Claude Code GitHub Action, with exact least-privilege Work Hub artifact scope. If neither exists, keep the Claude lane disabled. This design does not authorize provisioning or purchase.
+The owner selected repository-scoped Claude Code GitHub Actions for one capsule. Preparation found that deployed @2 accepts only the existing specialist identities, scopes private access by workstream, and commits the final output hash before execution. It does not yet express this unpredictable-result reviewer job. The [compatibility record](../../../operations/claude-capsule-v1/WORK_HUB_COMPATIBILITY.md) names the bounded extension needed; do not widen or impersonate specialist/canary authority. Subscription authorization, included capacity, runtime availability and protected artifact access remain separate gates. No installation, secret creation, dispatch or purchase has occurred.
 
 ## Current independent work
 
 PHIAT remains at accepted sequence 28. Signals / `signals-platform` is the next actor and must originate the corrected `SPECIALIST_PUBLICATION_ACCEPTED` event while preserving sequence-28 decision, dependencies, and summary exactly. Head Chef does not originate it. This increment does not delay Worker #5's owner delivery.
+

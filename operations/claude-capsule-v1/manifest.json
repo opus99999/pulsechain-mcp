@@ -1,0 +1,64 @@
+{
+  "package": "claude-gaussian-capsule-preparation",
+  "version": "1.0.0",
+  "created_at_utc": "2026-09-07T18:39:05.897291Z",
+  "contains_evaluator_material": false,
+  "invocation_state": "NO_INVOCATION_ATTEMPTED",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 9898,
+      "sha256": "9fc78a8e2ead102021daa26f28ea38bf29487c339caee340e9cdd1aa6e2cf189"
+    },
+    {
+      "path": "SOURCE_IDEAS_REVIEW.md",
+      "bytes": 3172,
+      "sha256": "df1746bf7ed7499c425c6d3f70413562c0eb8890353076386f7fab6450458771"
+    },
+    {
+      "path": "WORK_HUB_COMPATIBILITY.md",
+      "bytes": 4694,
+      "sha256": "e22e4041368af08dd61dc7a5b40dfaeb17c1adf2f90ff24584ef979ef1cbe225"
+    },
+    {
+      "path": "adapter.py",
+      "bytes": 12237,
+      "sha256": "6d63f2ff8e481fa5e8f8cc3e4996f39130f1282a2d7feedd10970f8d5372585e"
+    },
+    {
+      "path": "capsule.json",
+      "bytes": 3960,
+      "sha256": "00076c3fa8271b05e09b613741003ade49e76878428e4ec3e0b3161efba95c81"
+    },
+    {
+      "path": "readiness.json",
+      "bytes": 1284,
+      "sha256": "683477b50669af7b506a38e1bcdc26f16447be34b21ed9e7fc86fc61b6d1a029"
+    },
+    {
+      "path": "result.schema.json",
+      "bytes": 1567,
+      "sha256": "aff1e138c79f8405f6d325b9d3bcbe53815372db6cdac64ca5dbb1840479d91c"
+    },
+    {
+      "path": "review-instructions.md",
+      "bytes": 2260,
+      "sha256": "8adf44c796adc2672b9bb5f952da114abc1c5402160510d660260e4ad6085355"
+    },
+    {
+      "path": "test_adapter.py",
+      "bytes": 4945,
+      "sha256": "bc8fdeb00ccb0899319ff30d34bead05ad82838f61fc07f090dd40a568fec8c8"
+    },
+    {
+      "path": "validation-results.json",
+      "bytes": 1642,
+      "sha256": "d143bd6d6d91668c9b0cd36befb3e3bc0adbc0f8c1a6efda9276534317093bb1"
+    },
+    {
+      "path": "workflow.prepared.yml",
+      "bytes": 1720,
+      "sha256": "148099b8e1e8090b452a25744acb89f738055bdfecf216035b3479d7f82d3a9d"
+    }
+  ]
+}

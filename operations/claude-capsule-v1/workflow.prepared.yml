@@ -1,0 +1,41 @@
+# Preparation only. This file is deliberately outside .github/workflows.
+# Target is the EXISTING PRIVATE bridge repository; never place evaluator bytes here.
+name: Gaussian L1 integrity capsule - explicit invocation only
+on:
+  workflow_dispatch:
+    inputs:
+      capsule_id:
+        description: Fixed single capsule
+        required: true
+        type: choice
+        options:
+          - gaussian-l1-integrity-v0.1.0-20260907
+permissions:
+  contents: read
+concurrency:
+  group: gaussian-l1-integrity-v0.1.0-20260907
+  cancel-in-progress: false
+jobs:
+  review:
+    if: github.repository_id == '1345447956' && github.actor_id == '212180323' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Read pinned preparation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Gate before credentials, enrollment, downloads, or Claude
+        run: python3 -I operations/claude-capsule-v1/adapter.py preflight
+# Live enrollment/retrieval/review/finalization steps are intentionally NOT wired.
+# Exact @2 incompatibilities are in WORK_HUB_COMPATIBILITY.md. The preflight fails
+# with the verified deployed source even if readiness.json is edited. Add no
+# broad app, issue listener, pull_request trigger, upload-artifact, cache, or API key.
+# After authorized capability work, bind the final workflow SHA/file hash in the
+# server, rerun offline tests, and add only reviewed orchestration here. Do not
+# dispatch this preparation merely to demonstrate that its gate rejects.

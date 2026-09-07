@@ -1,0 +1,31 @@
+{
+  "status": "BLOCKED_NOT_LAUNCH_READY",
+  "verified_at_utc": "2026-09-07T18:28:34Z",
+  "work_hub": {
+    "source_commit": "2de29303298c7fe12b3ab9c80cb5b34630e891a4",
+    "contract": "pulsechain-work-hub-secure@2.0.0",
+    "ordinary_reviewer_binding": false,
+    "only_capsule_input_ids_enforced_by_server": false,
+    "unknown_review_result_finalization_supported": false,
+    "head_chef_result_grant": false,
+    "candidate_artifact_id": null,
+    "evaluator_artifact_id": null,
+    "observed_specialist_authorities": 4,
+    "observed_active_specialist_authorities": 0,
+    "observed_canary_enrollments": 12,
+    "matching_gaussian_artifacts": 0
+  },
+  "provider": {
+    "subscription_entitlement": "UNAVAILABLE",
+    "opus_5_account_availability": "UNAVAILABLE",
+    "included_allowance": "UNAVAILABLE",
+    "extra_usage_disabled": "UNAVAILABLE",
+    "github_included_capacity": "UNAVAILABLE",
+    "oauth_secret_metadata": "UNAVAILABLE",
+    "app_installation_metadata": "UNAVAILABLE",
+    "preinstalled_runtime_digest": null,
+    "private_authorization_completed": false
+  },
+  "launch_allowed": false,
+  "note": "This is evidence readback, not a permission token. Editing its booleans cannot authorize a launch. No provider invocation or production enrollment was attempted."
+}
