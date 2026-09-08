@@ -4,6 +4,10 @@ Version 1.0.1 · September 7, 2026 · Maintainer: incumbent ChatGPT Head Chef. [
 
 **Current entry point:** this document and its exact linked records. Website read at **4:58:11 p.m. EDT, September 7** (`2026-09-07T20:58:11.735Z`) returned `BUNDLED_DATED_FALLBACK / REPOSITORY_READ_UNAVAILABLE`. The website's dated checkpoint is not the current build inventory. Use this repository fallback until the existing repository reader verifies the current pointer. No access repair or redeployment is part of this record update.
 
+## Resume here
+
+Use the accepted recovery result below and the [continuous-build records procedure](modules/continuous-build-records-v1.md). The [current documentation operation](https://github.com/opus99999/pulsechain-mcp/issues/43#issuecomment-5582662288) records publication and retrieval results. Detailed current resume and access information remains in approved private records; authorized readers follow their existing archival navigation. This reference grants no operational activation. Later accepted handover/recovery results supersede older next-action wording for the affected fields.
+
 ## Recovery baseline — September 8, 2026
 
 [Verified recovery result](https://github.com/opus99999/pulsechain-mcp/issues/43#issuecomment-5582139452): a new current-state baseline is privately stored, read back exactly and accessible to the intended successor. Restricted contents and archive references remain private. The original historical files remain unavailable; matching current prompt content does not recreate their snapshots, notes or Git history. Reopen historical recovery only for a concrete additional source, without repeating the failed archival paths.

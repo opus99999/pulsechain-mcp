@@ -2,6 +2,8 @@
 
 Approval: owner DURABLE CONTINUITY HUB AND ROLE-SUCCESSION READINESS V1, recorded in [issue #43](https://github.com/opus99999/pulsechain-mcp/issues/43#issuecomment-5552340615). Responsible actor: the existing Head Chef, performing Control Center implementation only with actual supported tools. This document is an approved project maintenance procedure; it does not grant a new role or expand permissions.
 
+The [continuous-build records procedure](modules/continuous-build-records-v1.md) applies standing safe-boundary preservation and retrieval checks through this mechanism without changing the canonical contract or installed task prompts.
+
 ## Existing review path
 
 The existing Head Chef review reads `/api/v1/continuity`, current primary queues and issue #43. Check source coverage, instruction versions/hashes, task bindings, deployment and open operations. Preserve role-specific private knowledge; a summary never substitutes for an unavailable primary artifact. If nothing material changed, make no continuity write and do not create a snapshot merely to refresh a date. Public API reads perform no writes.
