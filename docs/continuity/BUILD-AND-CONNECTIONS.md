@@ -4,6 +4,14 @@ Version 1.0.1 · September 7, 2026 · Maintainer: incumbent ChatGPT Head Chef. [
 
 **Current entry point:** this document and its exact linked records. Website read at **4:58:11 p.m. EDT, September 7** (`2026-09-07T20:58:11.735Z`) returned `BUNDLED_DATED_FALLBACK / REPOSITORY_READ_UNAVAILABLE`. The website's dated checkpoint is not the current build inventory. Use this repository fallback until the existing repository reader verifies the current pointer. No access repair or redeployment is part of this record update.
 
+## Recovery baseline — September 8, 2026
+
+[Verified recovery result](https://github.com/opus99999/pulsechain-mcp/issues/43#issuecomment-5582139452): a new current-state baseline is privately stored, read back exactly and accessible to the intended successor. Restricted contents and archive references remain private. The original historical files remain unavailable; matching current prompt content does not recreate their snapshots, notes or Git history. Reopen historical recovery only for a concrete additional source, without repeating the failed archival paths.
+
+The [final handover](https://github.com/opus99999/pulsechain-mcp/blob/7b5faf72f3d241a08446582cbf15dd1079bac02d/docs/continuity/reviews/head-chef-controlled-hold-20260908-v1.md) and recovery result supersede older next-action wording for affected fields. Operational holds remain in force. This documentation is not successor activation. Current nonsecret readiness preparation, scheduled-task transfer and signing-dependent operations retain their separate authority and access requirements; missing historical snapshots do not block unrelated supported work.
+
+At material safe boundaries distinguish **LOCAL_ONLY**, **STORED_AND_READ_BACK** and **INTENDED_READER_ACCESS_VERIFIED**. A local commit or download path alone is not a complete successor backup. Retain exact source versions, receipts, dependencies, uncertainty and next actions through the existing records; future readers verify their own access. These are descriptive preservation states, not production events.
+
 ## Research leadership
 
 | Actor | Responsibility and boundary |
@@ -50,7 +58,9 @@ The [repository recovery guide][grok-guide] leads to the correct [posting path][
 
 The [website guide][grok-web] currently serves the dated fallback and did not expose those sections at the recorded read. This record therefore directs recovery readers to the versioned repository guide. No logout, storage change, key generation, re-pairing, revocation, authentication attempt or test publication was performed. HTTP reader success is not authentication evidence.
 
-## Next private Claude readiness step
+## Historical private Claude readiness guidance — superseded
+
+The former account-check instruction below is retained as history. Use the accepted final handover and recovery result above for the current next action; do not repeat completed checks.
 
 The standalone setup is complete; do not dispatch it again. Its temporary runtime was removed as designed. Reuse the verified bootstrap procedure only within a separately eligible later job. [Reconciliation and evidence][runtime-reconciled] supersede historical wording that actual binary verification was pending.
 
