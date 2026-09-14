@@ -1,0 +1,20 @@
+{
+  "schema": "reference-manifest@1",
+  "reference_id": "grok-build-leverage-20260914",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 15990,
+      "sha256": "9a58f25a7f46ba9b895f38f36a4f139c2b8da6e37caf9b89f009b8df5ffa688c",
+      "git_blob": "afd3dc72ba4d5f89f2b8af1bdd8163e4483bb23e"
+    },
+    {
+      "path": "catalog.json",
+      "bytes": 23573,
+      "sha256": "ca8525bf59bb09282f71110dc7c73b113e33f57902088e6026c3991f5d844374",
+      "git_blob": "ead4f95d230fbdfae58ef0b7c9ae08eb8486f0f6"
+    }
+  ],
+  "scope": "Exact UTF-8 bytes. Manifest excludes itself; publication and use receipts are separate."
+}
