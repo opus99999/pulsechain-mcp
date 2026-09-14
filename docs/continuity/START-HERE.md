@@ -13,3 +13,7 @@ Begin in SUCCESSOR_READ_ONLY. Knowledge loading does not activate a role or tran
 5. Read [UPDATE.md](UPDATE.md) for the existing maintenance path. Checkpoint-only updates leave these pointer-based entry instructions stable.
 
 Read verification times, source cutoffs, limitations and supersession from the resolved checkpoint. It is a dated, non-atomic fallback, not live worker-execution evidence. Website availability, configured schedules, run timestamps, accepted actions and delivery are separate observations. Never use an old local sandbox path as durable storage. Preserve historical checkpoints unchanged.
+
+## Evaluated build references
+
+[Tool Leverage Register — September 14, 2026](references/tool-leverage-20260914/README.md) evaluates ten owner-supplied resources for source ingestion, document/media handling, orchestration and reference design. Its [machine catalog](references/tool-leverage-20260914/catalog.json) preserves proposed uses, exclusions, acceptance tests and primary sources. This is an advisory reference, not runtime admission or a canonical status update; website display and actual team consumption require separate verification.

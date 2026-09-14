@@ -1,0 +1,155 @@
+{
+  "schema_version": "control-room-tool-leverage-reference@1",
+  "reference_id": "tool-leverage-20260914",
+  "version": "1.0.0",
+  "assessed_on": "2026-09-14",
+  "author_role": "Primary Pivoter3, strategic adviser",
+  "status": "SOURCE_REVIEWED_ADVISORY_NOT_RUNTIME_APPROVAL",
+  "human_reference": "README.md",
+  "common_boundaries": {
+    "installation_or_execution_performed": false,
+    "runtime_admission": "NOT_GRANTED",
+    "security_audit_or_performance_replication": "NOT_PERFORMED",
+    "selected_executable_version": null,
+    "source_version_scope": "Primary documentation read on the assessment date; mutable links unless an exact commit is in the URL. Pin the actual release before later use.",
+    "website_display": "NOT_VERIFIED",
+    "website_page_url": null,
+    "team_retrieval_and_actual_use": "NOT_DEMONSTRATED",
+    "cost": "No purchase price does not imply zero hosting, storage, compute, provider, maintenance or edition cost.",
+    "authority": "Head Chef leads. This reference grants no install, task, credential, signing, deployment, live run or retry authority."
+  },
+  "tools": [
+    {
+      "id": "firecrawl",
+      "priority": "HIGH_FUTURE_INPUT_ADAPTER",
+      "documented": "Web search, scraping/crawling, Markdown, HTML and structured output.",
+      "proposed_use": "One bounded source extractor when the existing approved reader is insufficient; preserve permitted originals and separately identified derivatives.",
+      "boundary": "Not source truth, access bypass, trusted-reader replacement or permission to act on page instructions.",
+      "license": "Primarily AGPL-3.0; SDKs and some UI components MIT; cloud/provider terms separate.",
+      "gates": "Pin edition/release; allow domains and redirects; cap pages/time/bytes/cost; block private-network destinations; isolate untrusted content; keep agent/interact actions off.",
+      "proposed_test": "One permitted page versus the current reader: preserve source/citations/omissions; deny an unapproved redirect and an injected instruction with zero effects; measure quality, latency and cost.",
+      "owners": ["Head Chef", "Codex", "Grok source collector", "authorized librarian"],
+      "sources": ["https://github.com/firecrawl/firecrawl", "https://docs.firecrawl.dev/contributing/self-host"]
+    },
+    {
+      "id": "whisper",
+      "priority": "HIGH_FUTURE_INPUT_ADAPTER",
+      "documented": "Speech recognition, language identification and translation; model card warns of words absent from the audio.",
+      "proposed_use": "Timestamp-linked transcript drafts for permitted audio; keep original media, model/configuration identity and verified critical passages.",
+      "boundary": "Not verified quotations, speaker identity, mathematical checking or automatic accepted knowledge.",
+      "license": "MIT code and weights; dependencies, compute and separately selected services have distinct terms/costs.",
+      "gates": "Authorized recordings; fixed model/runtime; compute and retention limits; inspect important names/numbers; distinguish transcription from translation.",
+      "proposed_test": "One authorized clip with a human reference and silence/noise: measure word/number errors, timing, runtime and storage; second reader locates and checks the cited segment.",
+      "owners": ["Owner", "Codex", "relevant specialist", "authorized librarian"],
+      "sources": ["https://github.com/openai/whisper", "https://github.com/openai/whisper/blob/main/model-card.md"]
+    },
+    {
+      "id": "stirling-pdf",
+      "priority": "CONDITIONAL_DOCUMENT_GAP",
+      "documented": "PDF manipulation/conversion through desktop, browser and self-hosted API options; open-core product.",
+      "proposed_use": "Optional preparation for an approved PDF operation missing from existing tools; originals remain immutable and derivatives retain page maps.",
+      "boundary": "Not authenticity verification or proof of preserved tables, signatures and citations.",
+      "license": "Root MIT grant has specified directory exceptions with separate licenses; exact edition/component review required.",
+      "gates": "Check selected edition and dependencies; isolate input/output; bound storage; OCR only when necessary; retain conversion losses and omissions.",
+      "proposed_test": "One non-sensitive PDF with text/table: verify page mapping, legibility and numbers. A redaction use case additionally needs unrecoverability checks on the delivered derivative.",
+      "owners": ["Head Chef", "Codex", "authorized librarian"],
+      "sources": ["https://github.com/Stirling-Tools/Stirling-PDF", "https://github.com/Stirling-Tools/Stirling-PDF/blob/main/LICENSE"]
+    },
+    {
+      "id": "yt-dlp",
+      "priority": "CONDITIONAL_AUTHORIZED_MEDIA",
+      "documented": "Command-line audio/video download, metadata and subtitle options.",
+      "proposed_use": "Acquire one explicitly permitted recording when direct authorized download is unsuitable; retain URL/time/media hash and subtitle provenance.",
+      "boundary": "No arbitrary harvesting, browser-cookie collection, access-control bypass or claim that subtitles are verified speech.",
+      "license": "Core repository Unlicense; bundled distributions and dependencies can carry GPLv3+ and other terms.",
+      "gates": "Pin actual artifact/dependencies; bound source, size and duration; do not execute acquired material; distinguish download from post-processing success.",
+      "proposed_test": "One permitted media item matches the intended source and integrity record. Denied source or failed post-processing yields failure, not accepted evidence.",
+      "owners": ["Grok source collector", "Codex", "relevant specialist"],
+      "sources": ["https://github.com/yt-dlp/yt-dlp"]
+    },
+    {
+      "id": "homepage",
+      "priority": "DESIGN_REFERENCE_NOW_NO_NEW_RUNTIME",
+      "documented": "Service dashboard, bookmarks, status widgets and integrations with a published security notice.",
+      "proposed_use": "Use card/navigation patterns in the existing Control Room with evidence age, latest verified result, responsible role and next action.",
+      "boundary": "A green status tile is not proof of pickup, permission, use or delivery. Do not create a competing dashboard or credential store.",
+      "license": "GPL-3.0 repository; assess actual copied components before code reuse.",
+      "gates": "Current record authorization; no service discovery or credential wiring merely from catalog membership; explicit stale/unavailable states.",
+      "proposed_test": "Human and machine views agree on version/status. Stale source yields a visible gap; protected data is absent from the public output.",
+      "owners": ["Head Chef", "Codex existing renderer"],
+      "sources": ["https://github.com/gethomepage/homepage"]
+    },
+    {
+      "id": "localsend",
+      "priority": "OPTIONAL_OWNER_DEVICE_TRANSFER",
+      "documented": "Nearby-device file/message transfer over a local network using HTTPS without a third-party relay.",
+      "proposed_use": "Optional phone-to-laptop transfer, followed by exact hash verification and storage through the existing durable route.",
+      "boundary": "Not cloud agent pickup, a shared hosted filesystem, permanent backup or automatic bot receipt.",
+      "license": "Apache-2.0 repository.",
+      "gates": "Approved installed clients on reachable intended devices; recipient confirmation; no unattended acceptance or credential/session transfers.",
+      "proposed_test": "Transfer one harmless fixture, match exact bytes/hash and record the actual receiver path; device arrival is not bot consumption.",
+      "owners": ["Owner", "existing Codex for an explicitly supplied local file"],
+      "sources": ["https://github.com/localsend/localsend", "https://github.com/localsend/localsend/blob/main/LICENSE"]
+    },
+    {
+      "id": "n8n",
+      "priority": "LATER_PROVEN_ORCHESTRATION_GAP",
+      "documented": "Visual workflow automation with custom code and service integrations; self-hosted or cloud.",
+      "proposed_use": "Adapter from an approved event to a real existing submit/status/result API, with receipts returned to the Control Room.",
+      "boundary": "Not a missing provider API, native conversation access, automatic safe retry or remedy for a frozen chat. Do not duplicate the trusted controller.",
+      "license": "Sustainable Use License for covered master code; enterprise exceptions. Intended internal/hosted/customer-facing use needs checking.",
+      "gates": "Callable API and independent credential custody; operation IDs; concurrency/time/cost limits; reconciled unknown outcomes; no self-approval.",
+      "proposed_test": "One event to approved test endpoints with one effect; restart after interrupted return without duplicating it; compare owner interventions and cost with current transport.",
+      "owners": ["Head Chef", "Codex", "Owner for separately required access/cost"],
+      "sources": ["https://github.com/n8n-io/n8n", "https://github.com/n8n-io/n8n/blob/master/LICENSE.md"]
+    },
+    {
+      "id": "immich",
+      "priority": "LATER_LAWFUL_SCENE_MEDIA_CATALOG",
+      "documented": "Photo/video management with albums, metadata, duplicate prevention and search.",
+      "proposed_use": "Organize permitted scene imagery while preserving an independent original-image/camera/coordinate manifest.",
+      "boundary": "Not Gaussian reconstruction, camera calibration, geometric truth, spatial querying or a sole backup.",
+      "license": "AGPL-3.0 repository; selected distribution/service terms remain separate.",
+      "gates": "Approved scene media only; exclude unrelated personal-photo and identity workflows; verify exports, permissions and original-byte preservation.",
+      "proposed_test": "Round-trip a permitted scene set unchanged, retain image-to-camera links, and verify second-consumer retrieval; test spatial correctness separately.",
+      "owners": ["Gaussian work owner", "Codex", "authorized librarian"],
+      "sources": ["https://github.com/immich-app/immich", "https://github.com/immich-app/immich/blob/main/LICENSE"]
+    },
+    {
+      "id": "appflowy",
+      "priority": "DEFER_OPTIONAL_AUTHORING",
+      "documented": "Collaborative documents, wikis and projects; Notion alternative.",
+      "proposed_use": "Human draft authoring only if reviewed exports go to the existing authoritative reference/evidence store.",
+      "boundary": "Not a competing memory database, automatic team learning or authority to replace accepted findings.",
+      "license": "AGPLv3 repository; selected cloud/AI components need their own assessment.",
+      "gates": "A proven authoring need; faithful export and current permissions; one-way reviewed publication; no bulk migration this milestone.",
+      "proposed_test": "Draft/export one non-sensitive note with citations and review state intact; retrieve the accepted version from the existing catalog without a competing current copy.",
+      "owners": ["Head Chef", "authorized librarian", "Codex export adapter"],
+      "sources": ["https://github.com/AppFlowy-IO/AppFlowy"]
+    },
+    {
+      "id": "reactive-resume",
+      "priority": "NO_CURRENT_PRODUCT_FIT",
+      "documented": "Human resume/CV builder with templates and structured export; older repository address redirects to the canonical project.",
+      "proposed_use": "At most a generic structured-data/presentation design reference; no CV-builder integration justified.",
+      "boundary": "Human employment resumes do not supply agent operation state, permissions, receipts or successor continuity.",
+      "license": "MIT repository.",
+      "gates": "Reconsider only for a real human CV or separately justified rendering need.",
+      "proposed_test": "None for this milestone; retain the non-adoption reason rather than repeat the name-based comparison.",
+      "owners": ["PP3", "Head Chef: no task generated"],
+      "sources": ["https://github.com/reactive-resume/reactive-resume", "https://github.com/reactive-resume/reactive-resume/blob/main/LICENSE"]
+    }
+  ],
+  "reuse_record_proposal": {
+    "fields": ["reader", "reference_version", "resource_id", "authorized_task", "source_and_input_refs", "actual_output_ref", "evaluation", "review_disposition", "limitations"],
+    "status": "DESIGN_GUIDANCE_NOT_INSTALLED_SCHEMA",
+    "rule": "Success creates a candidate method; failure creates evidence and a scoped correction proposal. Review and current access are required before reuse."
+  },
+  "librarian": {
+    "proposed_functions": ["source identities", "version/supersession index", "contradictions", "derivative lineage", "minimal relevant context"],
+    "activation": "NOT_ESTABLISHED_BY_THIS_REFERENCE",
+    "authority": "No signing, scheduling, specialist adjudication or new artifact access."
+  },
+  "next_step": "Finish the active correction closeout. Later select one real input gap and a bounded comparison; do not install this list as a bundle.",
+  "gaussian": "Media organization can support but cannot replace lawful scenes, camera data, reconstruction, viewer/query and second-consumer grounded reuse."
+}

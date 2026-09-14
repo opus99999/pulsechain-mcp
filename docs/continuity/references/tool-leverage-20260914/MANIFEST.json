@@ -1,0 +1,20 @@
+{
+  "schema_version": "reference-manifest@1",
+  "reference_id": "tool-leverage-20260914",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 10945,
+      "sha256": "32d065d025896720598b4c22df94eeb458736a936c6613a41f08cb1c5600edb9",
+      "git_blob": "fa0a10243b7aabf36c8be946a1f622ee8c4aaca7"
+    },
+    {
+      "path": "catalog.json",
+      "bytes": 13121,
+      "sha256": "f983fb51d79d5bd376156153b25d76303fa8157358a3da505da2f71a4f6d1a10",
+      "git_blob": "cf790350c094cc5b1425c182bef0edfa615ba77e"
+    }
+  ],
+  "hash_scope": "Exact UTF-8 bytes; manifest excludes itself. Publication and reader receipts are external."
+}
