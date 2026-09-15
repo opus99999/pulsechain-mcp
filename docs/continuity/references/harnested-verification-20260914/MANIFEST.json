@@ -1,0 +1,26 @@
+{
+  "schema": "reference-manifest@1",
+  "reference_id": "harnested-verification-20260914",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 28040,
+      "sha256": "13ec9f275ac78f0e8ef3115890b552e44376409b1878665a200b60506c5e2815",
+      "git_blob": "7115ad533e5a097fc3857a56a37a343db63c0890"
+    },
+    {
+      "path": "CLAIMS-SOURCES.json",
+      "bytes": 12854,
+      "sha256": "a494f455eb5ca33657e48704f9d49d3c9a1806145bbf4ef77f154c860b96aa41",
+      "git_blob": "701e4b5b62fe078f1c767a9132823b083ae60f60"
+    },
+    {
+      "path": "HARNESS-CONTRACT.json",
+      "bytes": 9638,
+      "sha256": "05a59e1093c49d2122b196dd95adbda0f2669cdc5ae6897244c4e070fac403b1",
+      "git_blob": "072a07319184e66dc4ac41fd424dde5184f12c24"
+    }
+  ],
+  "scope": "Exact UTF-8 bytes; manifest excludes itself. Publication and use receipts are separate."
+}

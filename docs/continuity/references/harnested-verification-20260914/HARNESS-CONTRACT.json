@@ -1,0 +1,219 @@
+{
+  "schema": "harnested-build-reference@1",
+  "reference_id": "harnested-verification-20260914",
+  "version": "1.0.0",
+  "status": "PROPOSED_NOT_INSTALLED",
+  "runtime_admission": "NOT_GRANTED",
+  "new_execution_allowance": 0,
+  "actual": {
+    "new_sensor_runs": 0,
+    "training_runs": 0,
+    "browser_tasks": 0,
+    "runtime_changes": 0,
+    "plasma_connection_verified": false,
+    "website_page_url": null,
+    "website_readback": "NOT_PERFORMED",
+    "measured_gain": null
+  },
+  "layers": {
+    "L0": "source and claim registry",
+    "L1": "risk-linked falsifiable sensors",
+    "L2": "selective existing immutable memory",
+    "L3": "existing participant roles and independent disposition",
+    "L4": "bounded increment with durable attempt/effect record",
+    "L5": "optional bus carrying references, not scientific authority"
+  },
+  "increment_record_fields": [
+    "operation_id",
+    "objective",
+    "executor",
+    "authority_ref",
+    "source_versions",
+    "allowed_effects",
+    "runtime_binding",
+    "required_sensor_ids",
+    "evaluator_version",
+    "remaining_iterations",
+    "remaining_external_attempts",
+    "native_operation_ids",
+    "receipt_refs",
+    "candidate_ref",
+    "review_ref",
+    "status",
+    "verification_coverage",
+    "next_actor"
+  ],
+  "sensor_result_states": [
+    "PASS",
+    "FAIL",
+    "ERROR",
+    "BLOCKED",
+    "NOT_RUN",
+    "UNVERIFIED"
+  ],
+  "candidate_states": [
+    "PREPARED",
+    "IN_PROGRESS",
+    "BLOCKED",
+    "CANDIDATE_PASS_REVIEW_PENDING",
+    "CHANGES_REQUIRED",
+    "ACCEPTED_IN_SCOPE",
+    "UNKNOWN_RECONCILE",
+    "CLOSED"
+  ],
+  "stop_precedence": [
+    "Native denial, scope conflict, missing mandatory evidence or unknown external effect stops dependent effects immediately.",
+    "All required sensors pass: preserve candidate and stop development, pending independent disposition.",
+    "The supplied maximum two failed offline iterations applies only within actually approved scope and persists across turns.",
+    "No iteration or retry allowance is created by this reference; live attempts retain their own original limits.",
+    "A final answer/checkpoint does not require completion of a blocked consequential action."
+  ],
+  "review_boundary": [
+    "Implementer cannot silently weaken required evaluator, thresholds, dataset or exclusions.",
+    "Test pass, review acceptance, branch publication, site display and live execution are distinct.",
+    "Reasoned same-score/exclusion handling must retain negative evidence; no narrative-only success."
+  ],
+  "memory_rules": [
+    "Use short index descriptions to select sources; read enough of the required complete contract.",
+    "Preserve exact originals independently from mutable wiki/indexer output.",
+    "Enforce record access outside indexing; do not trust custom code hooks on retrieval.",
+    "Retain reviewed method/rule cards with failure signature, evidence, applicability, version and retirement trigger."
+  ],
+  "browser_routing": [
+    "Existing supported API/connector first for exact operations.",
+    "Scripted browser plus assertion first for predictable UI checks.",
+    "Stagehand or Browser Use only for a demonstrated adaptive-browser need.",
+    "Browser Harness generated helpers remain unaccepted candidates until scoped review.",
+    "Desktop personal-cookie transfer and broad session use not authorized.",
+    "Cloudflare Browser Run is an execution provider requiring its own real account/limits, not a bypass."
+  ],
+  "browser_controls": [
+    "Isolated approved profile and destination/action scope",
+    "Independent redirects/subresource/private-network controls where enforceable",
+    "No source text treated as permission or installation instruction",
+    "Explicit step/time/data/cost limits and native operation receipt",
+    "Do not put submit actions in retrying assertion/code blocks",
+    "Protect traces before disclosure; no cookies/tokens/credential URLs in public artifacts",
+    "Disconnect, cancel request and termination distinct"
+  ],
+  "sensors": [
+    {
+      "id": "S01",
+      "category": "B",
+      "name": "Input/source binding",
+      "basis": "Existing exact-byte/version checks",
+      "proposed_pass_criterion": "An altered selected input is rejected; record exact expected versus actual identity.",
+      "limit": "No full archive replay; inspect the task-required bytes.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S02",
+      "category": "A",
+      "name": "Capture and cameras",
+      "basis": "Supplied L1 capture checklist; D04",
+      "proposed_pass_criterion": "Retain eligible/excluded counts, registration components and pose-control results; declared limits must pass.",
+      "limit": "Thresholds not specified here; no capture performed.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S03",
+      "category": "A",
+      "name": "Bounded training smoke",
+      "basis": "Supplied 200-step idea qualified by D02",
+      "proposed_pass_criterion": "Finite loss/updates, render/checkpoint/reload; selected densification boundary covered by a separately declared case.",
+      "limit": "200 steps alone cannot establish normal convergence or densification under original defaults.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S04",
+      "category": "A",
+      "name": "Held-out scene quality",
+      "basis": "Supplied L1 and existing Gaussian plan",
+      "proposed_pass_criterion": "Frozen split/metric/render settings; report appearance and geometry independently.",
+      "limit": "No post-result split changes, no missing metric treated as pass.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S05",
+      "category": "A",
+      "name": "Grounding and reuse",
+      "basis": "Existing Gaussian requirement",
+      "proposed_pass_criterion": "Supported answer cites originals; unsupported/unknown-scale answer stays limited; second actual consumer returns evidence.",
+      "limit": "Fixtures and shared URLs do not count as real consumer use.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S06",
+      "category": "B",
+      "name": "Oracle sensitivity",
+      "basis": "Supplied verification rule; H09/H10",
+      "proposed_pass_criterion": "Known-wrong control is detected; mutation categories and limitations retained.",
+      "limit": "Equivalent mutants and infrastructure failures are not silently scored as ordinary failures or successes.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S07",
+      "category": "B",
+      "name": "Current access and source-instruction boundary",
+      "basis": "Existing independent policy; P01/B02",
+      "proposed_pass_criterion": "Revoked/excluded-protected bytes not served; injected source instruction causes zero unauthorized effects.",
+      "limit": "Wiki index exclusion is not an authorization implementation.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S08",
+      "category": "B",
+      "name": "Ambiguous effect and stopping",
+      "basis": "Existing F2 boundary and actual missing durable recovery",
+      "proposed_pass_criterion": "Identify submitted effect; block new dependent effects; preserve receipt and distinguish disconnect/requested cancellation/termination.",
+      "limit": "Existing inactive F2 acceptance not reopened; native/durable checks unrun.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S09",
+      "category": "B",
+      "name": "Response and successor completion",
+      "basis": "Observed prior conversation-capacity/unfinished-reply problem",
+      "proposed_pass_criterion": "Bounded task returns answer or checkpoint; next reader locates state without outgoing final reply or duplicate execution.",
+      "limit": "Prompt time targets do not interrupt a stalled native call.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    },
+    {
+      "id": "S10",
+      "category": "B",
+      "name": "Website publication and actual use",
+      "basis": "Repeated unverified site-display gap",
+      "proposed_pass_criterion": "Verify rendered reference ID/version, linked machine data and intended-reader access; record actual consumption separately.",
+      "limit": "Repository commit or HTTP status alone fails website acceptance.",
+      "status": "NOT_RUN_IN_THIS_REFERENCE"
+    }
+  ],
+  "role_mapping": {
+    "coordinator": "existing Head Chef",
+    "implementation": "existing Codex under its work order",
+    "domain_acceptance": "existing responsible specialist",
+    "adversarial_review": "existing independent review path, not automatic new bot",
+    "sources": "Grok within existing contract",
+    "delivery": "Worker5",
+    "librarian": "proposed future authorized role; Claude remains held",
+    "human": "scope, access, spending and release decisions"
+  },
+  "measurement": {
+    "same_task_set": true,
+    "same_evaluation": true,
+    "record_failed_attempts": true,
+    "include_harness_build_and_maintenance_cost": true,
+    "metrics": [
+      "accepted_correct_tasks",
+      "finished_response_rate",
+      "owner_interventions",
+      "duplicate_effects",
+      "held_out_accuracy",
+      "total_cost_per_accepted_task",
+      "time_to_accepted_result",
+      "real_second_consumer_use"
+    ],
+    "claim_10x": "Only a named measured ratio under comparable conditions; no general 10x or exponential result."
+  },
+  "next": "Use reference in the next approved work-order design; keep current producer-binding reconciliation and website publishing authority separate. No new training, review replay or runtime installation."
+}
