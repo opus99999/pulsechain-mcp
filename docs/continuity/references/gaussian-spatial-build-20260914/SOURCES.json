@@ -1,0 +1,197 @@
+{
+  "reference_id": "gaussian-spatial-build-20260914",
+  "version": "1.0.0",
+  "reviewed_on": "2026-09-14",
+  "scope": "Primary-source documentation research; no code audit, dataset acquisition, implementation or benchmark replication. Supplied briefing and new recommendations remain distinct.",
+  "sources": [
+    {
+      "id": "S01",
+      "title": "Kerbl et al., 3DGS paper",
+      "url": "https://arxiv.org/html/2308.04079v1",
+      "version_scope": "2308.04079v1",
+      "read_coverage": "Foundations, representation, optimization, sorting, limitations; selected text, not a new benchmark."
+    },
+    {
+      "id": "S02",
+      "title": "Original 3DGS project",
+      "url": "https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/",
+      "version_scope": "mutable page",
+      "read_coverage": "Abstract and stated performance; distinguish the project page from paper v1."
+    },
+    {
+      "id": "S03",
+      "title": "Chen and Wang survey",
+      "url": "https://arxiv.org/abs/2401.03890v9",
+      "version_scope": "2401.03890v9",
+      "read_coverage": "Abstract and version history only; not a full survey or all-method audit."
+    },
+    {
+      "id": "S04",
+      "title": "Authors’ 3DGS tutorial",
+      "url": "https://3dgstutorial.github.io/",
+      "version_scope": "3DV 2024 landing page",
+      "read_coverage": "Four-part learning route; linked slide decks and videos were not reviewed in full."
+    },
+    {
+      "id": "S05",
+      "title": "2D Gaussian Splatting",
+      "url": "https://surfsplatting.github.io/",
+      "version_scope": "SIGGRAPH 2024 project",
+      "read_coverage": "Oriented surface disks, perspective-aware rasterization and geometry regularization."
+    },
+    {
+      "id": "S06",
+      "title": "Mip-Splatting",
+      "url": "https://niujinshuchong.github.io/mip-splatting/",
+      "version_scope": "CVPR 2024 project",
+      "read_coverage": "Sampling-rate artifacts; 3D smoothing and 2D Mip filtering."
+    },
+    {
+      "id": "S07",
+      "title": "Wu et al., 4D Gaussian Splatting",
+      "url": "https://guanjunwu.github.io/4dgs/",
+      "version_scope": "CVPR 2024 project",
+      "read_coverage": "3D Gaussians plus encoded spatiotemporal features and deformation prediction."
+    },
+    {
+      "id": "S08",
+      "title": "Luiten et al., Dynamic 3D Gaussians",
+      "url": "https://dynamic3dgaussians.github.io/",
+      "version_scope": "3DV 2024 project",
+      "read_coverage": "Persistent primitives, time-varying motion/rotation and local rigidity."
+    },
+    {
+      "id": "S09",
+      "title": "Gaussian Opacity Fields",
+      "url": "https://github.com/autonomousvision/gaussian-opacity-fields",
+      "version_scope": "mutable README",
+      "read_coverage": "Regularized opacity field and adaptive mesh extraction; code was not executed."
+    },
+    {
+      "id": "S10",
+      "title": "Aras: Making Gaussian Splats smaller",
+      "url": "https://aras-p.info/blog/2023/09/13/Making-Gaussian-Splats-smaller/",
+      "version_scope": "2023-09-13 article",
+      "read_coverage": "Storage versus runtime memory, quantization and SH tradeoffs."
+    },
+    {
+      "id": "S11",
+      "title": "Aras: Making Gaussian Splats more smaller",
+      "url": "https://aras-p.info/blog/2023/09/27/Making-Gaussian-Splats-more-smaller/",
+      "version_scope": "2023-09-27 article",
+      "read_coverage": "SH codebooks and quality tradeoffs; no local replication."
+    },
+    {
+      "id": "S12",
+      "title": "gsplat overview",
+      "url": "https://docs.gsplat.studio/main/",
+      "version_scope": "main documentation",
+      "read_coverage": "CUDA/Python rasterization library and documented features; no installed release selected."
+    },
+    {
+      "id": "S13",
+      "title": "gsplat rasterization API",
+      "url": "https://docs.gsplat.studio/main/apis/rasterization.html",
+      "version_scope": "main documentation",
+      "read_coverage": "Camera/depth/feature rendering controls; exact API options must be release-bound."
+    },
+    {
+      "id": "S14",
+      "title": "Nerfstudio Splatfacto",
+      "url": "https://docs.nerf.studio/nerfology/methods/splat.html",
+      "version_scope": "mutable documentation",
+      "read_coverage": "gsplat backend, COLMAP initialization, checkpoint/view/export workflow; not identical to original trainer."
+    },
+    {
+      "id": "S15",
+      "title": "COLMAP output formats",
+      "url": "https://colmap.github.io/format.html",
+      "version_scope": "mutable documentation",
+      "read_coverage": "Intrinsics, world-to-camera pose, quaternion order, identifiers and reconstruction files."
+    },
+    {
+      "id": "S16",
+      "title": "COLMAP FAQ",
+      "url": "https://colmap.github.io/faq.html",
+      "version_scope": "mutable documentation",
+      "read_coverage": "Selected pose-prior, geo-registration and mesh limitations; no whole FAQ audit."
+    },
+    {
+      "id": "S17",
+      "title": "PlayCanvas splat formats",
+      "url": "https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/",
+      "version_scope": "mutable documentation",
+      "read_coverage": "PLY, SOG, streaming and SPZ roles; vendor size ratios are not project measurements."
+    },
+    {
+      "id": "S18",
+      "title": "SuperSplat import/export",
+      "url": "https://developer.playcanvas.com/user-manual/supersplat/editor/import-export/",
+      "version_scope": "mutable documentation",
+      "read_coverage": "Version-specific imports/exports, camera-file meaning and WebGPU export prerequisite."
+    },
+    {
+      "id": "S19",
+      "title": "SuperSplat viewer self-hosting",
+      "url": "https://developer.playcanvas.com/user-manual/supersplat/viewer/self-hosting/",
+      "version_scope": "mutable documentation",
+      "read_coverage": "Self-contained versus packaged export, source/runtime prerequisites and hosting distinction."
+    },
+    {
+      "id": "S20",
+      "title": "SuperSplat platform and licensing",
+      "url": "https://developer.playcanvas.com/user-manual/supersplat/",
+      "version_scope": "mutable documentation",
+      "read_coverage": "MIT editor/viewer/transform versus proprietary hosted platform."
+    },
+    {
+      "id": "S21",
+      "title": "SplatTransform",
+      "url": "https://developer.playcanvas.com/user-manual/splat-transform/",
+      "version_scope": "mutable documentation",
+      "read_coverage": "Explicit conversions, versions and transforms; script-based input is not admitted."
+    },
+    {
+      "id": "S22",
+      "title": "Niantic SPZ",
+      "url": "https://github.com/nianticlabs/spz",
+      "version_scope": "mutable README",
+      "read_coverage": "Compressed format, coordinate system, versioned decoding and quantization; no release selected."
+    },
+    {
+      "id": "S23",
+      "title": "Aras Unity renderer",
+      "url": "https://github.com/aras-p/UnityGaussianSplatting",
+      "version_scope": "mutable README",
+      "read_coverage": "Experimental renderer, platform limits and separate asset-license warning."
+    },
+    {
+      "id": "S24",
+      "title": "Original trainer license",
+      "url": "https://github.com/graphdeco-inria/gaussian-splatting/blob/main/LICENSE.md",
+      "version_scope": "Git blob 18445c6d34aedbf1ab9d282223f8f10ce38cd79a",
+      "read_coverage": "Research/evaluation/noncommercial scope and commercial-consent requirement; no legal clearance inferred."
+    },
+    {
+      "id": "S25",
+      "title": "gsplat license",
+      "url": "https://github.com/nerfstudio-project/gsplat/blob/main/LICENSE",
+      "version_scope": "Git blob 1dc520ba6aa1ff169e95250cf0398beb3757590a",
+      "read_coverage": "Apache-2.0 root license; dependencies, data and model terms remain separately checked."
+    },
+    {
+      "id": "S26",
+      "title": "Compact 3D Gaussian Representation for Radiance Field",
+      "url": "https://ieeexplore.ieee.org/document/10655367/",
+      "version_scope": "CVPR 2024, DOI 10.1109/CVPR52733.2024.02052",
+      "read_coverage": "Publisher abstract: pruning, neural view-dependent color and geometric codebooks; not just an interchange codec."
+    }
+  ],
+  "limits": [
+    "Survey abstract/version metadata only; tutorial landing page only.",
+    "No identified URL for the Edward Ahn comparison; not used as technical authority.",
+    "Several initially attempted project/news/self-host URLs were unavailable; other independently located primary sources are cited by their actual address. No protected-access bypass.",
+    "No upstream full paper/repository dump archived; source findings are brief and project-specific.",
+    "Current executable release, dataset license and actual hardware not selected."
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "reference-manifest@1",
+  "reference_id": "gaussian-spatial-build-20260914",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 27574,
+      "sha256": "291efcb49e2ab9d6dca00211ab7beb30c2ac6959c6b16c18b9f8372d01381ef4",
+      "git_blob": "bfab573c49a04a1e9e13196040ab2936996c22c3"
+    },
+    {
+      "path": "BLUEPRINT.json",
+      "bytes": 9499,
+      "sha256": "63195605a9e535dc5f3289559c63171a8a692d37ffc204d053ec87723dd00f0a",
+      "git_blob": "bea51b7735c61f3803f0885a6bd536497eef8767"
+    },
+    {
+      "path": "SOURCES.json",
+      "bytes": 8656,
+      "sha256": "8afcd3163e623ccb3ff0ba626f486272a3e1ab65771f75bad493dada516fa30e",
+      "git_blob": "ea4ea89e9f9f3a2aff6cde2f592d1db026ca7624"
+    }
+  ],
+  "scope": "Exact UTF-8 file bytes. Manifest excludes itself; publication and consumer receipts separate."
+}

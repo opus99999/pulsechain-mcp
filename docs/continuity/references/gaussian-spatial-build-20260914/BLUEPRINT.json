@@ -1,0 +1,276 @@
+{
+  "schema": "gaussian-spatial-build-blueprint@1",
+  "reference_id": "gaussian-spatial-build-20260914",
+  "version": "1.0.0",
+  "status": "PROPOSED_DESIGN_NOT_IMPLEMENTED",
+  "runtime_admission": "NOT_GRANTED",
+  "actual": {
+    "scene_id": null,
+    "scene_assets_acquired": false,
+    "training_runs": 0,
+    "viewer_runs": 0,
+    "query_runs": 0,
+    "second_consumer_runs": 0,
+    "website_page_url": null,
+    "website_readback": "NOT_PERFORMED",
+    "deployment": "NOT_ATTEMPTED",
+    "performance": null,
+    "research_kind": "Documentation and architecture analysis only"
+  },
+  "decision": "Static evidence-linked scene first; precomputed lawful scene with supporting originals/cameras may qualify viewing/reuse before new reconstruction.",
+  "candidate_stack": [
+    {
+      "function": "camera calibration",
+      "candidate": "COLMAP or verified equivalent",
+      "sources": [
+        "S15",
+        "S16"
+      ]
+    },
+    {
+      "function": "trainer",
+      "candidate": "gsplat; Splatfacto wrapper only where justified",
+      "sources": [
+        "S12",
+        "S14",
+        "S25"
+      ]
+    },
+    {
+      "function": "web renderer",
+      "candidate": "self-hosted SuperSplat Viewer/PlayCanvas under existing Control Room access",
+      "sources": [
+        "S18",
+        "S19",
+        "S20"
+      ]
+    },
+    {
+      "function": "metric/surface evidence",
+      "candidate": "separately validated geometry; evaluate 2DGS/GOF only if required",
+      "sources": [
+        "S05",
+        "S09"
+      ]
+    },
+    {
+      "function": "delivery encoding",
+      "candidate": "full-fidelity master plus a qualified versioned SOG or SPZ derivative",
+      "sources": [
+        "S10",
+        "S11",
+        "S17",
+        "S22"
+      ]
+    }
+  ],
+  "proposed_contracts": {
+    "scene": [
+      "scene_id",
+      "version",
+      "parent_scene_version",
+      "rights_and_access",
+      "source_asset_manifest",
+      "capture_times",
+      "camera_intrinsics",
+      "pose_direction_and_quaternion_order",
+      "axis_convention",
+      "units_and_scale_evidence",
+      "normalization_transforms",
+      "processing_tool_versions_and_settings",
+      "master_artifact_refs",
+      "delivery_derivatives",
+      "optional_validated_geometry",
+      "stable_annotation_ids_and_provenance",
+      "coverage_and_limits",
+      "evaluation_and_review_refs"
+    ],
+    "view": [
+      "view_id",
+      "scene_version",
+      "authorized_principal",
+      "asset_identities",
+      "camera_pose_and_intrinsics",
+      "image_dimensions",
+      "renderer_version_and_settings",
+      "rendered_image_ref",
+      "supporting_original_view_refs",
+      "source_selection_basis",
+      "coverage_limits",
+      "actual_receipt"
+    ],
+    "question": [
+      "question_id",
+      "scene_version",
+      "task_scope",
+      "view_refs",
+      "original_evidence_refs",
+      "method_and_tool_versions",
+      "answer_class",
+      "answer",
+      "measurement_units_and_uncertainty",
+      "limits",
+      "review_ref"
+    ],
+    "reuse": [
+      "consumer_role",
+      "current_access_evidence",
+      "scene_and_method_version",
+      "assigned_task",
+      "actual_output_ref",
+      "evaluation",
+      "review_disposition",
+      "owner_interventions",
+      "limitations"
+    ]
+  },
+  "answer_classes": [
+    "OBSERVED_IN_CAPTURED_EVIDENCE",
+    "RECONSTRUCTION_DERIVED_ESTIMATE",
+    "VALIDATED_METRIC_RESULT",
+    "INSUFFICIENT_EVIDENCE"
+  ],
+  "proposed_job_states": [
+    "PREPARED",
+    "SUBMITTED",
+    "RUNNING",
+    "RETURNED",
+    "VERIFIED",
+    "FAILED",
+    "UNKNOWN_RECONCILE"
+  ],
+  "job_rules": [
+    "Use one accountable executor and durable intent before consequential submission.",
+    "Preserve actual submitted/result IDs; do not invent cross-chat dispatch.",
+    "A cancel request is distinct from confirmed termination.",
+    "An in-memory F2 hold is not durable cross-process reconciliation.",
+    "No retry solely because a response or tool receipt is missing."
+  ],
+  "acceptance_cases": [
+    {
+      "id": "A01",
+      "name": "Rights and retained originals",
+      "pass_requires": "Original images/cameras/models have explicit access, permitted use and redistribution scope; manifest refers to actual retrievable bytes.",
+      "failure_boundary": "Unknown rights or absent required source bytes block full evidence admission.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A02",
+      "name": "Pose and coordinate integrity",
+      "pass_requires": "Known control points project consistently; conversions record handedness, quaternion order, intrinsics/distortion and normalization.",
+      "failure_boundary": "Reject ambiguous pose convention; never silently reinterpret coordinates.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A03",
+      "name": "Scale gate",
+      "pass_requires": "Metric output has independent scale evidence, units, calibrated geometry and uncertainty.",
+      "failure_boundary": "Unknown scale produces no real-world distance claim.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A04",
+      "name": "Reproducible view bundle",
+      "pass_requires": "Actual render bytes and exact input/camera/renderer configuration retained; comparison uses justified tolerances.",
+      "failure_boundary": "An attractive screenshot without lineage is not accepted view evidence.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A05",
+      "name": "Supported question",
+      "pass_requires": "Question answer cites permitted original views and correctly scoped scene/region IDs.",
+      "failure_boundary": "Novel-view completion alone cannot establish an observed fact.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A06",
+      "name": "Unsupported question",
+      "pass_requires": "Missing/occluded evidence produces a justified insufficient-evidence result.",
+      "failure_boundary": "No invented hidden-side geometry, labels, identity or future motion.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A07",
+      "name": "Second real consumer",
+      "pass_requires": "Another actual authorized role retrieves the exact accepted scene/method, applies it and returns a reviewed result.",
+      "failure_boundary": "Fixture roles, a shared URL and copied narrative do not pass.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A08",
+      "name": "Appearance evaluation",
+      "pass_requires": "Held-out images/split/camera-estimation protocol fixed; report metrics and visual failure cases.",
+      "failure_boundary": "Near-duplicate leakage or changed denominators prevent fair comparison.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A09",
+      "name": "Derivative and codec compatibility",
+      "pass_requires": "Master and encoded derivative compared at fixed views; decoder/version/SH/axis/LOD preserved.",
+      "failure_boundary": "Do not label quantized data lossless or assume extension-wide compatibility.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A10",
+      "name": "Performance and cost",
+      "pass_requires": "Report device/runtime/resolution/count, cold load, p50/p95 frame times, CPU/GPU memory and actual time/cost.",
+      "failure_boundary": "No borrowing published fps, VRAM or cost as measured project results.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A11",
+      "name": "Access and revocation",
+      "pass_requires": "Enforce current record policy on originals, derived renders, cached contexts and secondary consumers.",
+      "failure_boundary": "Denied access returns no restricted scene or image bytes.",
+      "status": "NOT_RUN"
+    },
+    {
+      "id": "A12",
+      "name": "Interrupted-operation recovery",
+      "pass_requires": "Durable operation/receipt plus status reconciliation survives an interrupted return without duplicate effects.",
+      "failure_boundary": "Timeout or missing chat is not confirmed cancellation or permission to retry.",
+      "status": "NOT_RUN"
+    }
+  ],
+  "proposed_performance_target": {
+    "status": "EXAMPLE_REQUIRES_TASK_SPECIFIC_ADOPTION",
+    "fps_at_least": 30,
+    "p95_frame_time_ms_at_most": 33.3,
+    "conditions": "Named device, resolution, asset and renderer. Cold load separate; no measured pass asserted."
+  },
+  "extensions": [
+    {
+      "method": "2DGS",
+      "when": "surface reconstruction task",
+      "source": "S05"
+    },
+    {
+      "method": "Mip-Splatting",
+      "when": "sampling-rate artifacts",
+      "source": "S06"
+    },
+    {
+      "method": "GOF",
+      "when": "regularized surface extraction",
+      "source": "S09"
+    },
+    {
+      "method": "Wu 4DGS",
+      "when": "real deforming scene",
+      "source": "S07"
+    },
+    {
+      "method": "Dynamic 3D Gaussians",
+      "when": "persistent temporal tracking",
+      "source": "S08"
+    },
+    {
+      "method": "Compact-3DGS",
+      "when": "representation-level compression tradeoff",
+      "source": "S26"
+    }
+  ],
+  "team_boundary": "Head Chef coordinates; Codex executes only a scoped work order; specialists own findings; Grok evidence stays attributed; Worker5 reports accepted results; Claude librarian remains a proposed held role.",
+  "publication_rule": "Use existing website content path and verify actual URL/version; repository saving is not website deployment or team consumption.",
+  "next_action": "After current trusted-return review consumption, name one lawful scene and required runtime/access/compute scope; perform no new training from this reference."
+}
